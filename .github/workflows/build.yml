@@ -44,7 +44,7 @@ jobs:
         run: |
           set -euo pipefail
           # The set of patches: a release built with another set is built again.
-          export PATCHES=$(cat patches/*.patch mods.txt tools/*.py | sha256sum | cut -c1-16)
+          export PATCHES=$(cat patches/*.patch mods.txt tools/*.py .github/workflows/build.yml | sha256sum | cut -c1-16)
           echo "patches=$PATCHES" >> "$GITHUB_OUTPUT"
           gh api "repos/$UPSTREAM/releases?per_page=60" > upstream.json
           gh api "repos/$GITHUB_REPOSITORY/releases?per_page=100" --paginate > ours.json || echo '[]' > ours.json
