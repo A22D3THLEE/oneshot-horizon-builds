@@ -1,8 +1,8 @@
 diff --git a/crates/horizon-client/src/client_lib.rs b/crates/horizon-client/src/client_lib.rs
-index 5612892a9..25e8a53cc 100644
+index 8e6c9860e..a5149d04e 100644
 --- a/crates/horizon-client/src/client_lib.rs
 +++ b/crates/horizon-client/src/client_lib.rs
-@@ -98,6 +98,7 @@ pub mod net;
+@@ -99,6 +99,7 @@ pub mod net;
  pub mod nether_portal;
  pub mod no_resources;
  pub mod offline_name;
@@ -11,10 +11,10 @@ index 5612892a9..25e8a53cc 100644
  pub mod osk;
  pub mod patrol;
 diff --git a/crates/horizon-client/src/lan/conn.rs b/crates/horizon-client/src/lan/conn.rs
-index fb6750ace..0f803273f 100644
+index 7db181851..64a71a0e7 100644
 --- a/crates/horizon-client/src/lan/conn.rs
 +++ b/crates/horizon-client/src/lan/conn.rs
-@@ -790,7 +790,8 @@ fn serve_login(
+@@ -762,7 +762,8 @@ fn serve_login(
                  return Err(err);
              }
          },
@@ -24,7 +24,7 @@ index fb6750ace..0f803273f 100644
      };
      // verifyLoginAndFinishConnectionSetup: PlayerList.canPlayerLogin, then
      // duplicates and a full server.
-@@ -849,6 +850,33 @@ fn forward(
+@@ -821,6 +822,33 @@ fn forward(
      }
  }
  

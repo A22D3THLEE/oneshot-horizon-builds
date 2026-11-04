@@ -25,7 +25,6 @@ concurrency:
   cancel-in-progress: false
 env:
   UPSTREAM: horizon-rust/horizon
-  FEATURES: skin-share,vertex-packing
 
 jobs:
   plan:
@@ -156,14 +155,22 @@ jobs:
         run: |
           set -euo pipefail
           cd src
+          # Each patch is a feature, named after its file (0001-skin-share.patch: skin-share). One that no longer fits
+          # this release is left out and the build has the others; without the first (the reason for the build) there
+          # is no build for this release, and the launcher plays the official game.
+          features=""
           for p in ../oneshot/patches/*.patch; do
-            echo "Applying $p"
-            if ! git apply --whitespace=nowarn "$p"; then
-              echo "::notice::$(basename "$p") does not apply to ${{ matrix.tag }}; no Oneshot build for it"
-              echo "SKIP=1" >> "$GITHUB_ENV"
-              exit 0
+            name=$(basename "$p" .patch); feature=${name#*-}
+            if git apply --whitespace=nowarn "$p"; then
+              echo "Applied $name"; features="${features:+$features,}$feature"
+            elif [[ "$name" == 0001-* ]]; then
+              echo "::notice::$name does not apply to ${{ matrix.tag }}; no Oneshot build for it"
+              echo "SKIP=1" >> "$GITHUB_ENV"; exit 0
+            else
+              echo "::warning::$name does not apply to ${{ matrix.tag }}; built without $feature"
             fi
           done
+          echo "FEATURES=$features" >> "$GITHUB_ENV"
       - uses: dtolnay/rust-toolchain@stable
         if: env.SKIP != '1'
       - uses: Swatinem/rust-cache@v2
