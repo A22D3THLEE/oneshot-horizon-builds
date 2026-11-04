@@ -246,7 +246,7 @@ jobs:
             # Show the generated code at the failing line: it tells which mod's injection does not fit.
             loc=$(grep -m1 -oE 'crates[^ ]*game\.rs:[0-9]+' build-mods.txt || true)
             if [[ -n "$loc" ]]; then
-              f=${loc%%:*}; n=${loc##*:}; f=${f//\//}
+              f=$(echo "${loc%%:*}" | tr "\\\\" "/"); n=${loc##*:}
               sed -n "$((n-6)),$((n+2))p" "modded/$f" | while IFS= read -r line; do echo "::warning::code: ${line:0:300}"; done
             fi
             grep -E '(error|warning: unused)' build-mods.txt | grep -v '^warning: build failed' | head -15 | while IFS= read -r line; do echo "::warning::${line:0:900}"; done
