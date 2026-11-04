@@ -1,0 +1,59 @@
+<!doctype html>
+<html lang="ru">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>Приглашение в Horizon</title>
+<meta name="robots" content="noindex">
+<style>
+  :root { color-scheme: dark; --bg: #0a0a0a; --card: #131313; --line: #2a2a2a; --text: #f4f4f4; --muted: #969696; }
+  * { box-sizing: border-box; }
+  body { margin: 0; min-height: 100vh; display: grid; place-items: center; background: var(--bg); color: var(--text);
+         font: 16px/1.5 "Segoe UI", system-ui, sans-serif; padding: 16px; }
+  main { width: 100%; max-width: 520px; background: var(--card); border: 1px solid var(--line); border-radius: 18px; padding: 28px; }
+  h1 { font-size: 22px; margin: 0 0 8px; }
+  p { color: var(--muted); margin: 0 0 16px; }
+  code { display: block; background: #1c1c1c; border: 1px solid var(--line); border-radius: 10px; padding: 12px; font: 14px/1.4 Consolas, monospace;
+         word-break: break-all; color: var(--text); margin-bottom: 16px; }
+  .row { display: flex; gap: 10px; flex-wrap: wrap; }
+  a.button, button { flex: 1 1 200px; text-align: center; border-radius: 12px; padding: 12px 16px; font: 600 15px "Segoe UI", system-ui, sans-serif;
+         cursor: pointer; text-decoration: none; border: 1px solid var(--line); background: #1c1c1c; color: var(--text); }
+  a.primary { background: #e8e8e8; color: #0a0a0a; border-color: #e8e8e8; }
+  small { display: block; color: var(--muted); margin-top: 18px; }
+</style>
+</head>
+<body>
+<main>
+  <h1 id="title">Вас зовут в мир Horizon</h1>
+  <p id="lead">Сейчас откроется Oneshot Launcher и зайдёт в мир друга.</p>
+  <code id="code">—</code>
+  <div class="row">
+    <a class="button primary" id="open" href="#">Открыть в Oneshot Launcher</a>
+    <button id="copy" type="button">Скопировать код</button>
+  </div>
+  <small id="help">Ничего не открылось? Установите <a href="https://github.com/A22D3THLEE/oneshot-horizon-builds/releases" style="color:inherit">Oneshot Launcher</a>
+    или вставьте код в игре: главное меню → «Друзья».</small>
+</main>
+<script>
+  // The code is after '#': browsers never send that part to any server.
+  var raw = decodeURIComponent((location.hash || "").slice(1)).toUpperCase().replace(/[\s\-\/]/g, "").replace(/^FRIEND:/, "")
+    .replace(/O/g, "0").replace(/[IL]/g, "1");
+  var ok = /^[0-9A-HJKMNP-TV-Z]{20,}$/.test(raw);
+  var code = document.getElementById("code"), open = document.getElementById("open"), copy = document.getElementById("copy");
+  if (!ok) {
+    document.getElementById("title").textContent = "Неверная ссылка-приглашение";
+    document.getElementById("lead").textContent = "Попросите друга скопировать ссылку ещё раз: на вкладке «Играть» в Oneshot Launcher.";
+    code.style.display = "none"; open.style.display = "none"; copy.style.display = "none";
+  } else {
+    var link = "oneshot://join/" + raw;
+    code.textContent = raw;
+    open.href = link;
+    copy.onclick = function () {
+      (navigator.clipboard ? navigator.clipboard.writeText(raw) : Promise.reject()).then(function () { copy.textContent = "Скопировано"; },
+        function () { copy.textContent = "Выделите код выше"; });
+    };
+    setTimeout(function () { location.href = link; }, 400);
+  }
+</script>
+</body>
+</html>

@@ -1,0 +1,10 @@
+# Native mods in the "OneShot + mods" build: Horizon's registry ids, reviewed by the Horizon team.
+# Each can be turned off in the game: Options > Mods. One that no longer builds is left out of the build.
+fps_overlay        # FPS counter
+keystrokes         # pressed keys and clicks per second
+appleskin          # food and saturation on the hunger bar
+coords_hud         # coordinates on screen
+jade               # what the crosshair points at
+status_effect_hud  # effects and their time left
+armor_status       # armor durability
+toggle_sprint      # sprint and sneak toggles
