@@ -1,0 +1,159 @@
+name: Build Oneshot Horizon
+# Builds Horizon's Windows game with Oneshot's patches (patches/*.patch) for every new release of Horizon, the way
+# Horizon's own game-build.yml builds it (MSVC, the C runtime linked in, HORIZON_VERSION / HORIZON_NIGHTLY), and
+# publishes it as a release named after the official program it replaces:
+#   tag  oneshot-<first 16 hex of the SHA-256 of the official horizon-client.exe>
+#   assets  horizon-client-oneshot.zip (horizon-client.exe) and build.txt (base, sha256, features, horizon tag)
+# Oneshot Launcher computes that SHA-256 for an installed version and downloads the matching release.
+on:
+  schedule:
+    - cron: '23 */4 * * *'
+  workflow_dispatch:
+    inputs:
+      tag:
+        description: A Horizon release tag to build (empty = the newest nightly and the newest stable not built yet)
+        required: false
+        default: ''
+permissions:
+  contents: write
+concurrency:
+  group: oneshot-build
+  cancel-in-progress: false
+env:
+  UPSTREAM: horizon-rust/horizon
+  FEATURES: skin-share
+
+jobs:
+  plan:
+    runs-on: ubuntu-latest
+    timeout-minutes: 15
+    outputs:
+      matrix: ${{ steps.plan.outputs.matrix }}
+      any: ${{ steps.plan.outputs.any }}
+    steps:
+      - id: plan
+        env:
+          GH_TOKEN: ${{ github.token }}
+          WANT: ${{ inputs.tag }}
+        shell: bash
+        run: |
+          set -euo pipefail
+          gh api "repos/$UPSTREAM/releases?per_page=60" > upstream.json
+          gh api "repos/$GITHUB_REPOSITORY/releases?per_page=100" --paginate > ours.json || echo '[]' > ours.json
+          python3 - <<'PY'
+          import json, os, re
+          upstream = json.load(open('upstream.json'))
+          ours = {r['tag_name'] for r in json.load(open('ours.json'))}
+          built = {r.get('body', '') for r in json.load(open('ours.json'))}
+          want = os.environ.get('WANT', '').strip()
+          def windows(r):
+              return any(a['name'] == 'horizon-windows-x64.zip' for a in r.get('assets', []))
+          rel = [r for r in upstream if not r.get('draft') and windows(r)]
+          if want:
+              picks = [r for r in rel if r['tag_name'] == want]
+          else:
+              nightly = [r for r in rel if re.fullmatch(r'nightly-\d{4}-\d{2}-\d{2}', r['tag_name'])]
+              stable = [r for r in rel if re.fullmatch(r'v\d+\.\d+\.\d+', r['tag_name'])]
+              key = lambda r: r['published_at']
+              picks = sorted(nightly, key=key, reverse=True)[:1] + sorted(stable, key=key, reverse=True)[:1]
+          jobs = []
+          for r in picks:
+              tag = r['tag_name']
+              # Already built for this tag (the release notes name it): skip.
+              if any(f'horizon tag: {tag}\n' in (b or '') + '\n' for b in built) and not want:
+                  continue
+              commit = r.get('target_commitish', '')
+              if not re.fullmatch(r'[0-9a-f]{40}', commit):
+                  commit = tag
+              if tag.startswith('v'):
+                  version, nightly_label = tag[1:], ''
+              else:
+                  date = tag[len('nightly-'):]
+                  version, nightly_label = tag, f'{date} {commit[:7]}'
+              jobs.append({'tag': tag, 'commit': commit, 'version': version, 'nightly': nightly_label})
+          with open(os.environ['GITHUB_OUTPUT'], 'a') as out:
+              out.write('matrix=' + json.dumps({'include': jobs}) + '\n')
+              out.write('any=' + ('true' if jobs else 'false') + '\n')
+          print(json.dumps(jobs, indent=2))
+          PY
+
+  build:
+    needs: plan
+    if: needs.plan.outputs.any == 'true'
+    strategy:
+      fail-fast: false
+      max-parallel: 1
+      matrix: ${{ fromJSON(needs.plan.outputs.matrix) }}
+    name: build ${{ matrix.tag }}
+    runs-on: windows-latest
+    timeout-minutes: 150
+    env:
+      RUSTFLAGS: -C target-feature=+crt-static
+      HORIZON_VERSION: ${{ matrix.version }}
+      HORIZON_NIGHTLY: ${{ matrix.nightly }}
+      CARGO_TERM_COLOR: never
+    defaults:
+      run:
+        shell: bash
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          path: oneshot
+      - name: The official build of this release
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          set -euo pipefail
+          gh release download "${{ matrix.tag }}" -R "$UPSTREAM" -p horizon-windows-x64.zip -D official
+          (cd official && unzip -q horizon-windows-x64.zip)
+          exe=$(find official -name horizon-client.exe | head -1)
+          base=$(sha256sum "$exe" | cut -d' ' -f1)
+          echo "BASE=$base" >> "$GITHUB_ENV"
+          echo "Official horizon-client.exe: $base"
+      - name: Horizon's source at the release's commit
+        run: |
+          set -euo pipefail
+          git init -q src
+          cd src
+          git remote add origin "https://github.com/$UPSTREAM"
+          git fetch -q --depth 1 origin "${{ matrix.commit }}"
+          git checkout -q FETCH_HEAD
+          git log -1 --oneline
+      - name: Oneshot's patches
+        run: |
+          set -euo pipefail
+          cd src
+          for p in ../oneshot/patches/*.patch; do
+            echo "Applying $p"
+            git apply --whitespace=nowarn "$p"
+          done
+      - uses: dtolnay/rust-toolchain@stable
+      - uses: Swatinem/rust-cache@v2
+        with:
+          workspaces: src
+          shared-key: oneshot-windows
+      - name: Build the game
+        run: |
+          set -euo pipefail
+          cd src
+          cargo build --release --locked -p horizon-client --bin horizon-client
+          ./target/release/horizon-client.exe --version || true
+      - name: Publish
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          set -euo pipefail
+          out=$PWD/out
+          mkdir -p "$out"
+          cp src/target/release/horizon-client.exe "$out/horizon-client.exe"
+          # Horizon's MIT license goes with every copy of the program.
+          cp src/LICENSE "$out/LICENSE-HORIZON.txt"
+          sha=$(sha256sum "$out/horizon-client.exe" | cut -d' ' -f1)
+          printf 'base=%s\nsha256=%s\nfeatures=%s\nhorizon=%s\n' "$BASE" "$sha" "$FEATURES" "${{ matrix.tag }}" > "$out/build.txt"
+          (cd "$out" && 7z a -tzip -mx=9 horizon-client-oneshot.zip horizon-client.exe LICENSE-HORIZON.txt > /dev/null)
+          tag="oneshot-${BASE:0:16}"
+          notes=$(printf 'Oneshot build of Horizon %s (commit %s), features: %s\n\nhorizon tag: %s\nbase: %s\nsha256: %s\n' \
+            "${{ matrix.tag }}" "${{ matrix.commit }}" "$FEATURES" "${{ matrix.tag }}" "$BASE" "$sha")
+          gh release delete "$tag" -y --cleanup-tag 2>/dev/null || true
+          gh release create "$tag" -R "$GITHUB_REPOSITORY" --title "Horizon ${{ matrix.tag }} + Oneshot" --notes "$notes" \
+            "$out/horizon-client-oneshot.zip" "$out/build.txt"
