@@ -1,0 +1,57 @@
+diff --git a/crates/horizon-client/src/game/friends.rs b/crates/horizon-client/src/game/friends.rs
+index f2480ec76..8b6954aa6 100644
+--- a/crates/horizon-client/src/game/friends.rs
++++ b/crates/horizon-client/src/game/friends.rs
+@@ -49,6 +49,28 @@ fn stun_servers() -> Vec<String> {
+     }
+ }
+ 
++/// Oneshot Launcher: the invite code, for the launcher to offer as a link, in the file it names in
++/// `HORIZON_ONESHOT_INVITE` (written when a code is ready or changes, removed when sharing ends). Nothing without
++/// the variable.
++fn oneshot_invite(code: Option<&str>) {
++    let Some(path) = std::env::var_os("HORIZON_ONESHOT_INVITE").filter(|p| !p.is_empty()) else {
++        return;
++    };
++    let result = match code {
++        Some(code) => {
++            let temp = std::path::PathBuf::from(&path).with_extension("tmp");
++            std::fs::write(&temp, code).and_then(|()| std::fs::rename(&temp, &path))
++        }
++        None => match std::fs::remove_file(&path) {
++            Err(e) if e.kind() == std::io::ErrorKind::NotFound => Ok(()),
++            other => other,
++        },
++    };
++    if let Err(e) = result {
++        log::warn!("Horizon: the invite code for the launcher: {e}");
++    }
++}
++
+ fn env_flag(name: &str, default: bool) -> bool {
+     std::env::var(name).map_or(default, |v| v != "0")
+ }
+@@ -119,6 +141,7 @@ impl Game<'_> {
+             return;
+         };
+         sharing.host.stop();
++        oneshot_invite(None);
+         if sharing.opened_lan {
+             self.lan_close(true);
+         } else {
+@@ -133,6 +156,7 @@ impl Game<'_> {
+     pub(super) fn friends_lan_closed(&mut self) {
+         if let Some(mut sharing) = self.friends.take() {
+             sharing.host.stop();
++            oneshot_invite(None);
+         }
+     }
+ 
+@@ -153,6 +177,7 @@ impl Game<'_> {
+                         sharing.wrong = 0;
+                     }
+                     announce = sharing.code.is_none();
++                    oneshot_invite(Some(&code));
+                     sharing.code = Some(code);
+                 }
+                 HostEvent::WrongCode { count } => {
