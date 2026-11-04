@@ -161,7 +161,13 @@ jobs:
           features=""
           for p in ../oneshot/patches/*.patch; do
             name=$(basename "$p" .patch); feature=${name#*-}
-            if git apply --whitespace=nowarn "$p"; then
+            # Older releases have their own port of a patch in patches/stable/ (the code differs there).
+            ok=""
+            for candidate in "$p" "../oneshot/patches/stable/$name.patch"; do
+              [[ -f "$candidate" ]] || continue
+              if git apply --whitespace=nowarn "$candidate"; then ok=1; break; fi
+            done
+            if [[ -n "$ok" ]]; then
               echo "Applied $name"; features="${features:+$features,}$feature"
             elif [[ "$name" == 0001-* ]]; then
               echo "::notice::$name does not apply to ${{ matrix.tag }}; no Oneshot build for it"

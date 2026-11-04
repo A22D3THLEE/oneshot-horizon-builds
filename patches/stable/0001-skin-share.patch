@@ -1,0 +1,485 @@
+diff --git a/crates/horizon-client/src/game/remote.rs b/crates/horizon-client/src/game/remote.rs
+index 80bb2d7af..e05e1f9e5 100644
+--- a/crates/horizon-client/src/game/remote.rs
++++ b/crates/horizon-client/src/game/remote.rs
+@@ -182,6 +182,10 @@ pub(super) struct Remote {
+     tab_players: HashMap<u128, horizon_client::tab_list::TabPlayer>,
+     /// Each listed profile's unpacked `textures` property.
+     skin_textures: HashMap<u128, horizon_client::skins::Textures>,
++    /// Oneshot (skin_share.rs): each listed profile's own skin picture, as the property's value, and what each
++    /// value held once decoded (a skin, slim, a cape), by its key.
++    oneshot_skins: HashMap<u128, String>,
++    oneshot_pictures: HashMap<String, (bool, bool, bool)>,
+     /// The skin texture each profile's players show, once its download is ready.
+     skins: HashMap<u128, String>,
+     listed: std::collections::HashSet<u128>,
+@@ -493,6 +497,8 @@ impl Game<'_> {
+             players: HashMap::new(),
+             tab_players: HashMap::new(),
+             skin_textures: HashMap::new(),
++            oneshot_skins: HashMap::new(),
++            oneshot_pictures: HashMap::new(),
+             skins: HashMap::new(),
+             listed: Default::default(),
+             online_mode: false,
+@@ -2776,6 +2782,13 @@ impl Game<'_> {
+                                         skins::unpack(&t.value, signature, &skins::TEXTURE_URIS);
+                                     r.skin_textures.entry(e.uuid).or_insert(textures);
+                                 }
++                                if let Some(p) = e
++                                    .properties
++                                    .iter()
++                                    .find(|p| p.name == horizon_client::skin_share::PROPERTY)
++                                {
++                                    r.oneshot_skins.entry(e.uuid).or_insert(p.value.clone());
++                                }
+                             }
+                         }
+                     }
+@@ -2819,6 +2832,7 @@ impl Game<'_> {
+                         r.players.remove(&u);
+                         r.tab_players.remove(&u);
+                         r.skin_textures.remove(&u);
++                        r.oneshot_skins.remove(&u);
+                         r.listed.remove(&u);
+                     }
+                 }
+@@ -3141,6 +3155,46 @@ impl Game<'_> {
+                 resolved.push((uuid, skin));
+             }
+         }
++        // Oneshot (skin_share.rs): a player's own skin picture, where no signed skin of theirs shows. Decoded
++        // once; again only when the atlas dropped it.
++        let pictures: Vec<(u128, String)> = self
++            .remote
++            .as_ref()
++            .map(|r| r.oneshot_skins.iter().map(|(u, v)| (*u, v.clone())).collect())
++            .unwrap_or_default();
++        for (uuid, value) in pictures {
++            if resolved.iter().any(|(u, _)| *u == uuid) {
++                continue;
++            }
++            let key = horizon_client::skin_share::key(&value);
++            let skin_at = format!("oneshot/skin_{key}");
++            let known = self
++                .remote
++                .as_ref()
++                .and_then(|r| r.oneshot_pictures.get(&key).copied());
++            let info = match known {
++                Some(info) if !info.0 || self.show_skin(&skin_at) => info,
++                _ => {
++                    let read = horizon_client::skin_share::Pictures::read(&value);
++                    let info = read.as_ref().map_or((false, false, false), |p| {
++                        (p.skin.is_some(), p.slim, p.cape.is_some())
++                    });
++                    if let Some(rgba) = read.and_then(|p| p.skin) {
++                        self.store_skin(skin_at.clone(), rgba);
++                    }
++                    if let Some(r) = self.remote.as_mut() {
++                        r.oneshot_pictures.insert(key.clone(), info);
++                    }
++                    info
++                }
++            };
++            if info.0 {
++                if info.1 {
++                    slim.insert(uuid);
++                }
++                resolved.push((uuid, skin_at));
++            }
++        }
+         resolved.retain(|(_, skin)| !skin.starts_with("skins/") || self.again_skin(skin));
+         // PlayerInfo.getSkin: the downloaded skin and its model, else the
+         // profile's default skin (DefaultPlayerSkin.get), slim or wide.
+diff --git a/crates/horizon-client/src/lan/conn.rs b/crates/horizon-client/src/lan/conn.rs
+index 99b70e065..bfebe1aae 100644
+--- a/crates/horizon-client/src/lan/conn.rs
++++ b/crates/horizon-client/src/lan/conn.rs
+@@ -703,7 +703,8 @@ fn serve_login(
+                 return Err(err);
+             }
+         },
+-        None => (offline_uuid(&hello.name), Vec::new()),
++        // Offline mode: the player's own Mojang-signed skin, when their client has one (skin_share.rs).
++        None => (offline_uuid(&hello.name), ask_skin(&mut c)?),
+     };
+     // verifyLoginAndFinishConnectionSetup: PlayerList.canPlayerLogin, then
+     // duplicates and a full server.
+@@ -732,6 +733,32 @@ fn serve_login(
+     }
+ }
+ 
++/// Asks an offline-mode client for its signed `textures` property (login plugin channel `oneshot:skin`). A client
++/// without one, or one that doesn't know the channel, answers with nothing: the profile then has no properties,
++/// as before.
++fn ask_skin(c: &mut Connection) -> Result<Vec<login::Property>, String> {
++    const TRANSACTION: i32 = 2;
++    let e = |e: horizon_protocol::Error| e.to_string();
++    c.send(
++        &login::Clientbound::CustomQuery(login::CustomQuery {
++            transaction: TRANSACTION,
++            channel: horizon_client::skin_share::CHANNEL.into(),
++            data: Vec::new(),
++        })
++        .encode(),
++    )
++    .map_err(e)?;
++    let (id, payload) = c.recv().map_err(e)?;
++    match login::Serverbound::decode(id, &payload).map_err(e)? {
++        login::Serverbound::CustomQueryAnswer(answer) if answer.transaction == TRANSACTION => Ok(answer
++            .payload
++            .as_deref()
++            .map(horizon_client::skin_share::properties)
++            .unwrap_or_default()),
++        _ => Err("unexpected packet during login".into()),
++    }
++}
++
+ struct Parts {
+     uuid: u128,
+     name: String,
+diff --git a/crates/horizon-client/src/lib.rs b/crates/horizon-client/src/lib.rs
+index 545fc267d..31439ee8b 100644
+--- a/crates/horizon-client/src/lib.rs
++++ b/crates/horizon-client/src/lib.rs
+@@ -152,6 +152,7 @@ pub mod settings;
+ pub mod shader_pack_list;
+ pub mod shadows;
+ pub mod signs;
++pub mod skin_share;
+ pub mod skins;
+ pub mod sound_engine;
+ pub mod sound_events;
+diff --git a/crates/horizon-client/src/net.rs b/crates/horizon-client/src/net.rs
+index 93364ed91..6152777c2 100644
+--- a/crates/horizon-client/src/net.rs
++++ b/crates/horizon-client/src/net.rs
+@@ -461,10 +461,15 @@ fn run(
+                 c.enable_encryption(&secret);
+             }
+             login::Clientbound::CustomQuery(q) => {
++                // An offline-mode server asking for the launcher's signed skin (skin_share.rs); every other
++                // channel is unknown here, as in vanilla.
++                let payload = (q.channel == crate::skin_share::CHANNEL)
++                    .then(crate::skin_share::answer)
++                    .flatten();
+                 c.send(
+                     &login::Serverbound::CustomQueryAnswer(login::CustomQueryAnswer {
+                         transaction: q.transaction,
+-                        payload: None,
++                        payload,
+                     })
+                     .encode(),
+                 )
+diff --git a/crates/horizon-client/src/skin_share.rs b/crates/horizon-client/src/skin_share.rs
+new file mode 100644
+index 000000000..caa9cde09
+--- /dev/null
++++ b/crates/horizon-client/src/skin_share.rs
+@@ -0,0 +1,306 @@
++//! Skins in offline-mode multiplayer (Oneshot Launcher).
++//!
++//! An online-mode server gets each player's `textures` property, signed by Mojang, from the session service and
++//! sends it to every client, which shows the skin only when the signature checks out (`skins::lookup`). An
++//! offline-mode server (a LAN or friends world opened under an offline name) has no such property, so everyone
++//! sees everyone else with the default skin.
++//!
++//! Here an offline-mode server asks each joining client on the login plugin channel [`CHANNEL`] for what it has:
++//!
++//! - a `textures` property signed by Mojang (a launcher gets one for a skin from Mojang's session service or from
++//!   MineSkin). The server puts it in the player's profile as an online-mode server would, and every client, an
++//!   unchanged one too, checks Mojang's signature as usual.
++//! - the player's own skin and cape pictures, from the launcher's files ([`PROPERTY`]): a skin from any file and an
++//!   OptiFine-style cape, which Mojang never signs. The server lists them as one more, unsigned, profile property.
++//!   Clients with this change show them; others don't know the property and ignore it, as vanilla ignores any
++//!   property but `textures`.
++//!
++//! The answer: the signed property's value and signature on two lines (`-` for none), then a line
++//! `oneshot-skin <JSON>`. A server from before the pictures reads the first two lines only. A client without this
++//! answers with no payload (as vanilla answers any unknown channel), and joins as before. The owner of an
++//! offline-mode world, who doesn't log in, gets the same properties from [`own_properties`].
++//!
++//! The launcher names the files: `HORIZON_SIGNED_TEXTURES` (value line, signature line, base64 as Mojang gives
++//! them), `HORIZON_OFFLINE_SKIN` and `HORIZON_OFFLINE_SKIN_MODEL` (`classic` or `slim`), `HORIZON_OFFLINE_CAPE`.
++use horizon_protocol::packets::login;
++
++/// The login plugin channel the server asks on.
++pub const CHANNEL: &str = "oneshot:skin";
++/// The profile property with a player's own skin and cape pictures.
++pub const PROPERTY: &str = "oneshot:skin";
++
++/// The longest value and signature taken: Mojang's are about 400 and 684 characters.
++const MAX_VALUE: usize = 8192;
++const MAX_SIGNATURE: usize = 1024;
++/// A profile property's value is a protocol string of at most 32767 characters.
++const MAX_PICTURES: usize = 32_000;
++/// A skin PNG is at most 64x64, a cape at most 512x256 (HD capes); larger files are not sent.
++const MAX_SKIN_PNG: usize = 16 * 1024;
++const MAX_CAPE_PNG: usize = 8 * 1024;
++const PICTURES_LINE: &str = "oneshot-skin ";
++
++/// The client's answer: what the launcher gave, or `None` when it gave nothing.
++pub fn answer() -> Option<Vec<u8>> {
++    let signed = signed_from_launcher();
++    let pictures = pictures_from_launcher();
++    if signed.is_none() && pictures.is_none() {
++        return None;
++    }
++    let (value, signature) = signed.unwrap_or_else(|| ("-".into(), "-".into()));
++    let mut text = format!("{value}\n{signature}\n");
++    if let Some(pictures) = pictures {
++        text.push_str(PICTURES_LINE);
++        text.push_str(&pictures);
++        text.push('\n');
++    }
++    Some(text.into_bytes())
++}
++
++/// The server's reading of an answer: the `textures` property, when it is well formed (whether Mojang signed it
++/// is each client's check, as for any server's property), and the pictures property, when they are.
++pub fn properties(payload: &[u8]) -> Vec<login::Property> {
++    let Ok(text) = std::str::from_utf8(payload) else {
++        return Vec::new();
++    };
++    let mut out = Vec::new();
++    if let Some((value, signature)) = split(text) {
++        out.push(login::Property {
++            name: "textures".into(),
++            value: value.to_owned(),
++            signature: Some(signature.to_owned()),
++        });
++    }
++    if let Some(json) = text.lines().find_map(|l| l.trim().strip_prefix(PICTURES_LINE.trim_end()))
++        && let json = json.trim()
++        && Pictures::read(json).is_some()
++    {
++        out.push(login::Property {
++            name: PROPERTY.into(),
++            value: json.to_owned(),
++            signature: None,
++        });
++    }
++    out
++}
++
++/// The properties an offline-mode world's owner is listed with (they log in with none): the same the launcher
++/// gives a joining client.
++pub fn own_properties() -> Vec<login::Property> {
++    let mut answer = Vec::new();
++    if let Some((value, signature)) = signed_from_launcher() {
++        answer.push(login::Property {
++            name: "textures".into(),
++            value,
++            signature: Some(signature),
++        });
++    }
++    if let Some(json) = pictures_from_launcher() {
++        answer.push(login::Property {
++            name: PROPERTY.into(),
++            value: json,
++            signature: None,
++        });
++    }
++    answer
++}
++
++fn signed_from_launcher() -> Option<(String, String)> {
++    let path = std::env::var_os("HORIZON_SIGNED_TEXTURES").filter(|p| !p.is_empty())?;
++    let text = std::fs::read_to_string(&path)
++        .inspect_err(|e| eprintln!("Horizon: no signed skin ({}): {e}", std::path::Path::new(&path).display()))
++        .ok()?;
++    split(&text).map(|(v, s)| (v.to_owned(), s.to_owned()))
++}
++
++/// The launcher's skin and cape files as the [`PROPERTY`] value, when there is a skin or a cape small enough.
++fn pictures_from_launcher() -> Option<String> {
++    let read = |var: &str, max: usize| {
++        let path = std::env::var_os(var).filter(|p| !p.is_empty())?;
++        let bytes = std::fs::read(path).ok()?;
++        (bytes.len() <= max && png_size(&bytes).is_some()).then_some(bytes)
++    };
++    let skin = read("HORIZON_OFFLINE_SKIN", MAX_SKIN_PNG);
++    let cape = read("HORIZON_OFFLINE_CAPE", MAX_CAPE_PNG);
++    if skin.is_none() && cape.is_none() {
++        return None;
++    }
++    let slim = std::env::var("HORIZON_OFFLINE_SKIN_MODEL").is_ok_and(|m| m == "slim");
++    let mut json = serde_json::json!({ "v": 1, "model": if slim { "slim" } else { "classic" } });
++    if let Some(skin) = &skin {
++        json["skin"] = base64_encode(skin).into();
++    }
++    if let Some(cape) = &cape {
++        json["cape"] = base64_encode(cape).into();
++    }
++    let text = json.to_string();
++    (text.len() <= MAX_PICTURES).then_some(text)
++}
++
++/// A player's skin and cape pictures from a [`PROPERTY`] value: the skin as 64x64 RGBA laid out for the atlas
++/// (64x32 skins get the 64x64 layout), whether it is slim, and the cape laid out as a cape slot.
++pub struct Pictures {
++    pub skin: Option<Vec<u8>>,
++    pub slim: bool,
++    pub cape: Option<Vec<u8>>,
++}
++
++impl Pictures {
++    /// Only what decodes as it should: a skin of 64x64 or 64x32, a cape no larger than 512x256. Anything else in
++    /// the value is ignored; nothing in it can make the client allocate more than those pictures need.
++    pub fn read(value: &str) -> Option<Self> {
++        if value.len() > MAX_PICTURES {
++            return None;
++        }
++        let json: serde_json::Value = serde_json::from_str(value).ok()?;
++        let picture = |key: &str, max: usize| -> Option<(u32, u32, Vec<u8>)> {
++            let bytes = crate::skins::base64_decode(json.get(key)?.as_str()?)?;
++            let (w, h) = png_size(&bytes)?;
++            if bytes.len() > max || w == 0 || h == 0 || w > 512 || h > 256 {
++                return None;
++            }
++            crate::hud::decode_bytes(&bytes).ok()
++        };
++        let skin = picture("skin", MAX_SKIN_PNG)
++            .and_then(|(w, h, rgba)| crate::skins::process_legacy_skin(w, h, &rgba));
++        let cape = picture("cape", MAX_CAPE_PNG)
++            .and_then(|(w, h, rgba)| crate::skins::process_cape(w, h, &rgba));
++        if skin.is_none() && cape.is_none() {
++            return None;
++        }
++        let slim = json.get("model").and_then(|m| m.as_str()) == Some("slim");
++        Some(Self { skin, slim, cape })
++    }
++}
++
++/// A short stable name for a [`PROPERTY`] value, for its atlas slots.
++pub fn key(value: &str) -> String {
++    // FNV-1a, 64 bits.
++    let mut hash: u64 = 0xcbf2_9ce4_8422_2325;
++    for b in value.bytes() {
++        hash ^= u64::from(b);
++        hash = hash.wrapping_mul(0x0100_0000_01b3);
++    }
++    format!("{hash:016x}")
++}
++
++/// A PNG's width and height from its header, before anything is decoded.
++fn png_size(bytes: &[u8]) -> Option<(u32, u32)> {
++    const SIGNATURE: &[u8] = b"\x89PNG\r\n\x1a\n";
++    if bytes.len() < 24 || &bytes[..8] != SIGNATURE || &bytes[12..16] != b"IHDR" {
++        return None;
++    }
++    let be = |at: usize| u32::from_be_bytes([bytes[at], bytes[at + 1], bytes[at + 2], bytes[at + 3]]);
++    Some((be(16), be(20)))
++}
++
++fn base64_encode(bytes: &[u8]) -> String {
++    const TABLE: &[u8; 64] = b"ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz0123456789+/";
++    let mut out = String::with_capacity(bytes.len().div_ceil(3) * 4);
++    for chunk in bytes.chunks(3) {
++        let n = (u32::from(chunk[0]) << 16)
++            | (u32::from(*chunk.get(1).unwrap_or(&0)) << 8)
++            | u32::from(*chunk.get(2).unwrap_or(&0));
++        for i in 0..4 {
++            if i <= chunk.len() {
++                out.push(TABLE[(n >> (18 - 6 * i) & 63) as usize] as char);
++            } else {
++                out.push('=');
++            }
++        }
++    }
++    out
++}
++
++fn split(text: &str) -> Option<(&str, &str)> {
++    let mut lines = text.lines().map(str::trim).filter(|l| !l.is_empty());
++    let (value, signature) = (lines.next()?, lines.next()?);
++    let base64 = |s: &str| s.bytes().all(|b| b.is_ascii_alphanumeric() || b == b'+' || b == b'/' || b == b'=');
++    (value.len() <= MAX_VALUE && signature.len() <= MAX_SIGNATURE && base64(value) && base64(signature))
++        .then_some((value, signature))
++}
++
++#[cfg(test)]
++mod tests {
++    use super::*;
++
++    #[test]
++    fn reads_value_and_signature() {
++        let p = properties(b"ZXlKMA==\r\nc2ln\n");
++        assert_eq!(p.len(), 1);
++        assert_eq!(p[0].name, "textures");
++        assert_eq!(p[0].value, "ZXlKMA==");
++        assert_eq!(p[0].signature.as_deref(), Some("c2ln"));
++    }
++
++    #[test]
++    fn refuses_what_is_not_a_property() {
++        assert!(properties(b"only one line").is_empty());
++        assert!(properties(b"a b\nc").is_empty());
++        assert!(properties(&[0xff, 0xfe]).is_empty());
++        assert!(properties(format!("{}\nc2ln", "A".repeat(MAX_VALUE + 1)).as_bytes()).is_empty());
++        // No signed property: the placeholder is no property.
++        assert!(properties(b"-\n-\n").is_empty());
++    }
++
++    /// A PNG of this size, all one colour.
++    fn png(width: u32, height: u32) -> Vec<u8> {
++        let mut out = Vec::new();
++        let mut encoder = png::Encoder::new(&mut out, width, height);
++        encoder.set_color(png::ColorType::Rgba);
++        encoder.set_depth(png::BitDepth::Eight);
++        let mut writer = encoder.write_header().unwrap();
++        writer
++            .write_image_data(&vec![200u8; (width * height * 4) as usize])
++            .unwrap();
++        drop(writer);
++        out
++    }
++
++    #[test]
++    fn pictures_go_from_a_client_to_every_client() {
++        let json = serde_json::json!({
++            "v": 1,
++            "model": "slim",
++            "skin": base64_encode(&png(64, 64)),
++            "cape": base64_encode(&png(64, 32)),
++        })
++        .to_string();
++        let answer = format!("-\n-\n{PICTURES_LINE}{json}\n");
++        let p = properties(answer.as_bytes());
++        assert_eq!(p.len(), 1);
++        assert_eq!(p[0].name, PROPERTY);
++        assert!(p[0].signature.is_none());
++        let pictures = Pictures::read(&p[0].value).unwrap();
++        assert!(pictures.slim);
++        assert_eq!(pictures.skin.unwrap().len(), 64 * 64 * 4);
++        assert_eq!(pictures.cape.unwrap().len(), 64 * 64 * 4);
++    }
++
++    #[test]
++    fn a_server_from_before_reads_only_the_signed_lines() {
++        // What an older server's `split` sees of a new answer with a signed property.
++        let answer = format!("ZXlKMA==\nc2ln\n{PICTURES_LINE}{{\"v\":1}}\n");
++        assert_eq!(split(&answer), Some(("ZXlKMA==", "c2ln")));
++        // And of one without: nothing, as from a client without this.
++        assert_eq!(split(&format!("-\n-\n{PICTURES_LINE}{{\"v\":1}}\n")), None);
++    }
++
++    #[test]
++    fn refuses_pictures_that_are_too_large_or_not_skins() {
++        let skin = |png: Vec<u8>| serde_json::json!({ "skin": base64_encode(&png) }).to_string();
++        assert!(Pictures::read(&skin(png(64, 64))).is_some());
++        assert!(Pictures::read(&skin(png(128, 128))).is_none());
++        assert!(Pictures::read(&skin(png(1024, 1024))).is_none());
++        assert!(Pictures::read(r#"{"skin":"not base64!"}"#).is_none());
++        assert!(Pictures::read("not json").is_none());
++        assert!(Pictures::read(&"x".repeat(MAX_PICTURES + 1)).is_none());
++    }
++
++    #[test]
++    fn base64_round_trips() {
++        for n in 0..10 {
++            let bytes: Vec<u8> = (0..n).map(|i| (i * 37) as u8).collect();
++            assert_eq!(crate::skins::base64_decode(&base64_encode(&bytes)).unwrap(), bytes);
++        }
++    }
++}
