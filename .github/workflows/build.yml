@@ -58,28 +58,37 @@ jobs:
           def windows(r):
               return any(a['name'] == 'horizon-windows-x64.zip' for a in r.get('assets', []))
           rel = [r for r in upstream if not r.get('draft') and windows(r)]
+          def source_commit(r):
+              # "Source: commit <sha>" in the notes is the commit the release was built from; the rolling `nightly`
+              # release is rebuilt in place, so its target_commitish can be stale.
+              m = re.search(r'Source: commit ([0-9a-f]{40})', r.get('body') or '')
+              if m:
+                  return m.group(1)
+              c = r.get('target_commitish', '')
+              return c if re.fullmatch(r'[0-9a-f]{40}', c) else r['tag_name']
           if want:
               picks = [r for r in rel if r['tag_name'] == want]
           else:
-              nightly = [r for r in rel if re.fullmatch(r'nightly-\d{4}-\d{2}-\d{2}', r['tag_name'])]
+              # The launchers install the rolling `nightly` release (a day can have several nightlies; only the first
+              # gets a dated tag), so the newest of it and the dated ones is built.
+              nightly = [r for r in rel if r['tag_name'] == 'nightly' or re.fullmatch(r'nightly-\d{4}-\d{2}-\d{2}', r['tag_name'])]
               stable = [r for r in rel if re.fullmatch(r'v\d+\.\d+\.\d+', r['tag_name'])]
               key = lambda r: r['published_at']
               picks = sorted(nightly, key=key, reverse=True)[:1] + sorted(stable, key=key, reverse=True)[:1]
           jobs = []
           for r in picks:
               tag = r['tag_name']
-              # Already built for this tag with these patches (the release notes name both): skip.
+              commit = source_commit(r)
+              # Already built from this commit with these patches (the release notes name both): skip.
               patches = os.environ['PATCHES']
-              if not want and any(f'horizon tag: {tag}\n' in (b or '') and f'patches: {patches}' in (b or '') for b in built):
+              if not want and any(f'horizon commit: {commit}\n' in (b or '') and f'patches: {patches}' in (b or '') for b in built):
                   continue
-              commit = r.get('target_commitish', '')
-              if not re.fullmatch(r'[0-9a-f]{40}', commit):
-                  commit = tag
               if tag.startswith('v'):
                   version, nightly_label = tag[1:], ''
               else:
-                  date = tag[len('nightly-'):]
-                  version, nightly_label = tag, f'{date} {commit[:7]}'
+                  m = re.search(r'(\d{4}-\d{2}-\d{2})', r.get('name') or '') or re.search(r'(\d{4}-\d{2}-\d{2})', tag)
+                  date = m.group(1)
+                  version, nightly_label = f'nightly-{date}', f'{date} {commit[:7]}'
               jobs.append({'tag': tag, 'commit': commit, 'version': version, 'nightly': nightly_label})
           with open(os.environ['GITHUB_OUTPUT'], 'a') as out:
               out.write('matrix=' + json.dumps({'include': jobs}) + '\n')
@@ -122,7 +131,16 @@ jobs:
           base=$(sha256sum "$exe" | cut -d' ' -f1)
           echo "BASE=$base" >> "$GITHUB_ENV"
           echo "Official horizon-client.exe: $base"
+          # The rolling nightly may have been rebuilt since the plan: a build must come from the official program's commit.
+          version=$("$exe" --version 2>&1 | head -1 || true)
+          echo "Official version: $version"
+          commit="${{ matrix.commit }}"
+          if [[ -n "${{ matrix.nightly }}" && "$version" != *"${commit:0:7}"* ]]; then
+            echo "::notice::${{ matrix.tag }} is now $version, not ${commit:0:7}; the next run builds it"
+            echo "SKIP=1" >> "$GITHUB_ENV"
+          fi
       - name: Horizon's source at the release's commit
+        if: env.SKIP != '1'
         run: |
           set -euo pipefail
           git init -q src
@@ -134,7 +152,7 @@ jobs:
       # A release older than the patches (its code differs where they change it) gets no build: the launcher plays
       # the official game for it, so that is no failure.
       - name: Oneshot's patches
-        id: patches
+        if: env.SKIP != '1'
         run: |
           set -euo pipefail
           cd src
@@ -142,26 +160,26 @@ jobs:
             echo "Applying $p"
             if ! git apply --whitespace=nowarn "$p"; then
               echo "::notice::$(basename "$p") does not apply to ${{ matrix.tag }}; no Oneshot build for it"
-              echo "skip=true" >> "$GITHUB_OUTPUT"
+              echo "SKIP=1" >> "$GITHUB_ENV"
               exit 0
             fi
           done
       - uses: dtolnay/rust-toolchain@stable
-        if: steps.patches.outputs.skip != 'true'
+        if: env.SKIP != '1'
       - uses: Swatinem/rust-cache@v2
-        if: steps.patches.outputs.skip != 'true'
+        if: env.SKIP != '1'
         with:
           workspaces: src
           shared-key: oneshot-windows
       - name: Build the game
-        if: steps.patches.outputs.skip != 'true'
+        if: env.SKIP != '1'
         run: |
           set -euo pipefail
           cd src
           cargo build --release --locked -p horizon-client --bin horizon-client
           ./target/release/horizon-client.exe --version || true
       - name: Publish
-        if: steps.patches.outputs.skip != 'true'
+        if: env.SKIP != '1'
         env:
           GH_TOKEN: ${{ github.token }}
         run: |
@@ -172,11 +190,11 @@ jobs:
           # Horizon's MIT license goes with every copy of the program.
           cp src/LICENSE "$out/LICENSE-HORIZON.txt"
           sha=$(sha256sum "$out/horizon-client.exe" | cut -d' ' -f1)
-          printf 'base=%s\nsha256=%s\nfeatures=%s\nhorizon=%s\n' "$BASE" "$sha" "$FEATURES" "${{ matrix.tag }}" > "$out/build.txt"
+          printf 'base=%s\nsha256=%s\nfeatures=%s\nhorizon=%s\n' "$BASE" "$sha" "$FEATURES" "${{ matrix.version }}" > "$out/build.txt"
           (cd "$out" && 7z a -tzip -mx=9 horizon-client-oneshot.zip horizon-client.exe LICENSE-HORIZON.txt > /dev/null)
           tag="oneshot-${BASE:0:16}"
-          notes=$(printf 'Oneshot build of Horizon %s (commit %s), features: %s\n\nhorizon tag: %s\nbase: %s\nsha256: %s\npatches: %s\n' \
-            "${{ matrix.tag }}" "${{ matrix.commit }}" "$FEATURES" "${{ matrix.tag }}" "$BASE" "$sha" "${{ needs.plan.outputs.patches }}")
+          notes=$(printf 'Oneshot build of Horizon %s (commit %s), features: %s\n\nhorizon tag: %s\nhorizon commit: %s\nbase: %s\nsha256: %s\npatches: %s\n' \
+            "${{ matrix.version }}" "${{ matrix.commit }}" "$FEATURES" "${{ matrix.tag }}" "${{ matrix.commit }}" "$BASE" "$sha" "${{ needs.plan.outputs.patches }}")
           gh release delete "$tag" -R "$GITHUB_REPOSITORY" -y --cleanup-tag 2>/dev/null || true
-          gh release create "$tag" -R "$GITHUB_REPOSITORY" --title "Horizon ${{ matrix.tag }} + Oneshot" --notes "$notes" \
+          gh release create "$tag" -R "$GITHUB_REPOSITORY" --title "Horizon ${{ matrix.version }} + Oneshot" --notes "$notes" \
             "$out/horizon-client-oneshot.zip" "$out/build.txt"
