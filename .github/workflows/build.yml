@@ -11,7 +11,7 @@ on:
   # A change to the patches rebuilds the newest releases with them.
   push:
     branches: [main]
-    paths: ['patches/**', 'mods.txt', 'tools/**', '.github/workflows/build.yml']
+    paths: ['patches/**', '.github/workflows/build.yml']
   workflow_dispatch:
     inputs:
       tag:
@@ -44,7 +44,7 @@ jobs:
         run: |
           set -euo pipefail
           # The set of patches: a release built with another set is built again.
-          export PATCHES=$(cat patches/*.patch mods.txt tools/*.py .github/workflows/build.yml | sha256sum | cut -c1-16)
+          export PATCHES=$(cat patches/*.patch .github/workflows/build.yml | sha256sum | cut -c1-16)
           echo "patches=$PATCHES" >> "$GITHUB_OUTPUT"
           gh api "repos/$UPSTREAM/releases?per_page=60" > upstream.json
           gh api "repos/$GITHUB_REPOSITORY/releases?per_page=100" --paginate > ours.json || echo '[]' > ours.json
@@ -204,65 +204,4 @@ jobs:
             "${{ matrix.version }}" "${{ matrix.commit }}" "$FEATURES" "${{ matrix.tag }}" "${{ matrix.commit }}" "$BASE" "$sha" "${{ needs.plan.outputs.patches }}")
           gh release delete "$tag" -R "$GITHUB_REPOSITORY" -y --cleanup-tag 2>/dev/null || true
           gh release create "$tag" -R "$GITHUB_REPOSITORY" --title "Horizon ${{ matrix.version }} + Oneshot" --notes "$notes" \
-            "$out/horizon-client-oneshot.zip" "$out/build.txt"
-      # OneShot + mods: the same game with popular native mods from Horizon's registry (mods.txt) built in, so
-      # players get them without building the game themselves. Mods are added one at a time and each that no longer
-      # fits this Horizon is left out; when the whole set fails, there is no such build and the plain one stands.
-      - name: OneShot + mods
-        if: env.SKIP != '1'
-        continue-on-error: true
-        env:
-          GH_TOKEN: ${{ github.token }}
-        run: |
-          set -euo pipefail
-          api=$(grep -oE 'NATIVE_HOOKS_API: u32 = [0-9]+' src/crates/horizon-client/src/game/native_hooks.rs | grep -oE '[0-9]+$')
-          echo "Native hooks API: $api"
-          curl -fsSL https://horizon-rust.github.io/horizon-mods/index.json -o index.json
-          python oneshot/tools/pick_mods.py index.json oneshot/mods.txt "$api" "${{ matrix.commit }}" mods > picked.txt
-          cat picked.txt
-          [[ -s picked.txt ]] || { echo "::warning::no mods to build"; exit 0; }
-          # horizon-mixins stages no symbolic links (the source has a few, such as CLAUDE.md): they aren't code.
-          find src -path src/target -prune -o -type l -print -exec rm -f {} +
-          rev=$(head -1 picked.txt | cut -d' ' -f3)
-          cargo install --git https://github.com/horizon-rust/horizon-mixins --rev "$rev" --locked horizon-mixins-cli --root mixins-tool
-          tool=$PWD/mixins-tool/bin/horizon-mixins
-          taken=()
-          while read -r id version _; do
-            rm -rf try && mkdir try
-            for k in "${taken[@]}" "$id"; do cp -r "mods/$k" try/; done
-            if "$tool" plan --workspace src --mods try --out plan.json > /dev/null 2> plan-error.txt; then
-              taken+=("$id"); echo "$id $version" >> taken.txt
-            else
-              echo "::warning::$id left out: $(head -c 400 plan-error.txt | tr '\n' ' ')"
-            fi
-          done < picked.txt
-          [[ ${#taken[@]} -gt 0 ]] || { echo "::warning::no mod fits this Horizon"; exit 0; }
-          rm -rf final && mkdir final
-          for k in "${taken[@]}"; do cp -r "mods/$k" final/; done
-          "$tool" apply --workspace src --mods final --out modded
-          # The compiler's errors go to the run's annotations too: they are what to fix when a mod stops building.
-          if ! (cd modded && CARGO_TARGET_DIR=../target-mods cargo build --release --locked -p horizon-client --bin horizon-client --message-format short 2> ../build-mods.txt); then
-            cat build-mods.txt | tail -40
-            # Show the generated code at the failing line: it tells which mod's injection does not fit.
-            loc=$(grep -m1 -oE 'crates[^ ]*game\.rs:[0-9]+' build-mods.txt || true)
-            if [[ -n "$loc" ]]; then
-              f=$(echo "${loc%%:*}" | tr "\\\\" "/"); n=${loc##*:}
-              sed -n "$((n-6)),$((n+2))p" "modded/$f" | while IFS= read -r line; do echo "::warning::code: ${line:0:300}"; done
-            fi
-            grep -E '(error|warning: unused)' build-mods.txt | grep -v '^warning: build failed' | head -15 | while IFS= read -r line; do echo "::warning::${line:0:900}"; done
-            exit 1
-          fi
-          out=$PWD/out-mods
-          mkdir -p "$out"
-          cp target-mods/release/horizon-client.exe "$out/horizon-client.exe"
-          cp src/LICENSE "$out/LICENSE-HORIZON.txt"
-          sha=$(sha256sum "$out/horizon-client.exe" | cut -d' ' -f1)
-          mods=$(paste -sd';' taken.txt)
-          printf 'base=%s\nsha256=%s\nfeatures=%s,mods\nhorizon=%s\nmods=%s\n' "$BASE" "$sha" "$FEATURES" "${{ matrix.version }}" "$mods" > "$out/build.txt"
-          (cd "$out" && 7z a -tzip -mx=9 horizon-client-oneshot.zip horizon-client.exe LICENSE-HORIZON.txt > /dev/null)
-          tag="oneshot-mods-${BASE:0:16}"
-          notes=$(printf 'Oneshot build of Horizon %s (commit %s) with native mods from the Horizon registry: %s\n\nhorizon tag: %s\nhorizon commit: %s\nbase: %s\nsha256: %s\npatches: %s\n' \
-            "${{ matrix.version }}" "${{ matrix.commit }}" "$mods" "${{ matrix.tag }}" "${{ matrix.commit }}" "$BASE" "$sha" "${{ needs.plan.outputs.patches }}")
-          gh release delete "$tag" -R "$GITHUB_REPOSITORY" -y --cleanup-tag 2>/dev/null || true
-          gh release create "$tag" -R "$GITHUB_REPOSITORY" --title "Horizon ${{ matrix.version }} + Oneshot + mods" --notes "$notes" \
             "$out/horizon-client-oneshot.zip" "$out/build.txt"
