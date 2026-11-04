@@ -21,7 +21,7 @@ concurrency:
   cancel-in-progress: false
 env:
   UPSTREAM: horizon-rust/horizon
-  FEATURES: skin-share
+  FEATURES: skin-share,vertex-packing
 
 jobs:
   plan:

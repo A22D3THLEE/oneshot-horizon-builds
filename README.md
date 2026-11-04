@@ -6,6 +6,7 @@ the small changes Oneshot Launcher needs, for every new Horizon release, by GitH
 | Patch | What it does |
 | --- | --- |
 | `patches/0001-skin-share.patch` | Skins in offline-mode multiplayer (LAN, play with friends): the host asks each joining player for their Mojang-signed skin (login plugin channel `oneshot:skin`) and shows it to everyone, as an online-mode server would. Every client still checks Mojang's signature. A client without the patch answers "unknown channel" and joins as before. |
+| `patches/0002-vertex-packing.patch` | Terrain vertices take 20 bytes instead of 24 (a power-of-two position step per vertex, decoded with `ldexp` in `terrain.wgsl`): 17% less vertex memory, 170-270 MB less RAM at render distance 32 on an RX 5700 XT, the same picture (render tests and screenshots against the official build). Only the client draws differently; multiplayer is unaffected. |
 
 ## How a build is made
 
