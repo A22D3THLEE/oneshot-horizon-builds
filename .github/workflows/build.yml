@@ -96,6 +96,8 @@ jobs:
       run:
         shell: bash
     steps:
+      # Windows runners turn LF into CRLF on checkout, which would keep the patches from applying.
+      - run: git config --global core.autocrlf false
       - uses: actions/checkout@v4
         with:
           path: oneshot
