@@ -221,6 +221,8 @@ jobs:
           python oneshot/tools/pick_mods.py index.json oneshot/mods.txt "$api" "${{ matrix.commit }}" mods > picked.txt
           cat picked.txt
           [[ -s picked.txt ]] || { echo "::warning::no mods to build"; exit 0; }
+          # horizon-mixins stages no symbolic links (the source has a few, such as CLAUDE.md): they aren't code.
+          find src -path src/target -prune -o -type l -print -exec rm -f {} +
           rev=$(head -1 picked.txt | cut -d' ' -f3)
           cargo install --git https://github.com/horizon-rust/horizon-mixins --rev "$rev" --locked horizon-mixins-cli --root mixins-tool
           tool=$PWD/mixins-tool/bin/horizon-mixins
