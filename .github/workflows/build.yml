@@ -8,6 +8,10 @@ name: Build Oneshot Horizon
 on:
   schedule:
     - cron: '23 */4 * * *'
+  # A change to the patches rebuilds the newest releases with them.
+  push:
+    branches: [main]
+    paths: ['patches/**', '.github/workflows/build.yml']
   workflow_dispatch:
     inputs:
       tag:
@@ -30,7 +34,9 @@ jobs:
     outputs:
       matrix: ${{ steps.plan.outputs.matrix }}
       any: ${{ steps.plan.outputs.any }}
+      patches: ${{ steps.plan.outputs.patches }}
     steps:
+      - uses: actions/checkout@v4
       - id: plan
         env:
           GH_TOKEN: ${{ github.token }}
@@ -38,6 +44,9 @@ jobs:
         shell: bash
         run: |
           set -euo pipefail
+          # The set of patches: a release built with another set is built again.
+          export PATCHES=$(cat patches/*.patch | sha256sum | cut -c1-16)
+          echo "patches=$PATCHES" >> "$GITHUB_OUTPUT"
           gh api "repos/$UPSTREAM/releases?per_page=60" > upstream.json
           gh api "repos/$GITHUB_REPOSITORY/releases?per_page=100" --paginate > ours.json || echo '[]' > ours.json
           python3 - <<'PY'
@@ -59,8 +68,9 @@ jobs:
           jobs = []
           for r in picks:
               tag = r['tag_name']
-              # Already built for this tag (the release notes name it): skip.
-              if any(f'horizon tag: {tag}\n' in (b or '') + '\n' for b in built) and not want:
+              # Already built for this tag with these patches (the release notes name both): skip.
+              patches = os.environ['PATCHES']
+              if not want and any(f'horizon tag: {tag}\n' in (b or '') and f'patches: {patches}' in (b or '') for b in built):
                   continue
               commit = r.get('target_commitish', '')
               if not re.fullmatch(r'[0-9a-f]{40}', commit):
@@ -154,8 +164,8 @@ jobs:
           printf 'base=%s\nsha256=%s\nfeatures=%s\nhorizon=%s\n' "$BASE" "$sha" "$FEATURES" "${{ matrix.tag }}" > "$out/build.txt"
           (cd "$out" && 7z a -tzip -mx=9 horizon-client-oneshot.zip horizon-client.exe LICENSE-HORIZON.txt > /dev/null)
           tag="oneshot-${BASE:0:16}"
-          notes=$(printf 'Oneshot build of Horizon %s (commit %s), features: %s\n\nhorizon tag: %s\nbase: %s\nsha256: %s\n' \
-            "${{ matrix.tag }}" "${{ matrix.commit }}" "$FEATURES" "${{ matrix.tag }}" "$BASE" "$sha")
+          notes=$(printf 'Oneshot build of Horizon %s (commit %s), features: %s\n\nhorizon tag: %s\nbase: %s\nsha256: %s\npatches: %s\n' \
+            "${{ matrix.tag }}" "${{ matrix.commit }}" "$FEATURES" "${{ matrix.tag }}" "$BASE" "$sha" "${{ needs.plan.outputs.patches }}")
           gh release delete "$tag" -y --cleanup-tag 2>/dev/null || true
           gh release create "$tag" -R "$GITHUB_REPOSITORY" --title "Horizon ${{ matrix.tag }} + Oneshot" --notes "$notes" \
             "$out/horizon-client-oneshot.zip" "$out/build.txt"
