@@ -189,7 +189,12 @@ jobs:
         run: |
           set -euo pipefail
           cd src
-          cargo build --release --locked -p horizon-client --bin horizon-client
+          # The compiler's errors go to the run's annotations too: they are what to fix when a patch stops fitting.
+          if ! cargo build --release --locked -p horizon-client --bin horizon-client --message-format short 2> ../build-game.txt; then
+            tail -30 ../build-game.txt
+            grep -E '^(error|warning: unused)|error(\[E[0-9]+\])?:' ../build-game.txt | head -15 | while IFS= read -r line; do echo "::warning::${line:0:900}"; done
+            exit 1
+          fi
           ./target/release/horizon-client.exe --version || true
       - name: Publish
         if: env.SKIP != '1'
