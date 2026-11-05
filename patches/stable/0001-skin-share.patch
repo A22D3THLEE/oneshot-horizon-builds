@@ -92,7 +92,7 @@ index 80bb2d7af..e05e1f9e5 100644
          // PlayerInfo.getSkin: the downloaded skin and its model, else the
          // profile's default skin (DefaultPlayerSkin.get), slim or wide.
 diff --git a/crates/horizon-client/src/lan/conn.rs b/crates/horizon-client/src/lan/conn.rs
-index 99b70e065..bfebe1aae 100644
+index 99b70e065..fac790c37 100644
 --- a/crates/horizon-client/src/lan/conn.rs
 +++ b/crates/horizon-client/src/lan/conn.rs
 @@ -703,7 +703,8 @@ fn serve_login(
@@ -118,7 +118,7 @@ index 99b70e065..bfebe1aae 100644
 +    c.send(
 +        &login::Clientbound::CustomQuery(login::CustomQuery {
 +            transaction: TRANSACTION,
-+            channel: horizon_client::skin_share::CHANNEL.into(),
++            channel: crate::skin_share::CHANNEL.into(),
 +            data: Vec::new(),
 +        })
 +        .encode(),
@@ -129,7 +129,7 @@ index 99b70e065..bfebe1aae 100644
 +        login::Serverbound::CustomQueryAnswer(answer) if answer.transaction == TRANSACTION => Ok(answer
 +            .payload
 +            .as_deref()
-+            .map(horizon_client::skin_share::properties)
++            .map(crate::skin_share::properties)
 +            .unwrap_or_default()),
 +        _ => Err("unexpected packet during login".into()),
 +    }
@@ -173,7 +173,7 @@ index 93364ed91..6152777c2 100644
                  )
 diff --git a/crates/horizon-client/src/skin_share.rs b/crates/horizon-client/src/skin_share.rs
 new file mode 100644
-index 000000000..caa9cde09
+index 000000000..1fef105b3
 --- /dev/null
 +++ b/crates/horizon-client/src/skin_share.rs
 @@ -0,0 +1,306 @@
@@ -341,8 +341,8 @@ index 000000000..caa9cde09
 +        };
 +        let skin = picture("skin", MAX_SKIN_PNG)
 +            .and_then(|(w, h, rgba)| crate::skins::process_legacy_skin(w, h, &rgba));
-+        let cape = picture("cape", MAX_CAPE_PNG)
-+            .and_then(|(w, h, rgba)| crate::skins::process_cape(w, h, &rgba));
++        // This release draws no capes on other players (no process_cape, no cape model): the picture is not read.
++        let cape: Option<Vec<u8>> = None;
 +        if skin.is_none() && cape.is_none() {
 +            return None;
 +        }
@@ -452,7 +452,7 @@ index 000000000..caa9cde09
 +        let pictures = Pictures::read(&p[0].value).unwrap();
 +        assert!(pictures.slim);
 +        assert_eq!(pictures.skin.unwrap().len(), 64 * 64 * 4);
-+        assert_eq!(pictures.cape.unwrap().len(), 64 * 64 * 4);
++        assert!(pictures.cape.is_none()); // this release has no capes
 +    }
 +
 +    #[test]
