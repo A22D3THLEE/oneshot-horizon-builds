@@ -1,5 +1,9 @@
 # Oneshot builds of Horizon
 
+## Download the launcher
+
+**[OneshotLauncher.exe](https://github.com/A22D3THLEE/oneshot-horizon-builds/releases/latest)**: pick the newest release named `launcher-v...` (Oneshot Launcher), download `OneshotLauncher.exe` and run it. The launcher updates itself and installs Horizon and its Oneshot builds. Windows may show a SmartScreen warning: the file is not signed yet.
+
 [Horizon](https://github.com/horizon-rust/horizon) (Minecraft Java 26.3 rewritten in Rust) built for Windows with
 the small changes Oneshot Launcher needs, for every new Horizon release, by GitHub Actions.
 
