@@ -1,0 +1,214 @@
+diff --git a/crates/horizon-client-render/src/audio.rs b/crates/horizon-client-render/src/audio.rs
+index 9f2cd3944..ac0c7082c 100644
+--- a/crates/horizon-client-render/src/audio.rs
++++ b/crates/horizon-client-render/src/audio.rs
+@@ -259,6 +259,11 @@ pub struct Audio {
+     /// Ticks since the output devices were last looked at (`DeviceTracker.tick`).
+     #[cfg(feature = "audio")]
+     device_ticks: u32,
++    /// The once-a-second look at the default output and the cards runs on a thread of its
++    /// own (on Windows it takes about 20 ms, a stutter in the game's frame); its answer
++    /// lands here.
++    #[cfg(feature = "audio")]
++    probe: Option<std::sync::Arc<std::sync::Mutex<Option<(Option<String>, Option<String>)>>>>,
+ }
+ fn decode(path: &Path) -> Option<(Vec<f32>, u32)> {
+     use symphonia::core::{
+@@ -979,6 +984,8 @@ impl Audio {
+             devices_seen: devices,
+             #[cfg(feature = "audio")]
+             device_ticks: 0,
++            #[cfg(feature = "audio")]
++            probe: None,
+         }
+     }
+     #[cfg(not(feature = "audio"))]
+@@ -1139,6 +1146,8 @@ impl Audio {
+             devices_seen: self.devices_seen.clone(),
+             #[cfg(feature = "audio")]
+             device_ticks: 0,
++            #[cfg(feature = "audio")]
++            probe: None,
+         }
+     }
+     /// Sync the volume options, refreshing the categories that changed
+@@ -1180,12 +1189,38 @@ impl Audio {
+             return true;
+         }
+         self.device_ticks += 1;
+-        if self._stream.is_none() || self.device_ticks < 20 {
++        if self._stream.is_none() {
+             return false;
+         }
+-        self.device_ticks = 0;
+-        let default = default_output_name();
+-        let cards = card_fingerprint();
++        // The looking itself (default_output_name, card_fingerprint) is slow: a thread does it,
++        // and a later tick takes its answer.
++        let (default, cards) = match self.probe.clone() {
++            Some(slot) => {
++                let done = slot.lock().ok().and_then(|mut s| s.take());
++                match done {
++                    Some(answer) => {
++                        self.probe = None;
++                        answer
++                    }
++                    None => return false,
++                }
++            }
++            None => {
++                if self.device_ticks >= 20 {
++                    self.device_ticks = 0;
++                    let slot = std::sync::Arc::new(std::sync::Mutex::new(None));
++                    let out = slot.clone();
++                    std::thread::spawn(move || {
++                        let answer = (default_output_name(), card_fingerprint());
++                        if let Ok(mut s) = out.lock() {
++                            *s = Some(answer);
++                        }
++                    });
++                    self.probe = Some(slot);
++                }
++                return false;
++            }
++        };
+         // Listing the devices probes every one (on Linux every built-in PCM,
+         // printing ALSA's errors for the plugins this system lacks; on macOS
+         // every Core Audio device, about 90 ms with twenty of them); only the
+@@ -1223,7 +1258,7 @@ impl Audio {
+     pub fn tick(&mut self, paused: bool, ctx: &TickContext) {
+         #[cfg(feature = "audio")]
+         {
+-            if self.should_change_device() {
++            if crate::spans::time("aud_device", || self.should_change_device()) {
+                 // SoundEngine.reload: stop every sound, open the output again.
+                 self.stop_all();
+                 let device = self.device_name.clone();
+@@ -1232,8 +1267,9 @@ impl Audio {
+                 }
+             }
+         }
+-        self.sync_volumes();
+-        self.engine.tick(paused, ctx, &mut self.backend);
++        crate::spans::time("aud_volumes", || self.sync_volumes());
++        let (engine, backend) = (&mut self.engine, &mut self.backend);
++        crate::spans::time("aud_engine", || engine.tick(paused, ctx, backend));
+     }
+     /// The `uiSoundReserve` extra: positional sounds leave
+     /// `sound_engine::HEARD_RESERVE` static channels free (off: vanilla's pool).
+diff --git a/crates/horizon-client/src/game.rs b/crates/horizon-client/src/game.rs
+index 21b83760f..3e7ad4288 100644
+--- a/crates/horizon-client/src/game.rs
++++ b/crates/horizon-client/src/game.rs
+@@ -18868,8 +18868,8 @@ impl Game<'_> {
+                 }
+                 WindowEvent::RedrawRequested => {
+                     horizon_client::spans::time("recover_device", || self.recover_device())?;
+-                    self.observe_fullscreen();
+-                    self.sync_ime();
++                    horizon_client::spans::time("observe_fullscreen", || self.observe_fullscreen());
++                    horizon_client::spans::time("sync_ime", || self.sync_ime());
+                     let now = Instant::now();
+                     let frame_cpu = self
+                         .options
+@@ -18904,11 +18904,11 @@ impl Game<'_> {
+                         horizon_client::spans::time("spawn_player", || self.spawn_player())?;
+                     }
+                     let updated = Instant::now();
+-                    self.track_toggle_screens();
+-                    self.heal_hold_latches();
++                    horizon_client::spans::time("track_toggle_screens", || self.track_toggle_screens());
++                    horizon_client::spans::time("heal_hold_latches", || self.heal_hold_latches());
+                     // For the "I'm playing" ping: an atomic, sent on when it changes.
+                     horizon_client::heartbeat::set_lan(self.is_published());
+-                    self.update_discord_presence();
++                    horizon_client::spans::time("discord_presence", || self.update_discord_presence());
+                     let steps = self.clock.advance(elapsed);
+                     for _ in 0..steps {
+                         let started = Instant::now();
+@@ -18918,30 +18918,30 @@ impl Game<'_> {
+                             // seeded from the clock: under `HORIZON_STILL` it waits for the
+                             // world and draws from its tick.
+                             if !self.clock.still() {
+-                                self.tick_ambience();
++                                horizon_client::spans::time("tick_ambience", || self.tick_ambience());
+                             } else if self.clock.runs_normally() {
+                                 self.ambience.reseed(self.visual_ticks() as i64);
+-                                self.tick_ambience();
++                                horizon_client::spans::time("tick_ambience", || self.tick_ambience());
+                             }
+-                            self.tick_fov();
++                            horizon_client::spans::time("tick_fov", || self.tick_fov());
+                         }
+-                        self.tick_win_screen()?;
+-                        self.native_configs_tick_client();
++                        horizon_client::spans::time("tick_win_screen", || self.tick_win_screen())?;
++                        horizon_client::spans::time("native_configs", || self.native_configs_tick_client());
+                         // Gui.tick runs ChatListener.tick paused or not.
+-                        self.tick_chat_queue();
+-                        self.tick_music();
+-                        self.tick_sound_engine();
++                        horizon_client::spans::time("chat_queue", || self.tick_chat_queue());
++                        horizon_client::spans::time("tick_music", || self.tick_music());
++                        horizon_client::spans::time("tick_sound_engine", || self.tick_sound_engine());
+                         self.clock.record(started.elapsed());
+                         if let Some(report) = self.clock.take_sprint_report() {
+                             self.sprint_report(&report);
+                         }
+                     }
+-                    self.extras_frame(elapsed);
+-                    self.extras_retry()?;
+-                    self.apply_mouse_look();
+-                    self.pad_look(elapsed.as_secs_f32());
+-                    self.advance_flight();
+-                    self.tick_world_icon();
++                    horizon_client::spans::time("extras_frame", || self.extras_frame(elapsed));
++                    horizon_client::spans::time("extras_retry", || self.extras_retry())?;
++                    horizon_client::spans::time("apply_mouse_look", || self.apply_mouse_look());
++                    horizon_client::spans::time("pad_look", || self.pad_look(elapsed.as_secs_f32()));
++                    horizon_client::spans::time("advance_flight", || self.advance_flight());
++                    horizon_client::spans::time("tick_world_icon", || self.tick_world_icon());
+                     let ticked = Instant::now();
+                     let rendered = match self.render() {
+                         // The callback can fire during this frame; rebuild on
+diff --git a/crates/horizon-client/src/game/music.rs b/crates/horizon-client/src/game/music.rs
+index 76d551534..39754d270 100644
+--- a/crates/horizon-client/src/game/music.rs
++++ b/crates/horizon-client/src/game/music.rs
+@@ -155,8 +155,10 @@ impl Game<'_> {
+     /// `pauseAllExcept(MUSIC, UI)` when the game pauses and `resume` when it
+     /// carries on.
+     pub(super) fn tick_sound_engine(&mut self) {
+-        update_bound_entities(self.audio.engine.bound_entities(), |id| {
+-            self.sound_entity_state(id)
++        horizon_client::spans::time("snd_bound", || {
++            update_bound_entities(self.audio.engine.bound_entities(), |id| {
++                self.sound_entity_state(id)
++            })
+         });
+ 
+         if self.pause != self.sound_paused {
+@@ -167,9 +169,10 @@ impl Game<'_> {
+             }
+             self.sound_paused = self.pause;
+         }
+-        let (vehicle, carts) = self.start_cart_sounds();
+-        let mobs = self.start_mob_sounds();
+-        let ridden = self.start_riding_sound();
++        let (vehicle, carts) =
++            horizon_client::spans::time("snd_carts", || self.start_cart_sounds());
++        let mobs = horizon_client::spans::time("snd_mobs", || self.start_mob_sounds());
++        let ridden = horizon_client::spans::time("snd_riding", || self.start_riding_sound());
+         let (player_position, player_speed_sqr, player_fall_flying) =
+             self.player.as_ref().map_or(([0.0; 3], 0.0, false), |p| {
+                 let at = p.position;
+@@ -200,7 +203,8 @@ impl Game<'_> {
+         };
+         self.audio
+             .set_listener_reserve(self.settings.extras.ui_sound_reserve);
+-        self.audio.tick(self.pause, &ctx);
++        let pause = self.pause;
++        horizon_client::spans::time("snd_audio_tick", || self.audio.tick(pause, &ctx));
+     }
+     /// `Minecraft.setLevel` -> `updateLevelInEngines`: `SoundManager.stop()`.
+     /// The music manager keeps its stopped track and, on its next tick, waits
