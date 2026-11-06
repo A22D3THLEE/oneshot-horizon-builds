@@ -1,0 +1,54 @@
+name: Experiment build
+# A manual build of Horizon with an experiment patch (experiments/*.patch); the exe is an artifact, no release.
+on:
+  workflow_dispatch:
+    inputs:
+      ref:
+        description: Horizon commit to build
+        required: true
+        default: 66f3981f522b24c250b21523a70080965b940424
+      patch:
+        description: Patch in experiments/ to apply
+        required: true
+        default: 0001-frame-spans.patch
+permissions:
+  contents: read
+env:
+  RUSTFLAGS: -C target-feature=+crt-static
+  HORIZON_VERSION: nightly-2026-11-05
+  HORIZON_NIGHTLY: 2026-11-05 66f3981
+  CARGO_TERM_COLOR: never
+jobs:
+  build:
+    runs-on: windows-latest
+    timeout-minutes: 300
+    defaults:
+      run:
+        shell: bash
+    steps:
+      - run: git config --global core.autocrlf false
+      - uses: actions/checkout@v4
+        with:
+          path: oneshot
+      - name: Source and patch
+        run: |
+          set -euo pipefail
+          git init -q src
+          cd src
+          git remote add origin https://github.com/horizon-rust/horizon
+          git fetch -q --depth 1 origin "${{ inputs.ref }}"
+          git checkout -q FETCH_HEAD
+          git apply --whitespace=nowarn "../oneshot/experiments/${{ inputs.patch }}"
+      - uses: dtolnay/rust-toolchain@stable
+      - uses: Swatinem/rust-cache@v2
+        with:
+          workspaces: src
+          shared-key: oneshot-windows
+      - name: Build
+        run: |
+          cd src
+          cargo build --release --locked -p horizon-client --bin horizon-client --message-format short
+      - uses: actions/upload-artifact@v4
+        with:
+          name: horizon-client-exp
+          path: src/target/release/horizon-client.exe

@@ -1,0 +1,75 @@
+diff --git a/crates/horizon-client/src/game.rs b/crates/horizon-client/src/game.rs
+index 21b83760f..3e7ad4288 100644
+--- a/crates/horizon-client/src/game.rs
++++ b/crates/horizon-client/src/game.rs
+@@ -18868,8 +18868,8 @@ impl Game<'_> {
+                 }
+                 WindowEvent::RedrawRequested => {
+                     horizon_client::spans::time("recover_device", || self.recover_device())?;
+-                    self.observe_fullscreen();
+-                    self.sync_ime();
++                    horizon_client::spans::time("observe_fullscreen", || self.observe_fullscreen());
++                    horizon_client::spans::time("sync_ime", || self.sync_ime());
+                     let now = Instant::now();
+                     let frame_cpu = self
+                         .options
+@@ -18904,11 +18904,11 @@ impl Game<'_> {
+                         horizon_client::spans::time("spawn_player", || self.spawn_player())?;
+                     }
+                     let updated = Instant::now();
+-                    self.track_toggle_screens();
+-                    self.heal_hold_latches();
++                    horizon_client::spans::time("track_toggle_screens", || self.track_toggle_screens());
++                    horizon_client::spans::time("heal_hold_latches", || self.heal_hold_latches());
+                     // For the "I'm playing" ping: an atomic, sent on when it changes.
+                     horizon_client::heartbeat::set_lan(self.is_published());
+-                    self.update_discord_presence();
++                    horizon_client::spans::time("discord_presence", || self.update_discord_presence());
+                     let steps = self.clock.advance(elapsed);
+                     for _ in 0..steps {
+                         let started = Instant::now();
+@@ -18918,30 +18918,30 @@ impl Game<'_> {
+                             // seeded from the clock: under `HORIZON_STILL` it waits for the
+                             // world and draws from its tick.
+                             if !self.clock.still() {
+-                                self.tick_ambience();
++                                horizon_client::spans::time("tick_ambience", || self.tick_ambience());
+                             } else if self.clock.runs_normally() {
+                                 self.ambience.reseed(self.visual_ticks() as i64);
+-                                self.tick_ambience();
++                                horizon_client::spans::time("tick_ambience", || self.tick_ambience());
+                             }
+-                            self.tick_fov();
++                            horizon_client::spans::time("tick_fov", || self.tick_fov());
+                         }
+-                        self.tick_win_screen()?;
+-                        self.native_configs_tick_client();
++                        horizon_client::spans::time("tick_win_screen", || self.tick_win_screen())?;
++                        horizon_client::spans::time("native_configs", || self.native_configs_tick_client());
+                         // Gui.tick runs ChatListener.tick paused or not.
+-                        self.tick_chat_queue();
+-                        self.tick_music();
+-                        self.tick_sound_engine();
++                        horizon_client::spans::time("chat_queue", || self.tick_chat_queue());
++                        horizon_client::spans::time("tick_music", || self.tick_music());
++                        horizon_client::spans::time("tick_sound_engine", || self.tick_sound_engine());
+                         self.clock.record(started.elapsed());
+                         if let Some(report) = self.clock.take_sprint_report() {
+                             self.sprint_report(&report);
+                         }
+                     }
+-                    self.extras_frame(elapsed);
+-                    self.extras_retry()?;
+-                    self.apply_mouse_look();
+-                    self.pad_look(elapsed.as_secs_f32());
+-                    self.advance_flight();
+-                    self.tick_world_icon();
++                    horizon_client::spans::time("extras_frame", || self.extras_frame(elapsed));
++                    horizon_client::spans::time("extras_retry", || self.extras_retry())?;
++                    horizon_client::spans::time("apply_mouse_look", || self.apply_mouse_look());
++                    horizon_client::spans::time("pad_look", || self.pad_look(elapsed.as_secs_f32()));
++                    horizon_client::spans::time("advance_flight", || self.advance_flight());
++                    horizon_client::spans::time("tick_world_icon", || self.tick_world_icon());
+                     let ticked = Instant::now();
+                     let rendered = match self.render() {
+                         // The callback can fire during this frame; rebuild on
