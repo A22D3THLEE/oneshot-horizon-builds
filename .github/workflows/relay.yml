@@ -1,0 +1,50 @@
+name: Relay build
+# Builds Horizon's play-with-friends relay (horizon-relay) for Linux x86_64 as one static program and publishes it as
+# the release "relay" together with install.sh, so a server gets it with one command (see relay/README.md).
+on:
+  workflow_dispatch:
+    inputs:
+      ref:
+        description: Horizon commit to build
+        required: true
+        default: 66f3981f522b24c250b21523a70080965b940424
+permissions:
+  contents: write
+env:
+  CARGO_TERM_COLOR: never
+jobs:
+  build:
+    runs-on: ubuntu-latest
+    timeout-minutes: 60
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          path: oneshot
+      - name: Source
+        run: |
+          set -euo pipefail
+          git init -q src
+          cd src
+          git remote add origin https://github.com/horizon-rust/horizon
+          git fetch -q --depth 1 origin "${{ inputs.ref }}"
+          git checkout -q FETCH_HEAD
+      - uses: dtolnay/rust-toolchain@stable
+        with:
+          targets: x86_64-unknown-linux-musl
+      - run: sudo apt-get install -y musl-tools
+      - name: Build
+        run: |
+          cd src
+          cargo build --release --locked -p horizon-relay --target x86_64-unknown-linux-musl --message-format short
+          cp target/x86_64-unknown-linux-musl/release/horizon-relay ../horizon-relay-linux-x86_64
+      - name: Publish
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          set -euo pipefail
+          sha256sum horizon-relay-linux-x86_64 | cut -d' ' -f1 > horizon-relay-linux-x86_64.sha256
+          cp oneshot/relay/install.sh install.sh
+          gh release delete relay --cleanup-tag --yes --repo "$GITHUB_REPOSITORY" || true
+          gh release create relay horizon-relay-linux-x86_64 horizon-relay-linux-x86_64.sha256 install.sh \
+            --repo "$GITHUB_REPOSITORY" --title "Relay (play with friends)" \
+            --notes "horizon-relay from Horizon commit ${{ inputs.ref }}. Install on Ubuntu: curl -fsSL https://github.com/$GITHUB_REPOSITORY/releases/download/relay/install.sh | sudo bash"
