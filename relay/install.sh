@@ -23,6 +23,9 @@ Wants=network-online.target
 [Service]
 ExecStart=/usr/local/bin/horizon-relay
 Environment=PORT=$PORT
+# The default cap is 1 MB/s per session, which throttles chunk streaming and shows up as lag.
+Environment=RELAY_SESSION_KBPS=${RELAY_SESSION_KBPS:-25600}
+Environment=RELAY_TOTAL_MBPS=${RELAY_TOTAL_MBPS:-500}
 DynamicUser=yes
 NoNewPrivileges=yes
 ProtectSystem=strict
