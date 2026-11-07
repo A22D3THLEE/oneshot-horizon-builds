@@ -170,6 +170,9 @@ jobs:
             if [[ -n "$ok" ]]; then
               echo "Applied $name"; features="${features:+$features,}$feature"
             elif [[ "$name" == 0001-* ]]; then
+              if [[ "${{ matrix.tag }}" == nightly* ]]; then
+                echo "::error::$name does not apply to ${{ matrix.tag }}; the patch needs porting"; exit 1
+              fi
               echo "::notice::$name does not apply to ${{ matrix.tag }}; no Oneshot build for it"
               echo "SKIP=1" >> "$GITHUB_ENV"; exit 0
             else

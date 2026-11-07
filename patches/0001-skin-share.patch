@@ -1,8 +1,8 @@
 diff --git a/crates/horizon-client/src/client_lib.rs b/crates/horizon-client/src/client_lib.rs
-index 8e6c9860e..a5149d04e 100644
+index de388a2e2..166480339 100644
 --- a/crates/horizon-client/src/client_lib.rs
 +++ b/crates/horizon-client/src/client_lib.rs
-@@ -99,6 +99,7 @@ pub mod net;
+@@ -104,6 +104,7 @@ pub mod net;
  pub mod nether_portal;
  pub mod no_resources;
  pub mod offline_name;
@@ -11,10 +11,10 @@ index 8e6c9860e..a5149d04e 100644
  pub mod osk;
  pub mod patrol;
 diff --git a/crates/horizon-client/src/game/integrated.rs b/crates/horizon-client/src/game/integrated.rs
-index 129ea4c58..61190e0ac 100644
+index 6b4c261d0..8aea05103 100644
 --- a/crates/horizon-client/src/game/integrated.rs
 +++ b/crates/horizon-client/src/game/integrated.rs
-@@ -379,6 +379,11 @@ impl Game<'_> {
+@@ -428,6 +428,11 @@ impl Game<'_> {
                          })
                          .collect()
                  }))
@@ -27,10 +27,10 @@ index 129ea4c58..61190e0ac 100644
          };
          let mut options = self.options.clone();
 diff --git a/crates/horizon-client/src/game/remote.rs b/crates/horizon-client/src/game/remote.rs
-index af0f2dc69..0e1c1e304 100644
+index 44cb775cf..0533e0475 100644
 --- a/crates/horizon-client/src/game/remote.rs
 +++ b/crates/horizon-client/src/game/remote.rs
-@@ -603,6 +603,10 @@ pub(super) struct Remote {
+@@ -680,6 +680,10 @@ pub(super) struct Remote {
      tab_players: HashMap<u128, horizon_client::tab_list::TabPlayer>,
      /// Each listed profile's unpacked `textures` property.
      skin_textures: HashMap<u128, horizon_client::skins::Textures>,
@@ -41,7 +41,7 @@ index af0f2dc69..0e1c1e304 100644
      /// Active skin and cape from the services profile when the server sent none.
      own_profile: OwnProfile,
      /// The skin texture each profile's players show, once its download is ready.
-@@ -1068,6 +1072,8 @@ impl Game<'_> {
+@@ -1193,6 +1197,8 @@ impl Game<'_> {
              players: HashMap::new(),
              tab_players: HashMap::new(),
              skin_textures: HashMap::new(),
@@ -49,8 +49,8 @@ index af0f2dc69..0e1c1e304 100644
 +            oneshot_pictures: HashMap::new(),
              own_profile: OwnProfile::Idle,
              skins: HashMap::new(),
-             listed: Default::default(),
-@@ -4727,6 +4733,13 @@ impl Game<'_> {
+             skins_revision: 0,
+@@ -5338,6 +5344,13 @@ impl Game<'_> {
                                          skins::unpack(&t.value, signature, &skins::TEXTURE_URIS);
                                      r.skin_textures.entry(e.uuid).or_insert(textures);
                                  }
@@ -64,7 +64,7 @@ index af0f2dc69..0e1c1e304 100644
                              }
                          }
                      }
-@@ -4772,6 +4785,7 @@ impl Game<'_> {
+@@ -5383,6 +5396,7 @@ impl Game<'_> {
                          r.chat_sessions.remove(&u);
                          r.chat_validators.remove(&u);
                          r.skin_textures.remove(&u);
@@ -72,7 +72,7 @@ index af0f2dc69..0e1c1e304 100644
                          r.listed.remove(&u);
                          r.attachments.remove(&Holder::Player(u));
                      }
-@@ -5225,6 +5239,69 @@ impl Game<'_> {
+@@ -5869,6 +5883,69 @@ impl Game<'_> {
                  resolved.push((uuid, skin));
              }
          }
@@ -143,10 +143,10 @@ index af0f2dc69..0e1c1e304 100644
          // nor an account gives the local player one.
          if !resolved.iter().any(|(u, _)| *u == local)
 diff --git a/crates/horizon-client/src/lan/conn.rs b/crates/horizon-client/src/lan/conn.rs
-index 7db181851..3abeeec7b 100644
+index 0aa25c82f..dee309df1 100644
 --- a/crates/horizon-client/src/lan/conn.rs
 +++ b/crates/horizon-client/src/lan/conn.rs
-@@ -762,7 +762,8 @@ fn serve_login(
+@@ -998,7 +998,8 @@ fn serve_login(
                  return Err(err);
              }
          },
@@ -154,9 +154,9 @@ index 7db181851..3abeeec7b 100644
 +        // Offline mode: the player's own Mojang-signed skin, when their client has one (skin_share.rs).
 +        (None, None) => (offline_uuid(&hello.name), ask_skin(&mut c)?),
      };
-     // verifyLoginAndFinishConnectionSetup: PlayerList.canPlayerLogin, then
-     // duplicates and a full server.
-@@ -821,6 +822,32 @@ fn forward(
+     // The mods may hold the login for their answers, or refuse it, before the server's checks.
+     if !c.is_memory() {
+@@ -1094,6 +1095,32 @@ fn forward(
      }
  }
  
@@ -190,10 +190,10 @@ index 7db181851..3abeeec7b 100644
      uuid: u128,
      name: String,
 diff --git a/crates/horizon-client/src/net.rs b/crates/horizon-client/src/net.rs
-index 8b4e38336..d6188cf65 100644
+index 253d91866..d90f88dd8 100644
 --- a/crates/horizon-client/src/net.rs
 +++ b/crates/horizon-client/src/net.rs
-@@ -734,10 +734,15 @@ fn run(
+@@ -867,10 +867,15 @@ fn run(
                  c.enable_encryption(&secret);
              }
              login::Clientbound::CustomQuery(q) => {
