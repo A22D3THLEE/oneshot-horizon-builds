@@ -1,5 +1,7 @@
 # Oneshot builds of Horizon
 
+Канал авторов / Authors' channel: **[t.me/oneshot_tg](https://t.me/oneshot_tg)**
+
 ## Download the launcher
 
 **[OneshotLauncher.exe](https://github.com/A22D3THLEE/oneshot-horizon-builds/releases/latest)**: pick the newest release named `launcher-v...` (Oneshot Launcher), download `OneshotLauncher.exe` and run it. The launcher updates itself and installs Horizon and its Oneshot builds. Windows may show a SmartScreen warning: the file is not signed yet.
