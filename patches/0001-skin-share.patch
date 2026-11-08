@@ -27,7 +27,7 @@ index 6b4c261d0..8aea05103 100644
          };
          let mut options = self.options.clone();
 diff --git a/crates/horizon-client/src/game/remote.rs b/crates/horizon-client/src/game/remote.rs
-index 44cb775cf..0533e0475 100644
+index 44cb775cf..a71d22648 100644
 --- a/crates/horizon-client/src/game/remote.rs
 +++ b/crates/horizon-client/src/game/remote.rs
 @@ -680,6 +680,10 @@ pub(super) struct Remote {
@@ -50,7 +50,16 @@ index 44cb775cf..0533e0475 100644
              own_profile: OwnProfile::Idle,
              skins: HashMap::new(),
              skins_revision: 0,
-@@ -5338,6 +5344,13 @@ impl Game<'_> {
+@@ -1416,6 +1422,8 @@ impl Game<'_> {
+             players: HashMap::new(),
+             tab_players: HashMap::new(),
+             skin_textures: HashMap::new(),
++            oneshot_skins: HashMap::new(),
++            oneshot_pictures: HashMap::new(),
+             own_profile: OwnProfile::Idle,
+             skins: HashMap::new(),
+             skins_revision: 0,
+@@ -5338,6 +5346,13 @@ impl Game<'_> {
                                          skins::unpack(&t.value, signature, &skins::TEXTURE_URIS);
                                      r.skin_textures.entry(e.uuid).or_insert(textures);
                                  }
@@ -64,7 +73,7 @@ index 44cb775cf..0533e0475 100644
                              }
                          }
                      }
-@@ -5383,6 +5396,7 @@ impl Game<'_> {
+@@ -5383,6 +5398,7 @@ impl Game<'_> {
                          r.chat_sessions.remove(&u);
                          r.chat_validators.remove(&u);
                          r.skin_textures.remove(&u);
@@ -72,7 +81,7 @@ index 44cb775cf..0533e0475 100644
                          r.listed.remove(&u);
                          r.attachments.remove(&Holder::Player(u));
                      }
-@@ -5869,6 +5883,69 @@ impl Game<'_> {
+@@ -5869,6 +5885,69 @@ impl Game<'_> {
                  resolved.push((uuid, skin));
              }
          }
