@@ -41,7 +41,7 @@ jobs:
           # accessor is as good as v018 for the five ISteamFriends calls the tunnel makes.
           perl -0pi -e 's|let pointer = unsafe \{ try_symbol::<\$ty>\(\$library, \$symbol\) \};|let pointer = unsafe { try_symbol::<\$ty>(\$library, \$symbol) }.or_else(\|\| if \$symbol == "SteamAPI_SteamFriends_v018" { unsafe { try_symbol::<\$ty>(\$library, "SteamAPI_SteamFriends_v017") } } else { None });|' "$f"
           grep -c 'SteamAPI_SteamFriends_v017' "$f"
-          git -C src diff --stat
+          git -C src diff --stat -- horizon-mod
       - uses: dtolnay/rust-toolchain@stable
       - name: Build
         run: |
@@ -59,7 +59,7 @@ jobs:
           cp src/LICENSE e4steam-LICENSE.txt
           cp src/NOTICE.md e4steam-NOTICE.md
           cp src/THIRD_PARTY_NOTICES-e4steam.md e4steam-THIRD_PARTY_NOTICES.md
-          git -C src diff > e4steam-oneshot.patch
+          git -C src diff -- horizon-mod > e4steam-oneshot.patch
           gh release delete steam-tunnel --cleanup-tag --yes --repo "$GITHUB_REPOSITORY" || true
           gh release create steam-tunnel e4steam-rs.exe e4steam-rs.exe.sha256 e4steam-LICENSE.txt e4steam-NOTICE.md \
             e4steam-THIRD_PARTY_NOTICES.md e4steam-oneshot.patch \
