@@ -1,0 +1,67 @@
+name: Steam tunnel build
+# Builds the e4steam sidecar (e4steam-rs.exe, Apache-2.0, https://github.com/loldonres/e4steam_horizon_port) for
+# Windows x64 from one pinned commit and publishes it as the release "steam-tunnel". The launcher downloads it for the
+# "Steam" route of play with friends: the tunnel carries the game's LAN world to Steam friends, no server of ours.
+# One change is made to the source: SteamFriends_v017 is accepted when the player's steam_api64.dll has no v018.
+on:
+  workflow_dispatch:
+    inputs:
+      ref:
+        description: e4steam_horizon_port commit to build
+        required: true
+        default: 1a12871f8639b3860e6e88d52ef093988693206a
+permissions:
+  contents: write
+env:
+  CARGO_TERM_COLOR: never
+jobs:
+  build:
+    runs-on: windows-latest
+    timeout-minutes: 40
+    defaults:
+      run:
+        shell: bash
+    steps:
+      - name: Source
+        run: |
+          set -euo pipefail
+          git init -q src
+          cd src
+          git remote add origin https://github.com/loldonres/e4steam_horizon_port
+          git fetch -q --depth 1 origin "${{ inputs.ref }}"
+          git checkout -q FETCH_HEAD
+          test "$(git rev-parse HEAD)" = "${{ inputs.ref }}"
+          # The repository carries a committed target/ folder: nothing prebuilt may take part in the build.
+          rm -rf target
+      - name: Accept an older Steam interface
+        run: |
+          set -euo pipefail
+          f=src/horizon-mod/mixins/e4steam/engine/src/steam.rs
+          # The flat functions of a steam_api64.dll work on the interface that same dll hands out, so its v017
+          # accessor is as good as v018 for the five ISteamFriends calls the tunnel makes.
+          perl -0pi -e 's|let pointer = unsafe \{ try_symbol::<\$ty>\(\$library, \$symbol\) \};|let pointer = unsafe { try_symbol::<\$ty>(\$library, \$symbol) }.or_else(\|\| if \$symbol == "SteamAPI_SteamFriends_v018" { unsafe { try_symbol::<\$ty>(\$library, "SteamAPI_SteamFriends_v017") } } else { None });|' "$f"
+          grep -c 'SteamAPI_SteamFriends_v017' "$f"
+          git -C src diff --stat
+      - uses: dtolnay/rust-toolchain@stable
+      - name: Build
+        run: |
+          set -euo pipefail
+          cd src
+          cargo build --release --locked -p e4steam-cli --message-format short
+          cp target/release/e4steam-rs.exe ../e4steam-rs.exe
+      - name: Publish
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          set -euo pipefail
+          sha256sum e4steam-rs.exe | cut -d' ' -f1 > e4steam-rs.exe.sha256
+          cat e4steam-rs.exe.sha256
+          cp src/LICENSE e4steam-LICENSE.txt
+          cp src/NOTICE.md e4steam-NOTICE.md
+          cp src/THIRD_PARTY_NOTICES-e4steam.md e4steam-THIRD_PARTY_NOTICES.md
+          git -C src diff > e4steam-oneshot.patch
+          gh release delete steam-tunnel --cleanup-tag --yes --repo "$GITHUB_REPOSITORY" || true
+          gh release create steam-tunnel e4steam-rs.exe e4steam-rs.exe.sha256 e4steam-LICENSE.txt e4steam-NOTICE.md \
+            e4steam-THIRD_PARTY_NOTICES.md e4steam-oneshot.patch \
+            --repo "$GITHUB_REPOSITORY" --title "Steam tunnel (play with friends)" \
+            --notes "e4steam-rs.exe built from https://github.com/loldonres/e4steam_horizon_port commit ${{ inputs.ref }} (Apache-2.0) with e4steam-oneshot.patch applied. Not affiliated with Valve; Steam must be running."
