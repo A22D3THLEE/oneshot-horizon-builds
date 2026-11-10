@@ -1,0 +1,398 @@
+diff --git a/packaging/android/AndroidManifest.xml b/packaging/android/AndroidManifest.xml
+index bda4364..914b565 100644
+--- a/packaging/android/AndroidManifest.xml
++++ b/packaging/android/AndroidManifest.xml
+@@ -49,14 +49,14 @@
+             android:theme="@style/HorizonProfile"
+             android:screenOrientation="sensorLandscape"
+             android:configChanges="orientation|screenSize|screenLayout|keyboardHidden|keyboard|navigation|uiMode|smallestScreenSize"
+-            android:windowSoftInputMode="adjustPan|stateHidden" />
++            android:windowSoftInputMode="adjustResize|stateHidden" />
+         <activity
+             android:name=".CatalogActivity"
+             android:exported="false"
+             android:theme="@style/HorizonProfile"
+             android:screenOrientation="sensorLandscape"
+             android:configChanges="orientation|screenSize|screenLayout|keyboardHidden|keyboard|navigation|uiMode"
+-            android:windowSoftInputMode="adjustPan|stateHidden" />
++            android:windowSoftInputMode="adjustResize|stateHidden" />
+         <activity
+             android:name=".MsaLoginActivity"
+             android:exported="false"
+diff --git a/packaging/android/java/dev/horizonlab/horizon/CatalogActivity.java b/packaging/android/java/dev/horizonlab/horizon/CatalogActivity.java
+index 6355851..33ee20a 100644
+--- a/packaging/android/java/dev/horizonlab/horizon/CatalogActivity.java
++++ b/packaging/android/java/dev/horizonlab/horizon/CatalogActivity.java
+@@ -82,9 +82,14 @@ public class CatalogActivity extends Activity {
+     protected void onCreate(Bundle state) {
+         super.onCreate(state);
+         dir = new File(SetupActivity.home(this));
+-        getWindow().setSoftInputMode(WindowManager.LayoutParams.SOFT_INPUT_ADJUST_PAN
++        getWindow().setSoftInputMode(WindowManager.LayoutParams.SOFT_INPUT_ADJUST_RESIZE
+                 | WindowManager.LayoutParams.SOFT_INPUT_STATE_HIDDEN);
+         int p = Ui.dp(this, 12);
++        pool.execute(new Runnable() {
++            public void run() {
++                trimPictureCache();
++            }
++        });
+ 
+         LinearLayout root = new LinearLayout(this);
+         root.setOrientation(LinearLayout.VERTICAL);
+@@ -147,7 +152,6 @@ public class CatalogActivity extends Activity {
+         });
+         search.addView(query, new LinearLayout.LayoutParams(0, -2, 1));
+         Button go = Ui.button(this, Ui.t("Найти", "Search"), true);
+-        go.setMinHeight(Ui.dp(this, 44));
+         go.setTextSize(15);
+         go.setOnClickListener(new View.OnClickListener() {
+             public void onClick(View v) {
+@@ -176,6 +180,7 @@ public class CatalogActivity extends Activity {
+             }
+         });
+         setContentView(root);
++        Ui.fitInsets(root);
+         selectTab(SKINS);
+     }
+ 
+@@ -238,7 +243,8 @@ public class CatalogActivity extends Activity {
+                         next = nextToken;
+                         status.setText(items.isEmpty() && list.getChildCount() == 0
+                                 ? Ui.t("Ничего не найдено.", "Nothing found.") : "");
+-                        for (Item it : items) list.addView(row(it), Ui.gap(CatalogActivity.this, 8));
++                        if (which == SKINS || which == CAPES) addTiles(items);
++                        else for (Item it : items) list.addView(row(it), Ui.gap(CatalogActivity.this, 8));
+                         if (next != null) list.addView(more, Ui.gap(CatalogActivity.this, 10));
+                     }
+                 });
+@@ -440,7 +446,6 @@ public class CatalogActivity extends Activity {
+         r.addView(text, tl);
+         final Button act = Ui.button(this, it.kind != null ? Ui.t("Установить", "Install")
+                 : it.cape ? Ui.t("Надеть плащ", "Wear cape") : Ui.t("Надеть", "Wear"), true);
+-        act.setMinHeight(Ui.dp(this, 44));
+         act.setTextSize(15);
+         act.setOnClickListener(new View.OnClickListener() {
+             public void onClick(View v) {
+@@ -452,6 +457,85 @@ public class CatalogActivity extends Activity {
+         return r;
+     }
+ 
++    /** An image view that is as tall as it is wide. */
++    private static final class Square extends ImageView {
++        Square(android.content.Context c) {
++            super(c);
++        }
++
++        @Override
++        protected void onMeasure(int w, int h) {
++            super.onMeasure(w, w);
++            int side = getMeasuredWidth();
++            setMeasuredDimension(side, side);
++        }
++    }
++
++    /** Skins and capes as a grid of tiles: as many columns as the screen's width allows. */
++    private void addTiles(List<Item> items) {
++        int cols = Math.max(2, Math.min(5, Ui.widthDp(this) / 160));
++        int gap = Ui.dp(this, 8);
++        for (int i = 0; i < items.size(); i += cols) {
++            LinearLayout line = new LinearLayout(this);
++            line.setOrientation(LinearLayout.HORIZONTAL);
++            for (int c = 0; c < cols; c++) {
++                LinearLayout.LayoutParams lp = new LinearLayout.LayoutParams(0, -2, 1);
++                if (c > 0) lp.leftMargin = gap;
++                if (i + c < items.size()) {
++                    line.addView(tile(items.get(i + c)), lp);
++                } else {
++                    line.addView(new View(this), lp);
++                }
++            }
++            list.addView(line, Ui.gap(this, 8));
++        }
++    }
++
++    private View tile(final Item it) {
++        LinearLayout t = new LinearLayout(this);
++        t.setOrientation(LinearLayout.VERTICAL);
++        int p = Ui.dp(this, 8);
++        t.setPadding(p, p, p, p);
++        t.setBackground(Ui.rounded(this, Ui.CARD, Ui.EDGE, 12));
++        ImageView pic = new Square(this);
++        pic.setScaleType(ImageView.ScaleType.FIT_CENTER);
++        pic.setBackground(Ui.rounded(this, Ui.HIGH, 0, 8));
++        t.addView(pic, new LinearLayout.LayoutParams(-1, -2));
++        TextView name = Ui.text(this, it.title == null ? "" : it.title, 14, Ui.TEXT, true);
++        name.setMaxLines(1);
++        name.setEllipsize(android.text.TextUtils.TruncateAt.END);
++        t.addView(name);
++        final Button act = Ui.button(this, it.cape ? Ui.t("Надеть плащ", "Wear cape") : Ui.t("Надеть", "Wear"), true);
++        act.setTextSize(14);
++        act.setOnClickListener(new View.OnClickListener() {
++            public void onClick(View v) {
++                act(it, act);
++            }
++        });
++        t.addView(act, new LinearLayout.LayoutParams(-1, -2));
++        picture(it, pic);
++        return t;
++    }
++
++    // ------------------------------------------------------------------ picture cache
++
++    private File pictureFile(String url) {
++        try {
++            String key = hex(MessageDigest.getInstance("SHA-1").digest(url.getBytes(StandardCharsets.UTF_8)));
++            return new File(new File(getCacheDir(), "pics"), key);
++        } catch (Exception e) {
++            return null;
++        }
++    }
++
++    /** Removes cached pictures not touched for a week. */
++    private void trimPictureCache() {
++        File[] files = new File(getCacheDir(), "pics").listFiles();
++        if (files == null) return;
++        long old = System.currentTimeMillis() - 7L * 24 * 3600 * 1000;
++        for (File f : files) if (f.lastModified() < old) f.delete();
++    }
++
+     private void picture(final Item it, final ImageView target) {
+         if (it.picture == null || it.picture.isEmpty()) return;
+         Bitmap have = pictures.get(it.picture);
+@@ -463,7 +547,22 @@ public class CatalogActivity extends Activity {
+         pool.execute(new Runnable() {
+             public void run() {
+                 try {
+-                    byte[] bytes = getBytes(it.picture, 4 << 20);
++                    byte[] bytes = null;
++                    File cached = pictureFile(it.picture);
++                    if (cached != null && cached.isFile()) {
++                        bytes = Files.readAllBytes(cached.toPath());
++                        cached.setLastModified(System.currentTimeMillis());
++                    }
++                    if (bytes == null || bytes.length == 0) {
++                        bytes = getBytes(it.picture, 4 << 20);
++                        if (cached != null && bytes.length > 0) {
++                            try {
++                                cached.getParentFile().mkdirs();
++                                Files.write(cached.toPath(), bytes);
++                            } catch (Exception ignored) {
++                            }
++                        }
++                    }
+                     BitmapFactory.Options o = new BitmapFactory.Options();
+                     o.inScaled = false;
+                     Bitmap b = BitmapFactory.decodeByteArray(bytes, 0, bytes.length, o);
+diff --git a/packaging/android/java/dev/horizonlab/horizon/ProfileActivity.java b/packaging/android/java/dev/horizonlab/horizon/ProfileActivity.java
+index c23f863..6a6e912 100644
+--- a/packaging/android/java/dev/horizonlab/horizon/ProfileActivity.java
++++ b/packaging/android/java/dev/horizonlab/horizon/ProfileActivity.java
+@@ -64,7 +64,9 @@ public class ProfileActivity extends Activity implements View.OnClickListener {
+     protected void onCreate(Bundle state) {
+         super.onCreate(state);
+         dir = new File(SetupActivity.home(this));
+-        getWindow().setSoftInputMode(WindowManager.LayoutParams.SOFT_INPUT_ADJUST_PAN
++        // Resize, not pan: the keyboard takes most of a phone's landscape height, and the
++        // scrolling columns keep the focused field in view above it.
++        getWindow().setSoftInputMode(WindowManager.LayoutParams.SOFT_INPUT_ADJUST_RESIZE
+                 | WindowManager.LayoutParams.SOFT_INPUT_STATE_HIDDEN);
+         int p = Ui.dp(this, 12);
+ 
+@@ -106,6 +108,7 @@ public class ProfileActivity extends Activity implements View.OnClickListener {
+         preview.setBackground(Ui.rounded(this, FIELD, Ui.EDGE, 14));
+         int pv = Ui.dp(this, 6);
+         preview.setPadding(pv, pv, pv, pv);
++        preview.setMinimumHeight(Ui.dp(this, 170));
+         who.addView(preview, new LinearLayout.LayoutParams(0, -1, 1));
+         LinearLayout side = new LinearLayout(this);
+         side.setOrientation(LinearLayout.VERTICAL);
+@@ -159,7 +162,12 @@ public class ProfileActivity extends Activity implements View.OnClickListener {
+         accountChip.setVisibility(View.GONE);
+         side.addView(accountChip);
+         who.addView(side, sideLp);
+-        left.addView(who, new LinearLayout.LayoutParams(-1, 0, 1));
++        // Scrolls on a short (phone) screen; the message and the Play button stay below it.
++        ScrollView whoScroll = new ScrollView(this);
++        whoScroll.setFillViewport(true);
++        whoScroll.setVerticalScrollBarEnabled(false);
++        whoScroll.addView(who, new FrameLayout.LayoutParams(-1, -2));
++        left.addView(whoScroll, new LinearLayout.LayoutParams(-1, 0, 1));
+ 
+         message = Ui.text(this, "", 12, Ui.WARN, false);
+         message.setMaxLines(3);
+@@ -344,7 +352,47 @@ public class ProfileActivity extends Activity implements View.OnClickListener {
+         worldOut.setOnClickListener(this);
+         card.addView(worldOut, Ui.gap(this, 6));
+ 
+-        setContentView(root);
++        View content = root;
++        if (Ui.widthDp(this) < 640) {
++            // A narrow screen: the two columns become two tabs.
++            final View pLeft = left, pRight = scroll;
++            rightLp.leftMargin = 0;
++            pRight.setVisibility(View.GONE);
++            final Button tabProfile = Ui.button(this, Ui.t("Профиль", "Profile"), true);
++            final Button tabSettings = Ui.button(this, Ui.t("Настройки", "Settings"), false);
++            View.OnClickListener switcher = new View.OnClickListener() {
++                public void onClick(View v) {
++                    boolean settings = v == tabSettings;
++                    pLeft.setVisibility(settings ? View.GONE : View.VISIBLE);
++                    pRight.setVisibility(settings ? View.VISIBLE : View.GONE);
++                    tabProfile.setBackground(settings ? Ui.rounded(ProfileActivity.this, Ui.HIGH, Ui.EDGE, 12)
++                            : Ui.rounded(ProfileActivity.this, Ui.GREEN, 0, 12));
++                    tabProfile.setTextColor(settings ? Ui.TEXT : Ui.ON_ACCENT);
++                    tabSettings.setBackground(settings ? Ui.rounded(ProfileActivity.this, Ui.GREEN, 0, 12)
++                            : Ui.rounded(ProfileActivity.this, Ui.HIGH, Ui.EDGE, 12));
++                    tabSettings.setTextColor(settings ? Ui.ON_ACCENT : Ui.TEXT);
++                }
++            };
++            tabProfile.setOnClickListener(switcher);
++            tabSettings.setOnClickListener(switcher);
++            tabProfile.setMinHeight(Ui.dp(this, 44));
++            tabSettings.setMinHeight(Ui.dp(this, 44));
++            LinearLayout tabRow = new LinearLayout(this);
++            tabRow.setOrientation(LinearLayout.HORIZONTAL);
++            tabRow.setPadding(pad, pad / 2, pad, 0);
++            tabRow.addView(tabProfile, new LinearLayout.LayoutParams(0, -2, 1));
++            LinearLayout.LayoutParams second = new LinearLayout.LayoutParams(0, -2, 1);
++            second.leftMargin = Ui.dp(this, 8);
++            tabRow.addView(tabSettings, second);
++            LinearLayout outer = new LinearLayout(this);
++            outer.setOrientation(LinearLayout.VERTICAL);
++            outer.setBackgroundColor(Ui.BG);
++            outer.addView(tabRow);
++            outer.addView(root, new LinearLayout.LayoutParams(-1, 0, 1));
++            content = outer;
++        }
++        setContentView(content);
++        Ui.fitInsets(content);
+         hideBars();
+         refreshAccount();
+         updateModel();
+diff --git a/packaging/android/java/dev/horizonlab/horizon/SetupActivity.java b/packaging/android/java/dev/horizonlab/horizon/SetupActivity.java
+index 366622f..ba65b24 100644
+--- a/packaging/android/java/dev/horizonlab/horizon/SetupActivity.java
++++ b/packaging/android/java/dev/horizonlab/horizon/SetupActivity.java
+@@ -67,7 +67,7 @@ public class SetupActivity extends Activity
+             return;
+         }
+         LinearLayout card = Ui.card(this);
+-        card.addView(Ui.text(this, "Horizon", 32, Ui.TEXT, true));
++        card.addView(Ui.text(this, "OneShot", 32, Ui.TEXT, true));
+         card.addView(Ui.text(this, Ui.t("Первый запуск", "First launch"), 15, Ui.MUTED, false));
+         card.addView(Ui.text(this, Ui.t(
+                 "Игре нужны файлы Minecraft 26.3. Они скачаются автоматически, около 700 МБ. Лучше подключиться к Wi-Fi.",
+@@ -128,9 +128,6 @@ public class SetupActivity extends Activity
+                     "В этой сборке нет адреса пакета данных Horizon. Положите horizon-derived.zip в папку игры (Android/data/dev.horizonlab.horizon/files) или установите сборку, где он указан.",
+                     "This build has no Horizon data pack address. Put horizon-derived.zip in the game folder (Android/data/dev.horizonlab.horizon/files) or install a build that has one."));
+         }
+-        if (android.os.Build.VERSION.SDK_INT >= 33) {
+-            requestPermissions(new String[] {"android.permission.POST_NOTIFICATIONS"}, 1);
+-        }
+         if (nativeStatus().contains("\trun\t")) {
+             running();
+         }
+@@ -217,6 +214,13 @@ public class SetupActivity extends Activity
+     }
+ 
+     private void begin() {
++        // Ask for notifications only when the download starts (the progress notification), not
++        // as the first thing a new user sees; the download does not wait for the answer.
++        if (android.os.Build.VERSION.SDK_INT >= 33
++                && checkSelfPermission("android.permission.POST_NOTIFICATIONS")
++                        != android.content.pm.PackageManager.PERMISSION_GRANTED) {
++            requestPermissions(new String[] {"android.permission.POST_NOTIFICATIONS"}, 1);
++        }
+         Intent service = new Intent(this, SetupService.class);
+         service.putExtra("home", home);
+         service.putExtra("url", nativeDefaultUrl());
+@@ -283,8 +287,8 @@ public class SetupActivity extends Activity
+             return Ui.t("Файл скачался с ошибкой. Нажмите «Повторить».", "A file arrived damaged. Tap Retry.");
+         }
+         if (e.contains("Dns") || e.contains("onnect") || e.contains("timed out") || e.contains("Network")) {
+-            return Ui.t("Нет связи с сервером. Проверьте интернет и нажмите «Повторить».",
+-                    "Could not reach the server. Check the connection and tap Retry.");
++            return Ui.t("Нет связи с сервером. Проверьте интернет (если включён VPN, попробуйте выключить его) и нажмите «Повторить».",
++                    "Could not reach the server. Check the connection (if a VPN is on, try turning it off) and tap Retry.");
+         }
+         return Ui.t("Что-то пошло не так. Нажмите «Повторить», загрузка продолжится с того же места.",
+                 "Something went wrong. Tap Retry, the download continues where it stopped.");
+diff --git a/packaging/android/java/dev/horizonlab/horizon/Ui.java b/packaging/android/java/dev/horizonlab/horizon/Ui.java
+index 6ed65a3..532e7d7 100644
+--- a/packaging/android/java/dev/horizonlab/horizon/Ui.java
++++ b/packaging/android/java/dev/horizonlab/horizon/Ui.java
+@@ -50,6 +50,47 @@ final class Ui {
+         return d;
+     }
+ 
++    /**
++     * Keeps a screen's content clear of the display cutout, the system bars and the keyboard
++     * (the window draws edge to edge on Android 15+): the view's own padding plus the insets.
++     */
++    static void fitInsets(final View v) {
++        final int l = v.getPaddingLeft(), t = v.getPaddingTop(), r = v.getPaddingRight(), b = v.getPaddingBottom();
++        v.setOnApplyWindowInsetsListener(new View.OnApplyWindowInsetsListener() {
++            public android.view.WindowInsets onApplyWindowInsets(View view, android.view.WindowInsets in) {
++                int il, it, ir, ib;
++                if (android.os.Build.VERSION.SDK_INT >= 30) {
++                    android.graphics.Insets s = in.getInsets(android.view.WindowInsets.Type.systemBars()
++                            | android.view.WindowInsets.Type.displayCutout() | android.view.WindowInsets.Type.ime());
++                    il = s.left;
++                    it = s.top;
++                    ir = s.right;
++                    ib = s.bottom;
++                } else {
++                    il = in.getSystemWindowInsetLeft();
++                    it = in.getSystemWindowInsetTop();
++                    ir = in.getSystemWindowInsetRight();
++                    ib = in.getSystemWindowInsetBottom();
++                }
++                view.setPadding(l + il, t + it, r + ir, b + ib);
++                return in;
++            }
++        });
++        v.requestApplyInsets();
++    }
++
++    /** Screen width in dp. */
++    static int widthDp(Context c) {
++        android.util.DisplayMetrics m = c.getResources().getDisplayMetrics();
++        return (int) (m.widthPixels / m.density);
++    }
++
++    /** Screen height in dp. */
++    static int heightDp(Context c) {
++        android.util.DisplayMetrics m = c.getResources().getDisplayMetrics();
++        return (int) (m.heightPixels / m.density);
++    }
++
+     /** A full-screen background with a centered card; returns the card to fill. */
+     static LinearLayout card(android.app.Activity a) {
+         FrameLayout root = new FrameLayout(a);
+@@ -72,13 +113,14 @@ final class Ui {
+         scroll.addView(center);
+         root.addView(scroll);
+         a.setContentView(root);
++        fitInsets(root);
+         return card;
+     }
+ 
+     static TextView text(Context c, String s, float size, int color, boolean bold) {
+         TextView t = new TextView(c);
+         t.setText(s);
+-        t.setTextSize(size);
++        t.setTextSize(Math.max(size, 12));   // small captions are hard to read on a phone
+         t.setTextColor(color);
+         t.setTypeface(bold ? Typeface.create("sans-serif-medium", Typeface.BOLD) : Typeface.create("sans-serif", Typeface.NORMAL));
+         t.setLineSpacing(0, 1.15f);
+@@ -94,7 +136,9 @@ final class Ui {
+         b.setTextColor(primary ? ON_ACCENT : TEXT);
+         b.setTypeface(Typeface.create("sans-serif-medium", Typeface.BOLD));
+         b.setBackground(primary ? rounded(c, GREEN, 0, 12) : rounded(c, HIGH, EDGE, 12));
+-        b.setMinHeight(dp(c, primary ? 54 : 46));
++        // A finger needs about 48 dp.
++        b.setMinHeight(dp(c, primary ? 56 : 48));
++        b.setMinWidth(dp(c, 48));
+         b.setStateListAnimator(null);
+         return b;
+     }
