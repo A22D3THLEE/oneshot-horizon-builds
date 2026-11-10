@@ -1,0 +1,25 @@
+diff --git a/crates/horizon-client/src/android_main.rs b/crates/horizon-client/src/android_main.rs
+index 437e910..823aca0 100644
+--- a/crates/horizon-client/src/android_main.rs
++++ b/crates/horizon-client/src/android_main.rs
+@@ -35,6 +35,20 @@ fn android_main(app: AndroidApp) {
+             std::env::set_var("HORIZON_CACHE", internal.join("horizon-cache"));
+         }
+         std::env::set_var("TMPDIR", app.internal_data_path().unwrap_or(home.clone()).join("tmp"));
++        // Oneshot (skin_share.rs): the launcher gives the PC game its skin through env; here the files
++        // in <game folder>/skin do (skin.png, cape.png, textures.signed, model.txt = classic or slim).
++        let skin_dir = home.join("skin");
++        if std::env::var_os("HORIZON_OFFLINE_SKIN").is_none() && skin_dir.join("skin.png").is_file() {
++            std::env::set_var("HORIZON_OFFLINE_SKIN", skin_dir.join("skin.png"));
++            let slim = std::fs::read_to_string(skin_dir.join("model.txt")).is_ok_and(|m| m.trim() == "slim");
++            std::env::set_var("HORIZON_OFFLINE_SKIN_MODEL", if slim { "slim" } else { "classic" });
++            if skin_dir.join("textures.signed").is_file() {
++                std::env::set_var("HORIZON_SIGNED_TEXTURES", skin_dir.join("textures.signed"));
++            }
++        }
++        if std::env::var_os("HORIZON_OFFLINE_CAPE").is_none() && skin_dir.join("cape.png").is_file() {
++            std::env::set_var("HORIZON_OFFLINE_CAPE", skin_dir.join("cape.png"));
++        }
+         // `spikes.txt` in the game folder (a number of milliseconds) turns on HORIZON_SPIKES:
+         // frames slower than that log their timings, without a debug build.
+         if let Ok(text) = std::fs::read_to_string(home.join("spikes.txt"))

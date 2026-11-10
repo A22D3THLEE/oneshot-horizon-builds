@@ -65,9 +65,12 @@ jobs:
           cd src
           git config user.email ci@example.invalid; git config user.name ci
           applied=""; skipped=""
-          for p in ../oneshot/patches/*.patch; do
-            # A patch that needs another shape on the port's code has its own copy in android-patches/.
-            [ -f "../oneshot/android-patches/$(basename "$p")" ] && p="../oneshot/android-patches/$(basename "$p")"
+          # Patches of patches/ (each may have its own copy in android-patches/, for another shape of the port's
+          # code) and the ones that exist only for Android.
+          names=$(cd ../oneshot && ls patches/*.patch android-patches/*.patch | xargs -n1 basename | sort -u)
+          for n in $names; do
+            p="../oneshot/patches/$n"
+            [ -f "../oneshot/android-patches/$n" ] && p="../oneshot/android-patches/$n"
             if git apply --whitespace=nowarn "$p"; then applied="$applied $(basename "$p")"; else skipped="$skipped $(basename "$p")"; fi
           done
           echo "applied:$applied"
