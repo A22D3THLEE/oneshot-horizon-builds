@@ -1,8 +1,8 @@
 diff --git a/packaging/android/java/dev/horizonlab/horizon/HorizonActivity.java b/packaging/android/java/dev/horizonlab/horizon/HorizonActivity.java
-index d41e41e..59a9ff5 100644
+index d41e41e..d272751 100644
 --- a/packaging/android/java/dev/horizonlab/horizon/HorizonActivity.java
 +++ b/packaging/android/java/dev/horizonlab/horizon/HorizonActivity.java
-@@ -45,6 +45,66 @@ public class HorizonActivity extends NativeActivity {
+@@ -45,6 +45,69 @@ public class HorizonActivity extends NativeActivity {
          renewAccount();
          hideSystemBars();
          watchKeyboard();
@@ -23,9 +23,11 @@ index d41e41e..59a9ff5 100644
 +            box.setBackgroundColor(Ui.BG);
 +            android.widget.TextView title = Ui.text(this, "HORIZON", 30, Ui.TEXT, true);
 +            title.setLetterSpacing(0.22f);
++            title.setGravity(android.view.Gravity.CENTER);
 +            box.addView(title);
 +            android.widget.TextView sub = Ui.text(this, "ONESHOT", 12, Ui.MUTED, true);
 +            sub.setLetterSpacing(0.3f);
++            sub.setGravity(android.view.Gravity.CENTER);
 +            box.addView(sub);
 +            android.widget.ProgressBar bar = new android.widget.ProgressBar(this, null, android.R.attr.progressBarStyleHorizontal);
 +            bar.setIndeterminate(true);
@@ -36,6 +38,7 @@ index d41e41e..59a9ff5 100644
 +            box.addView(bar, barLp);
 +            android.widget.TextView status = Ui.text(this, Ui.t("Загрузка игры…", "Loading the game…"), 13, Ui.MUTED, false);
 +            status.setPadding(0, Ui.dp(this, 12), 0, 0);
++            status.setGravity(android.view.Gravity.CENTER);
 +            box.addView(status);
 +            d.setContentView(box);
 +            android.view.Window w = d.getWindow();
