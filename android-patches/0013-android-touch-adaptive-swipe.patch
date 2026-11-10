@@ -1,0 +1,196 @@
+diff --git a/crates/horizon-client/src/game/touch.rs b/crates/horizon-client/src/game/touch.rs
+index df2ab37..5d5de66 100644
+--- a/crates/horizon-client/src/game/touch.rs
++++ b/crates/horizon-client/src/game/touch.rs
+@@ -36,7 +36,7 @@ use winit::{
+     application::ApplicationHandler,
+     dpi::PhysicalPosition,
+     keyboard::KeyCode,
+-    event::{DeviceId, ElementState, MouseButton, Touch, TouchPhase, WindowEvent},
++    event::{DeviceId, ElementState, MouseButton, MouseScrollDelta, Touch, TouchPhase, WindowEvent},
+     event_loop::ActiveEventLoop,
+ };
+ 
+@@ -467,6 +467,12 @@ pub(super) struct Touches {
+     pub(super) mouse: bool,
+     /// The pointer capture last asked for.
+     pub(super) pointer_captured: Option<bool>,
++    /// A menu swipe: the finger's last height (GUI px), the distance not yet
++    /// turned into wheel steps, and whether it scrolled at all (its release
++    /// then clicks nothing).
++    scroll_y: f32,
++    scroll_acc: f32,
++    scrolled: bool,
+ }
+ 
+ impl Default for Touches {
+@@ -493,12 +499,23 @@ impl Default for Touches {
+             hardware: false,
+             mouse: false,
+             pointer_captured: None,
++            scroll_y: 0.0,
++            scroll_acc: 0.0,
++            scrolled: false,
+             buttons: if cfg!(target_os = "android") { load_buttons() } else { Vec::new() },
+             selected_button: None,
+         }
+     }
+ }
+ 
++/// The GUI the presets are laid out on.
++const REF_W: f32 = 560.0;
++const REF_H: f32 = 270.0;
++/// GUI pixels of a swipe that turn the wheel one step in a menu.
++const SWIPE_STEP: f32 = 18.0;
++/// How far from a slot (GUI px) a dropped stack still lands in it.
++const SNAP: f32 = 30.0;
++
+ /// The GUI's size, for placing controls.
+ #[derive(Clone, Copy)]
+ struct Gui {
+@@ -509,11 +526,41 @@ struct Gui {
+ impl Gui {
+     fn place(&self, layout: &TouchLayout, id: Id) -> ([f32; 2], f32) {
+         let s = layout.spec(id);
+-        let mut x = s.x * self.w;
++        // Short screens get smaller controls.
++        let k = (self.h / REF_H).clamp(0.8, 1.0);
++        let size = s.size * k;
++        let (mut x, y) = self.anchor(s.x, s.y);
+         if id == Id::Inventory && x > self.w / 2.0 {
+-            x = x.max(self.hotbar_x() + 182.0 + s.size + 1.0);
++            x = x.max(self.hotbar_x() + 182.0 + size + 1.0);
+         }
+-        ([x, s.y * self.h], s.size)
++        ([x, y], size)
++    }
++    /// A control's spot on this GUI. Specs are drawn on the 560 x 270 reference;
++    /// here each keeps its distance from the nearest edge (or from the centre
++    /// column), so the GUI's width and height never push controls over each other.
++    fn anchor(&self, fx: f32, fy: f32) -> (f32, f32) {
++        let (rx, ry) = (fx * REF_W, fy * REF_H);
++        let x = if (rx - REF_W / 2.0).abs() <= 110.0 {
++            self.w / 2.0 + rx - REF_W / 2.0
++        } else if rx < REF_W / 2.0 {
++            rx
++        } else {
++            self.w - (REF_W - rx)
++        };
++        let y = if ry > REF_H / 2.0 { self.h - (REF_H - ry) } else { ry };
++        (x, y)
++    }
++    /// The reverse of `anchor`: the spec fractions of a spot on this GUI.
++    fn unanchor(&self, x: f32, y: f32) -> [f32; 2] {
++        let rx = if (x - self.w / 2.0).abs() <= 110.0 {
++            REF_W / 2.0 + x - self.w / 2.0
++        } else if x < self.w / 2.0 {
++            x
++        } else {
++            REF_W - (self.w - x)
++        };
++        let ry = if y > self.h / 2.0 { REF_H - (self.h - y) } else { y };
++        [(rx / REF_W).clamp(0.0, 1.0), (ry / REF_H).clamp(0.0, 1.0)]
+     }
+     fn custom(&self, b: &CustomButton) -> ([f32; 2], f32) {
+         ([b.x * self.w, b.y * self.h], b.size)
+@@ -872,6 +919,29 @@ impl Game<'_> {
+         Some((Gui { w: batch.width, h: batch.height }, batch.scale))
+     }
+ 
++    /// A stack in hand and the finger over no slot: the nearest slot's centre within
++    /// `SNAP` GUI px, in window pixels, so a drop between slots still lands.
++    fn touch_snap(&self, scale: f32, p: [f32; 2]) -> Option<[f64; 2]> {
++        if self.carried.is_none() {
++            return None;
++        }
++        let batch = self.gui_scale()?;
++        if self.book_covers_menu(batch.width) || self.slot_at(&batch, p[0], p[1]).is_some() {
++            return None;
++        }
++        let (ox, oy) = self.inventory_origin(&batch);
++        let mut best: Option<(f32, [f32; 2])> = None;
++        for i in self.slots() {
++            let (sx, sy) = self.slot_position(i);
++            let c = [ox + sx + 8.0, oy + sy + 8.0];
++            let d = (p[0] - c[0]).hypot(p[1] - c[1]);
++            if d <= SNAP && best.is_none_or(|b| d < b.0) {
++                best = Some((d, c));
++            }
++        }
++        best.map(|(_, c)| [f64::from(c[0] * scale), f64::from(c[1] * scale)])
++    }
++
+     fn touch_controls_shown(&self) -> bool {
+         cfg!(target_os = "android") && self.player.is_some() && !self.pad_in_menu() && !self.touch.hardware
+     }
+@@ -1449,7 +1519,13 @@ impl Game<'_> {
+                     // One finger is the mouse; a second one would click twice.
+                     Finger::Done
+                 } else if !self.touch_controls_shown() {
+-                    send(self, cursor(device_id, pos));
++                    // A stack in hand lands in the nearest slot even when the
++                    // finger came down between slots.
++                    let at = self.touch_snap(scale, p).unwrap_or(pos);
++                    self.touch.scroll_y = p[1];
++                    self.touch.scroll_acc = 0.0;
++                    self.touch.scrolled = false;
++                    send(self, cursor(device_id, at));
+                     send(self, click(device_id, ElementState::Pressed));
+                     // Asked again on the next frame: a tap on a text field brings the
+                     // keyboard back after the system's back gesture hid it.
+@@ -1507,7 +1583,27 @@ impl Game<'_> {
+                 self.touch.fingers.insert(id, finger);
+             }
+             TouchPhase::Moved => match self.touch.fingers.get(&id).copied() {
+-                Some(Finger::Pointer) => send(self, cursor(device_id, pos)),
++                Some(Finger::Pointer) => {
++                    send(self, cursor(device_id, pos));
++                    // With nothing in hand a vertical swipe turns the wheel: lists and
++                    // the creative grid scroll under the finger.
++                    let dy = p[1] - self.touch.scroll_y;
++                    self.touch.scroll_y = p[1];
++                    if self.carried.is_none() {
++                        self.touch.scroll_acc += dy;
++                        let steps = (self.touch.scroll_acc / SWIPE_STEP).trunc();
++                        if steps != 0.0 {
++                            self.touch.scroll_acc -= steps * SWIPE_STEP;
++                            self.touch.scrolled = true;
++                            let wheel = WindowEvent::MouseWheel {
++                                device_id,
++                                delta: MouseScrollDelta::LineDelta(0.0, steps),
++                                phase: TouchPhase::Moved,
++                            };
++                            send(self, wheel);
++                        }
++                    }
++                }
+                 Some(Finger::Stick) => self.touch_stick(&gui, p),
+                 Some(Finger::Dpad) => self.touch_dpad(&gui, p, false),
+                 Some(Finger::DragCustom(i, off)) => {
+@@ -1519,8 +1615,9 @@ impl Game<'_> {
+                 Some(Finger::Drag(control, off)) => {
+                     self.touch.dirty = true;
+                     if let Some(spec) = self.touch.layout.controls.get_mut(&control) {
+-                        spec.x = ((p[0] + off[0]) / gui.w).clamp(0.0, 1.0);
+-                        spec.y = ((p[1] + off[1]) / gui.h).clamp(0.0, 1.0);
++                        let at = gui.unanchor(p[0] + off[0], p[1] + off[1]);
++                        spec.x = at[0];
++                        spec.y = at[1];
+                     }
+                 }
+                 Some(Finger::Look { last, start, since, moved, attacking })
+@@ -1564,7 +1661,13 @@ impl Game<'_> {
+             TouchPhase::Ended | TouchPhase::Cancelled => match self.touch.fingers.remove(&id) {
+                 Some(Finger::Pointer) => {
+                     // A cancelled touch (a system gesture took it) lets go off screen: no click.
+-                    let at = if touch.phase == TouchPhase::Cancelled { [-1.0, -1.0] } else { pos };
++                    // A swipe that scrolled lets go off screen too: it clicks nothing.
++                    let at = if touch.phase == TouchPhase::Cancelled || self.touch.scrolled {
++                        [-1.0, -1.0]
++                    } else {
++                        self.touch_snap(scale, p).unwrap_or(pos)
++                    };
++                    self.touch.scrolled = false;
+                     send(self, cursor(device_id, at));
+                     send(self, click(device_id, ElementState::Released));
+                 }
