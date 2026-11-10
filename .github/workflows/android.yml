@@ -1,0 +1,143 @@
+name: Build Oneshot Horizon for Android
+# Builds an Android APK (arm64) of Horizon by hand. The source is the unofficial Android port of Rayan-XOO
+# (MIT; a fork of horizon-rust/horizon with the Android layer: NativeActivity, touch controls, setup screen),
+# pinned to a commit, with Oneshot's patches on top when `patches` is on. The APK is a workflow artifact, not a
+# release: nothing is published from here.
+# Signing: the secrets ANDROID_KEYSTORE_BASE64, ANDROID_KEYSTORE_PASSWORD and ANDROID_KEY_ALIAS sign the APK when
+# they exist. Without them the APK gets a throwaway debug key, and an install of the next build over it fails
+# (uninstall first, and save the worlds: Android erases the app's data with it).
+on:
+  workflow_dispatch:
+    inputs:
+      ref:
+        description: Commit of Rayan-XOO/horizon to build (empty = the pinned one)
+        required: false
+        default: ''
+      patches:
+        description: Apply Oneshot's patches/*.patch (a patch that does not fit is left out and listed)
+        type: boolean
+        default: false
+      profile:
+        description: Cargo profile (fast = the port's default; release = slower build, faster game)
+        type: choice
+        options: [fast, release]
+        default: fast
+permissions:
+  contents: read
+concurrency:
+  group: oneshot-android
+  cancel-in-progress: true
+env:
+  PORT: Rayan-XOO/horizon
+  # android-port 0.4.5: upstream horizon-rust/horizon 9319ad4 (2026-11-07) plus the Android layer.
+  PORT_PINNED: ca93b0b765d3d2749a7b467051c31c43fcce2cf4
+
+jobs:
+  apk:
+    runs-on: ubuntu-24.04
+    timeout-minutes: 240
+    env:
+      CARGO_TERM_COLOR: never
+      CARGO_PROFILE_DEV_DEBUG: '0'
+      HORIZON_TELEMETRY_URL: 'off'
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          path: oneshot
+          persist-credentials: false
+      - name: The port's source
+        env:
+          REF: ${{ inputs.ref }}
+        run: |
+          set -euo pipefail
+          sha="${REF:-$PORT_PINNED}"
+          [[ "$sha" =~ ^[0-9a-f]{40}$ ]] || { echo "::error::ref must be a full 40-hex commit"; exit 1; }
+          git init -q src
+          cd src
+          git remote add origin "https://github.com/$PORT"
+          git fetch -q --depth 1 origin "$sha"
+          git checkout -q FETCH_HEAD
+          git log -1 --oneline
+      - name: Oneshot's patches
+        if: inputs.patches
+        run: |
+          set -uo pipefail
+          cd src
+          git config user.email ci@example.invalid; git config user.name ci
+          applied=""; skipped=""
+          for p in ../oneshot/patches/*.patch; do
+            if git apply --whitespace=nowarn "$p"; then applied="$applied $(basename "$p")"; else skipped="$skipped $(basename "$p")"; fi
+          done
+          echo "applied:$applied"
+          echo "skipped:$skipped"
+          echo "### Patches" >> "$GITHUB_STEP_SUMMARY"
+          echo "applied:${applied:- none}" >> "$GITHUB_STEP_SUMMARY"
+          echo "skipped:${skipped:- none}" >> "$GITHUB_STEP_SUMMARY"
+      - uses: actions/setup-java@v4
+        with:
+          distribution: temurin
+          java-version: '21'
+      - name: Rust and cargo-ndk
+        run: |
+          set -euo pipefail
+          rustup toolchain install stable --profile minimal
+          rustup default stable
+          rustup target add aarch64-linux-android
+          cargo install cargo-ndk --locked
+          rustc --version
+      - name: Android SDK and NDK
+        run: |
+          set -euo pipefail
+          export ANDROID_HOME="${ANDROID_HOME:-${ANDROID_SDK_ROOT:-/usr/local/lib/android/sdk}}"
+          echo "ANDROID_HOME=$ANDROID_HOME" >> "$GITHUB_ENV"
+          yes | "$ANDROID_HOME/cmdline-tools/latest/bin/sdkmanager" --licenses > /dev/null || true
+          "$ANDROID_HOME/cmdline-tools/latest/bin/sdkmanager" "platforms;android-35" "build-tools;35.0.0" "ndk;27.2.12479018"
+          echo "ANDROID_NDK_HOME=$ANDROID_HOME/ndk/27.2.12479018" >> "$GITHUB_ENV"
+      - uses: actions/cache@v4
+        with:
+          path: |
+            ~/.cargo/registry
+            ~/.cargo/git
+            src/target
+          key: android-${{ inputs.profile }}-${{ hashFiles('src/Cargo.lock') }}
+          restore-keys: android-${{ inputs.profile }}-
+      - name: The signing key
+        env:
+          KS: ${{ secrets.ANDROID_KEYSTORE_BASE64 }}
+          PASS: ${{ secrets.ANDROID_KEYSTORE_PASSWORD }}
+          ALIAS: ${{ secrets.ANDROID_KEY_ALIAS }}
+        run: |
+          set -euo pipefail
+          if [[ -n "$KS" && -n "$PASS" ]]; then
+            echo "$KS" | base64 -d > "$RUNNER_TEMP/release.keystore"
+            echo "HORIZON_KEYSTORE=$RUNNER_TEMP/release.keystore" >> "$GITHUB_ENV"
+            echo "HORIZON_KEYSTORE_PASS=$PASS" >> "$GITHUB_ENV"
+            [[ -n "$ALIAS" ]] && echo "HORIZON_KEY_ALIAS=$ALIAS" >> "$GITHUB_ENV"
+            echo "Signing with the project key"
+          else
+            echo "::warning::No signing secrets: the APK gets a throwaway debug key"
+          fi
+      - name: Build the APK
+        env:
+          PROFILE: ${{ inputs.profile }}
+        run: |
+          set -euo pipefail
+          cd src
+          export JAVAC="$JAVA_HOME/bin/javac"
+          ./packaging/android/build_apk.sh
+          cd target/android
+          sha256sum horizon.apk | tee horizon.apk.sha256
+          {
+            echo "### APK"
+            echo "port commit: $(git -C ../.. rev-parse HEAD 2>/dev/null || echo "$PORT_PINNED")"
+            echo "profile: $PROFILE, patches: ${{ inputs.patches }}"
+            echo "sha256: $(cut -d' ' -f1 horizon.apk.sha256)"
+            echo "size: $(stat -c %s horizon.apk) bytes"
+          } >> "$GITHUB_STEP_SUMMARY"
+      - uses: actions/upload-artifact@v4
+        with:
+          name: horizon-android-${{ inputs.profile }}${{ inputs.patches && '-oneshot' || '' }}
+          path: |
+            src/target/android/horizon.apk
+            src/target/android/horizon.apk.sha256
+          retention-days: 14
