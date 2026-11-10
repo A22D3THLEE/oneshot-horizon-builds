@@ -1,0 +1,309 @@
+diff --git a/crates/horizon-client/src/android_main.rs b/crates/horizon-client/src/android_main.rs
+index 07d2000..7e85a5e 100644
+--- a/crates/horizon-client/src/android_main.rs
++++ b/crates/horizon-client/src/android_main.rs
+@@ -70,6 +70,23 @@ fn android_main(app: AndroidApp) {
+                 std::env::set_var("HORIZON_SERVER", code);
+             }
+         }
++        // Oneshot: `world-pending.txt` (the launcher's "Create world" on a seed, one start only):
++        // the world folder under saves/ on the first line, the seed on the second, as the PC
++        // launcher's `--world FOLDER --seed SEED`. An existing folder just opens.
++        let world = home.join("world-pending.txt");
++        if let Ok(text) = std::fs::read_to_string(&world) {
++            let _ = std::fs::remove_file(&world);
++            let mut lines = text.lines().map(str::trim);
++            if let Some(folder) = lines
++                .next()
++                .filter(|f| !f.is_empty() && !f.contains(['/', '\\']) && !f.starts_with('.'))
++            {
++                std::env::set_var("HORIZON_START_WORLD", folder);
++                if let Some(seed) = lines.next().filter(|s| !s.is_empty()) {
++                    std::env::set_var("HORIZON_START_SEED", seed);
++                }
++            }
++        }
+         // Oneshot's relay, as the PC launcher sets it: a fallback when friends cannot reach each
+         // other directly (mobile internet, CGNAT). `relay.txt` in the game folder overrides it;
+         // an empty file turns the relay off.
+diff --git a/crates/horizon-client/src/game.rs b/crates/horizon-client/src/game.rs
+index 24c3c89..448ef4a 100644
+--- a/crates/horizon-client/src/game.rs
++++ b/crates/horizon-client/src/game.rs
+@@ -631,7 +631,22 @@ impl Options {
+     /// The command line, then what it asks of the process: the game folder, the account.
+     /// A bad command line is a [`launch_api::UsageError`] (exit code 2, no crash report).
+     fn read() -> Result<Option<Self>> {
+-        let Some(mut o) = Self::parse(std::env::args().skip(1))
++        // Oneshot: Android has no command line; the launcher's start world and seed come
++        // through env instead (android_main.rs, world-pending.txt).
++        #[cfg(target_os = "android")]
++        let extra: Vec<String> = [("HORIZON_START_WORLD", "--world"), ("HORIZON_START_SEED", "--seed")]
++            .into_iter()
++            .filter_map(|(key, flag)| {
++                std::env::var(key)
++                    .ok()
++                    .filter(|v| !v.is_empty())
++                    .map(|v| [flag.to_string(), v])
++            })
++            .flatten()
++            .collect();
++        #[cfg(not(target_os = "android"))]
++        let extra: Vec<String> = Vec::new();
++        let Some(mut o) = Self::parse(std::env::args().skip(1).chain(extra))
+             .map_err(|e| launch_api::UsageError(e.to_string()))?
+         else {
+             return Ok(None);
+diff --git a/packaging/android/java/dev/horizonlab/horizon/ProfileActivity.java b/packaging/android/java/dev/horizonlab/horizon/ProfileActivity.java
+index c37bc24..3b20ce9 100644
+--- a/packaging/android/java/dev/horizonlab/horizon/ProfileActivity.java
++++ b/packaging/android/java/dev/horizonlab/horizon/ProfileActivity.java
+@@ -725,11 +725,36 @@ public class ProfileActivity extends Activity implements View.OnClickListener {
+     }
+ 
+     private void play() {
++        launch(true);
++    }
++
++    /**
++     * Oneshot: the Worlds page's "Create world" on a seed. world-pending.txt is read once by the
++     * game at start (android_main.rs), as the PC launcher's `--world FOLDER --seed SEED`; no join
++     * code this time, since a server would win over the world.
++     */
++    void playWorld(String folder, String seed) {
++        try {
++            write(new File(dir, "world-pending.txt"), (folder + "\n" + seed + "\n").getBytes(StandardCharsets.UTF_8));
++        } catch (Exception e) {
++            say(Ui.t("Не удалось подготовить мир: ", "Could not prepare the world: ") + e.getMessage(), Ui.BAD);
++            return;
++        }
++        launch(false);
++    }
++
++    private void launch(boolean join) {
+         if (!saveProfile()) {
++            new File(dir, "world-pending.txt").delete();
+             show(PROFILE);
+             return;
+         }
+-        saveJoin();
++        if (join) {
++            saveJoin();
++        } else {
++            new File(dir, "join.txt").delete();
++            new File(dir, "join-last.txt").delete();
++        }
+         Intent i = new Intent(this, HorizonActivity.class);
+         i.addFlags(Intent.FLAG_ACTIVITY_REORDER_TO_FRONT);
+         startActivity(i);
+diff --git a/packaging/android/java/dev/horizonlab/horizon/WorldsPage.java b/packaging/android/java/dev/horizonlab/horizon/WorldsPage.java
+index 9fa226d..e650aa4 100644
+--- a/packaging/android/java/dev/horizonlab/horizon/WorldsPage.java
++++ b/packaging/android/java/dev/horizonlab/horizon/WorldsPage.java
+@@ -5,9 +5,11 @@ import android.content.ClipData;
+ import android.content.ClipboardManager;
+ import android.content.Context;
+ import android.content.DialogInterface;
++import android.graphics.Bitmap;
+ import android.view.View;
+ import android.widget.Button;
+ import android.widget.EditText;
++import android.widget.ImageView;
+ import android.widget.LinearLayout;
+ import android.widget.TextView;
+ import java.io.File;
+@@ -80,8 +82,8 @@ final class WorldsPage extends Page {
+         buttons(b, make, restore);
+ 
+         LinearLayout s = block(Ui.t("Сиды", "Seeds"));
+-        note(s, Ui.t("Нажмите на сид, чтобы скопировать, и вставьте его при создании мира. Свой сид — удержанием удалить.",
+-                "Tap a seed to copy it, then paste it when creating a world. Hold one of yours to delete it."));
++        note(s, Ui.t("«Создать мир» — игра сразу создаст новый мир на этом сиде. Нажатие на строку копирует сид. Свой сид — удержанием удалить.",
++                "“Create world” makes a new world on that seed right away. Tap a row to copy the seed. Hold one of yours to delete it."));
+         mySeeds = new LinearLayout(a);
+         mySeeds.setOrientation(LinearLayout.VERTICAL);
+         s.addView(mySeeds);
+@@ -325,9 +327,18 @@ final class WorldsPage extends Page {
+         }
+     }
+ 
+-    private View seedRow(String name, final String seed, String note) {
++    private View seedRow(final String name, final String seed, String note) {
++        return seedRow(name, seed, note, "");
++    }
++
++    /** A seed: tap to copy it, "Create" starts a new world on it; a catalog seed may carry a preview. */
++    private View seedRow(final String name, final String seed, String note, String image) {
++        LinearLayout box = new LinearLayout(a);
++        box.setOrientation(LinearLayout.VERTICAL);
++        box.setPadding(0, dp(6), 0, dp(6));
++        View pic = preview(image);
++        if (pic != null) box.addView(pic, new LinearLayout.LayoutParams(-1, -2));
+         LinearLayout r = Ui.row(a);
+-        r.setPadding(0, dp(6), 0, dp(6));
+         LinearLayout col = new LinearLayout(a);
+         col.setOrientation(LinearLayout.VERTICAL);
+         col.addView(Ui.text(a, name, 14, Ui.TEXT, true));
+@@ -336,17 +347,137 @@ final class WorldsPage extends Page {
+         TextView s = Ui.chip(a, seed, false);
+         s.setTypeface(android.graphics.Typeface.MONOSPACE);
+         s.setSingleLine(true);
+-        s.setMaxWidth(dp(220));
++        s.setMaxWidth(dp(180));
+         s.setEllipsize(android.text.TextUtils.TruncateAt.END);
+         r.addView(s);
+-        r.setOnClickListener(new View.OnClickListener() {
++        TextView make = Ui.chip(a, Ui.t("Создать мир", "Create world"), true);
++        LinearLayout.LayoutParams ml = new LinearLayout.LayoutParams(-2, -2);
++        ml.leftMargin = dp(8);
++        r.addView(make, ml);
++        make.setOnClickListener(new View.OnClickListener() {
++            public void onClick(View v) {
++                createWorld(name, seed);
++            }
++        });
++        box.addView(r, Ui.gap(a, pic == null ? 0 : 6));
++        box.setOnClickListener(new View.OnClickListener() {
+             public void onClick(View v) {
+                 ClipboardManager cm = (ClipboardManager) a.getSystemService(Context.CLIPBOARD_SERVICE);
+                 if (cm != null) cm.setPrimaryClip(ClipData.newPlainText("seed", seed));
+                 a.say(Ui.t("Сид скопирован: ", "Seed copied: ") + seed, Ui.GREEN);
+             }
+         });
+-        return r;
++        return box;
++    }
++
++    /** As the PC launcher's `--world FOLDER --seed SEED`: the game makes the world on its next start. */
++    private void createWorld(String name, final String seed) {
++        LinearLayout box = new LinearLayout(a);
++        box.setOrientation(LinearLayout.VERTICAL);
++        box.setPadding(dp(20), dp(8), dp(20), 0);
++        final EditText field = Ui.field(a, Ui.t("Название мира", "World name"));
++        field.setText(folderName(name));
++        box.addView(field);
++        note(box, Ui.t("Сид: ", "Seed: ") + seed);
++        new AlertDialog.Builder(a)
++                .setTitle(Ui.t("Новый мир по сиду", "New world from a seed"))
++                .setView(box)
++                .setPositiveButton(Ui.t("Создать и играть", "Create and play"), new DialogInterface.OnClickListener() {
++                    public void onClick(DialogInterface d, int x) {
++                        String folder = freeFolder(folderName(field.getText().toString()));
++                        a.playWorld(folder, seed);
++                    }
++                })
++                .setNegativeButton(Ui.t("Отмена", "Cancel"), null)
++                .show();
++    }
++
++    /** A folder name the game accepts (android_main.rs): no slashes, no leading dot. */
++    static String folderName(String name) {
++        String n = name.replaceAll("[\\\\/:*?\"<>|\\t\\r\\n]", " ").replaceAll("\\s+", " ").trim();
++        while (n.startsWith(".")) n = n.substring(1).trim();
++        if (n.length() > 60) n = n.substring(0, 60).trim();
++        return n.isEmpty() ? Ui.t("Новый мир", "New World") : n;
++    }
++
++    /** "Name", or "Name (2)", "Name (3)"… when saves/ already has that folder. */
++    private String freeFolder(String base) {
++        File saves = new File(a.dir, "saves");
++        String n = base;
++        for (int i = 2; new File(saves, n).exists() && i < 1000; i++) n = base + " (" + i + ")";
++        return n;
++    }
++
++    // ---- Catalog previews: `image` in seeds.json / maps.json --------------------------------
++
++    /** A 16:9 picture for a catalog entry, loaded in the background; null when there is none. */
++    private View preview(String image) {
++        final String url = imageUrl(image);
++        if (url == null) return null;
++        final ImageView pic = new ImageView(a) {
++            @Override
++            protected void onMeasure(int w, int h) {
++                int width = MeasureSpec.getSize(w);
++                int height = Math.min(width * 9 / 16, dp(260));
++                setMeasuredDimension(width, height);
++            }
++        };
++        pic.setScaleType(ImageView.ScaleType.CENTER_CROP);
++        pic.setBackground(Ui.rounded(a, Ui.HIGH, 0, 8));
++        pic.setClipToOutline(true);
++        new Thread(new Runnable() {
++            public void run() {
++                final Bitmap b = fetchPicture(url, Math.min(a.getResources().getDisplayMetrics().widthPixels, 1280));
++                if (b == null) return;
++                a.runOnUiThread(new Runnable() {
++                    public void run() {
++                        pic.setImageBitmap(b);
++                    }
++                });
++            }
++        }).start();
++        return pic;
++    }
++
++    /** An https link as is; a path such as img/x.jpg is relative to the catalog folder. */
++    static String imageUrl(String image) {
++        if (image == null) return null;
++        image = image.trim();
++        if (image.startsWith("https://")) return image;
++        if (image.matches("[A-Za-z0-9_\\-]+(/[A-Za-z0-9_\\-]+)*\\.(jpg|jpeg|png|webp)")) return CATALOG + image;
++        return null;
++    }
++
++    private Bitmap fetchPicture(String url, int width) {
++        try {
++            File dir = new File(a.getCacheDir(), "catalog-pics");
++            dir.mkdirs();
++            File f = new File(dir, Net.hex(MessageDigest.getInstance("SHA-1").digest(url.getBytes(StandardCharsets.UTF_8))));
++            // A day old at most: the team may swap a picture under the same name.
++            if (!f.isFile() || f.lastModified() < System.currentTimeMillis() - 24L * 3600 * 1000) {
++                HttpURLConnection c = Net.open(url);
++                File tmp = new File(dir, f.getName() + ".part");
++                try (InputStream in = c.getInputStream(); FileOutputStream out = new FileOutputStream(tmp)) {
++                    byte[] buf = new byte[65536];
++                    long got = 0;
++                    int n;
++                    while ((n = in.read(buf)) > 0) {
++                        got += n;
++                        if (got > (8 << 20)) throw new java.io.IOException("picture over 8 MB");
++                        out.write(buf, 0, n);
++                    }
++                } finally {
++                    c.disconnect();
++                }
++                if (!tmp.renameTo(f)) {
++                    f.delete();
++                    if (!tmp.renameTo(f)) return null;
++                }
++            }
++            return GalleryPage.decode(f, width);
++        } catch (Exception e) {
++            return null;
++        }
+     }
+ 
+     private void addSeed() {
+@@ -428,7 +559,7 @@ final class WorldsPage extends Page {
+             if (o == null) continue;
+             String seed = o.optString("seed", "");
+             if (seed.isEmpty()) continue;
+-            teamSeeds.addView(seedRow(o.optString("name", seed), seed, o.optString("note", "")));
++            teamSeeds.addView(seedRow(o.optString("name", seed), seed, o.optString("note", ""), o.optString("image", "")));
+         }
+     }
+ 
+@@ -447,6 +578,12 @@ final class WorldsPage extends Page {
+             // Only an https link with a checksum: the file is checked before it becomes a world.
+             if (name.isEmpty() || !url.startsWith("https://") || !sha.matches("[0-9a-f]{64}")) continue;
+             long size = o.optLong("size", 0);
++            View pic = preview(o.optString("image", ""));
++            if (pic != null) {
++                LinearLayout.LayoutParams pl = new LinearLayout.LayoutParams(-1, -2);
++                pl.topMargin = dp(6);
++                maps.addView(pic, pl);
++            }
+             LinearLayout r = Ui.row(a);
+             r.setPadding(0, dp(6), 0, dp(6));
+             LinearLayout col = new LinearLayout(a);
