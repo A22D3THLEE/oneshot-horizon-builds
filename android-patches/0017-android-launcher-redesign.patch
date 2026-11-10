@@ -457,10 +457,10 @@ index 0000000..97a80d0
 +}
 diff --git a/packaging/android/java/dev/horizonlab/horizon/HomePage.java b/packaging/android/java/dev/horizonlab/horizon/HomePage.java
 new file mode 100644
-index 0000000..7449b1f
+index 0000000..dac28e0
 --- /dev/null
 +++ b/packaging/android/java/dev/horizonlab/horizon/HomePage.java
-@@ -0,0 +1,171 @@
+@@ -0,0 +1,186 @@
 +package dev.horizonlab.horizon;
 +
 +import android.view.View;
@@ -615,7 +615,7 @@ index 0000000..7449b1f
 +                            UpdateActivity.Release r = got.get(i);
 +                            news.addView(Ui.text(a, r.name + (r.date.isEmpty() ? "" : "  ·  " + r.date), 14, i == 0 ? Ui.GREEN : Ui.TEXT, true),
 +                                    Ui.gap(a, i == 0 ? 0 : 8));
-+                            String notes = r.notes.replaceAll("[#*`>]", "").replaceAll("\\s+", " ").trim();
++                            String notes = readable(r.notes);
 +                            if (notes.length() > 220) notes = notes.substring(0, 220) + "…";
 +                            if (!notes.isEmpty()) note(news, notes);
 +                        }
@@ -630,6 +630,21 @@ index 0000000..7449b1f
 +                });
 +            }
 +        }).start();
++    }
++
++    /**
++     * The release text a player reads: without the service lines CI writes for UpdateActivity
++     * (versionCode, versionName, sha256, port commit, patches) and the heading that repeats the title.
++     */
++    static String readable(String body) {
++        StringBuilder b = new StringBuilder();
++        for (String l : body.replace("\r", "").split("\n")) {
++            String t = l.trim();
++            if (t.isEmpty() || t.startsWith("OneShot for Android")) continue;
++            if (t.matches("(?i)(versionCode|versionName|sha256|port commit|patches)\\s*:.*")) continue;
++            b.append(t).append(' ');
++        }
++        return b.toString().replaceAll("[#*`>]", "").replaceAll("\\s+", " ").trim();
 +    }
 +}
 diff --git a/packaging/android/java/dev/horizonlab/horizon/HorizonActivity.java b/packaging/android/java/dev/horizonlab/horizon/HorizonActivity.java
@@ -1390,7 +1405,7 @@ index 0000000..c5ca639
 +    }
 +}
 diff --git a/packaging/android/java/dev/horizonlab/horizon/ProfileActivity.java b/packaging/android/java/dev/horizonlab/horizon/ProfileActivity.java
-index 313af82..1e63a91 100644
+index 313af82..c37bc24 100644
 --- a/packaging/android/java/dev/horizonlab/horizon/ProfileActivity.java
 +++ b/packaging/android/java/dev/horizonlab/horizon/ProfileActivity.java
 @@ -1,11 +1,12 @@
@@ -1443,7 +1458,7 @@ index 313af82..1e63a91 100644
      private Button catalog, versions;
      private Button pick, cape, model, play, driver, systemDriver, microsoft, deviceCode, signOut;
      private TextView driverStatus, accountStatus, accountChip;
-@@ -57,270 +63,320 @@ public class ProfileActivity extends Activity implements View.OnClickListener {
+@@ -57,270 +63,325 @@ public class ProfileActivity extends Activity implements View.OnClickListener {
      private String verifyUri = "https://www.microsoft.com/link";
      private boolean slim;
  
@@ -1497,7 +1512,9 @@ index 313af82..1e63a91 100644
 +        TextView title = Ui.text(this, "HORIZON", 20, Ui.TEXT, true);
          title.setLetterSpacing(0.22f);
 -        head.addView(title);
--        TextView sub = Ui.text(this, "ONESHOT", 11, Ui.MUTED, true);
++        title.setPadding(Ui.dp(this, 8), 0, 0, 0);
++        rail.addView(title);
+         TextView sub = Ui.text(this, "ONESHOT", 11, Ui.MUTED, true);
 -        sub.setLetterSpacing(0.3f);
 -        sub.setPadding(Ui.dp(this, 10), Ui.dp(this, 8), 0, 0);
 -        head.addView(sub, new LinearLayout.LayoutParams(0, -2, 1));
@@ -1513,12 +1530,14 @@ index 313af82..1e63a91 100644
 -
 -        LinearLayout who = new LinearLayout(this);
 -        who.setOrientation(LinearLayout.HORIZONTAL);
-+        title.setPadding(Ui.dp(this, 8), 0, 0, 0);
-+        rail.addView(title);
-+        TextView sub = Ui.text(this, "ONESHOT · v" + UpdateActivity.versionName(this), 11, Ui.MUTED, true);
 +        sub.setLetterSpacing(0.14f);
 +        sub.setPadding(Ui.dp(this, 8), 0, 0, 0);
 +        rail.addView(sub);
++        TextView ver = Ui.text(this, "v" + UpdateActivity.versionName(this), 10, Ui.MUTED, false);
++        ver.setSingleLine(true);
++        ver.setEllipsize(android.text.TextUtils.TruncateAt.END);
++        ver.setPadding(Ui.dp(this, 8), Ui.dp(this, 2), 0, 0);
++        rail.addView(ver);
 +
 +        String[] labels = {Ui.t("Главная", "Home"), Ui.t("Профиль", "Profile"), Ui.t("Друзья", "Friends"),
 +            Ui.t("Миры", "Worlds"), Ui.t("Галерея", "Gallery"), Ui.t("Контент", "Content"), Ui.t("Настройки", "Settings")};
@@ -1973,7 +1992,7 @@ index 313af82..1e63a91 100644
                      "Безопасный запуск: Vulkan не стартовал, игра работает на OpenGL ES и может быть медленнее.",
                      "Safe start: Vulkan did not start, so the game runs on OpenGL ES and can be slower."),
                      12, Ui.WARN, false), Ui.gap(this, 8));
-@@ -333,10 +389,11 @@ public class ProfileActivity extends Activity implements View.OnClickListener {
+@@ -333,10 +394,11 @@ public class ProfileActivity extends Activity implements View.OnClickListener {
                      ((Button) v).setText(Ui.t("Перезапустите игру", "Restart the game"));
                  }
              });
@@ -1987,7 +2006,7 @@ index 313af82..1e63a91 100644
          Button cutout = Ui.button(this, cutoutLabel(), false);
          cutout.setOnClickListener(new View.OnClickListener() {
              public void onClick(View v) {
-@@ -352,74 +409,164 @@ public class ProfileActivity extends Activity implements View.OnClickListener {
+@@ -352,74 +414,164 @@ public class ProfileActivity extends Activity implements View.OnClickListener {
                  ((Button) v).setText(cutoutLabel());
              }
          });
@@ -2218,7 +2237,7 @@ index 313af82..1e63a91 100644
      }
  
      @Override
-@@ -431,6 +578,23 @@ public class ProfileActivity extends Activity implements View.OnClickListener {
+@@ -431,6 +583,23 @@ public class ProfileActivity extends Activity implements View.OnClickListener {
              updateModel();
              showPreview();
          }
@@ -2242,7 +2261,7 @@ index 313af82..1e63a91 100644
      }
  
      @Override
-@@ -449,15 +613,7 @@ public class ProfileActivity extends Activity implements View.OnClickListener {
+@@ -449,15 +618,7 @@ public class ProfileActivity extends Activity implements View.OnClickListener {
          }
      }
  
@@ -2259,7 +2278,7 @@ index 313af82..1e63a91 100644
          try {
              for (String l : new String(Files.readAllBytes(new File(dir, "horizon-player.txt").toPath()), StandardCharsets.UTF_8).split("\n")) {
                  if (l.startsWith("name:")) return l.substring(5).trim();
-@@ -489,7 +645,8 @@ public class ProfileActivity extends Activity implements View.OnClickListener {
+@@ -489,7 +650,8 @@ public class ProfileActivity extends Activity implements View.OnClickListener {
          accountStatus.setText(accountLine());
          signOut.setVisibility(n.isEmpty() ? View.GONE : View.VISIBLE);
          microsoft.setVisibility(n.isEmpty() ? View.VISIBLE : View.GONE);
@@ -2269,7 +2288,7 @@ index 313af82..1e63a91 100644
          accountChip.setTextColor(n.isEmpty() ? Ui.MUTED : Ui.GREEN);
      }
  
-@@ -497,18 +654,18 @@ public class ProfileActivity extends Activity implements View.OnClickListener {
+@@ -497,18 +659,18 @@ public class ProfileActivity extends Activity implements View.OnClickListener {
      private boolean saveProfile() {
          String n = name.getText().toString().trim();
          if (!n.isEmpty() && !validName(n)) {
@@ -2291,7 +2310,7 @@ index 313af82..1e63a91 100644
              return false;
          }
      }
-@@ -542,13 +699,8 @@ public class ProfileActivity extends Activity implements View.OnClickListener {
+@@ -542,13 +704,8 @@ public class ProfileActivity extends Activity implements View.OnClickListener {
      }
  
      private String readJoin() {
@@ -2307,7 +2326,7 @@ index 313af82..1e63a91 100644
      }
  
      /** join.txt is read once by the game at start (android_main.rs) and deleted; join-last.txt keeps the field. */
-@@ -567,35 +719,57 @@ public class ProfileActivity extends Activity implements View.OnClickListener {
+@@ -567,35 +724,57 @@ public class ProfileActivity extends Activity implements View.OnClickListener {
          }
      }
  
@@ -2385,7 +2404,7 @@ index 313af82..1e63a91 100644
          File[] list = world.listFiles();
          if (list == null) return;
          for (File f : list) {
-@@ -611,7 +785,7 @@ public class ProfileActivity extends Activity implements View.OnClickListener {
+@@ -611,7 +790,7 @@ public class ProfileActivity extends Activity implements View.OnClickListener {
      }
  
      /** Unpacks a zip with one world beside the saves under a free folder name; returns that name or null. */
@@ -2394,7 +2413,7 @@ index 313af82..1e63a91 100644
          File saves = new File(dir, "saves");
          saves.mkdirs();
          File staging = new File(saves, "import-" + System.currentTimeMillis() + ".importing");
-@@ -620,7 +794,7 @@ public class ProfileActivity extends Activity implements View.OnClickListener {
+@@ -620,7 +799,7 @@ public class ProfileActivity extends Activity implements View.OnClickListener {
          long total = 0;
          try (java.util.zip.ZipInputStream zin = new java.util.zip.ZipInputStream(raw)) {
              java.util.zip.ZipEntry e;
@@ -2403,7 +2422,7 @@ index 313af82..1e63a91 100644
              File all = new File(staging, "all");
              all.mkdirs();
              byte[] buf = new byte[65536];
-@@ -657,19 +831,19 @@ public class ProfileActivity extends Activity implements View.OnClickListener {
+@@ -657,19 +836,19 @@ public class ProfileActivity extends Activity implements View.OnClickListener {
              String base = prefix.isEmpty() ? "Imported world" : prefix.substring(0, prefix.length() - 1);
              base = base.substring(base.lastIndexOf('/') + 1);
              if (base.isEmpty()) base = "Imported world";
@@ -2428,7 +2447,7 @@ index 313af82..1e63a91 100644
          File[] kids = f.listFiles();
          if (kids != null) for (File k : kids) deleteTree(k);
          f.delete();
-@@ -693,14 +867,6 @@ public class ProfileActivity extends Activity implements View.OnClickListener {
+@@ -693,14 +872,6 @@ public class ProfileActivity extends Activity implements View.OnClickListener {
          return out.size() > 8000 ? null : out.toByteArray();
      }
  
@@ -2443,7 +2462,7 @@ index 313af82..1e63a91 100644
      public void onClick(View v) {
          if (v == pick) {
              Intent i = new Intent(Intent.ACTION_OPEN_DOCUMENT);
-@@ -722,22 +888,8 @@ public class ProfileActivity extends Activity implements View.OnClickListener {
+@@ -722,22 +893,8 @@ public class ProfileActivity extends Activity implements View.OnClickListener {
              }
          } else if (v == catalog) {
              startActivity(new Intent(this, CatalogActivity.class));
@@ -2467,7 +2486,7 @@ index 313af82..1e63a91 100644
          } else if (v == driver) {
              Intent i = new Intent(Intent.ACTION_OPEN_DOCUMENT);
              i.addCategory(Intent.CATEGORY_OPENABLE);
-@@ -746,8 +898,7 @@ public class ProfileActivity extends Activity implements View.OnClickListener {
+@@ -746,8 +903,7 @@ public class ProfileActivity extends Activity implements View.OnClickListener {
          } else if (v == systemDriver) {
              Turnip.useSystem(this);
              driverStatus.setText(Turnip.status(this));
@@ -2477,7 +2496,7 @@ index 313af82..1e63a91 100644
          } else if (v == copy) {
              android.content.ClipboardManager cm = (android.content.ClipboardManager) getSystemService(CLIPBOARD_SERVICE);
              if (cm != null) cm.setPrimaryClip(android.content.ClipData.newPlainText("code", code.getText()));
-@@ -756,7 +907,7 @@ public class ProfileActivity extends Activity implements View.OnClickListener {
+@@ -756,7 +912,7 @@ public class ProfileActivity extends Activity implements View.OnClickListener {
              try {
                  startActivity(new Intent(Intent.ACTION_VIEW, Uri.parse(verifyUri)));
              } catch (Exception e) {
@@ -2486,7 +2505,7 @@ index 313af82..1e63a91 100644
              }
          } else if (v == advanced) {
              advancedBox.setVisibility(advancedBox.getVisibility() == View.VISIBLE ? View.GONE : View.VISIBLE);
-@@ -765,8 +916,7 @@ public class ProfileActivity extends Activity implements View.OnClickListener {
+@@ -765,8 +921,7 @@ public class ProfileActivity extends Activity implements View.OnClickListener {
                  startActivityForResult(new Intent(this, MsaLoginActivity.class), MS_LOGIN);
              } catch (Exception e) {
                  advancedBox.setVisibility(View.VISIBLE);
@@ -2496,7 +2515,7 @@ index 313af82..1e63a91 100644
              }
          } else if (v == deviceCode) {
              startDeviceCode();
-@@ -778,8 +928,7 @@ public class ProfileActivity extends Activity implements View.OnClickListener {
+@@ -778,8 +933,7 @@ public class ProfileActivity extends Activity implements View.OnClickListener {
              microsoft.setEnabled(true);
              deviceCode.setEnabled(true);
              refreshAccount();
@@ -2506,7 +2525,7 @@ index 313af82..1e63a91 100644
          } else if (v == mods) {
              startActivity(new Intent(this, ModImportActivity.class));
          }
-@@ -795,22 +944,20 @@ public class ProfileActivity extends Activity implements View.OnClickListener {
+@@ -795,22 +949,20 @@ public class ProfileActivity extends Activity implements View.OnClickListener {
              copy.setText(Ui.t("Скопировать код", "Copy code"));
              codeBox.setVisibility(View.VISIBLE);
              deviceCode.setText(Ui.t("Ждём вход…", "Waiting for sign-in…"));
@@ -2532,7 +2551,7 @@ index 313af82..1e63a91 100644
          }
      };
  
-@@ -824,18 +971,16 @@ public class ProfileActivity extends Activity implements View.OnClickListener {
+@@ -824,18 +976,16 @@ public class ProfileActivity extends Activity implements View.OnClickListener {
      private void startDeviceCode() {
          String id = clientId.getText().toString().trim();
          if (!id.matches("[0-9a-fA-F]{8}-[0-9a-fA-F]{4}-[0-9a-fA-F]{4}-[0-9a-fA-F]{4}-[0-9a-fA-F]{12}")) {
@@ -2554,7 +2573,7 @@ index 313af82..1e63a91 100644
          deviceCode.setEnabled(false);
          microsoft.setEnabled(false);
          Msa.start(this, id, listener);
-@@ -862,21 +1007,62 @@ public class ProfileActivity extends Activity implements View.OnClickListener {
+@@ -862,21 +1012,62 @@ public class ProfileActivity extends Activity implements View.OnClickListener {
          return Ui.t("Аккаунт: ", "Account: ") + n;
      }
  
@@ -2623,7 +2642,7 @@ index 313af82..1e63a91 100644
              microsoft.setEnabled(false);
              microsoft.setText(Ui.t("Входим…", "Signing in…"));
              Msa.startWithCode(this, c, listener);
-@@ -884,99 +1070,54 @@ public class ProfileActivity extends Activity implements View.OnClickListener {
+@@ -884,99 +1075,54 @@ public class ProfileActivity extends Activity implements View.OnClickListener {
          }
          if (result != RESULT_OK || data == null || data.getData() == null) return;
          if (request == PICK_DRIVER) {
@@ -2739,7 +2758,7 @@ index 313af82..1e63a91 100644
          }
      }
  
-@@ -1018,7 +1159,7 @@ public class ProfileActivity extends Activity implements View.OnClickListener {
+@@ -1018,7 +1164,7 @@ public class ProfileActivity extends Activity implements View.OnClickListener {
          return out.toByteArray();
      }
  
