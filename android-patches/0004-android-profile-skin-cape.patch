@@ -1,0 +1,130 @@
+diff --git a/packaging/android/java/dev/horizonlab/horizon/ProfileActivity.java b/packaging/android/java/dev/horizonlab/horizon/ProfileActivity.java
+index cb25ae4..e9d251d 100644
+--- a/packaging/android/java/dev/horizonlab/horizon/ProfileActivity.java
++++ b/packaging/android/java/dev/horizonlab/horizon/ProfileActivity.java
+@@ -37,11 +37,12 @@ public class ProfileActivity extends Activity implements View.OnClickListener {
+     private static final int PICK = 7;
+     private static final int PICK_DRIVER = 8;
+     private static final int MS_LOGIN = 9;
++    private static final int PICK_CAPE = 10;
+     private File dir;
+     private EditText name;
+     private TextView message;
+     private SkinView preview;
+-    private Button pick, model, play, driver, systemDriver, microsoft, deviceCode, signOut;
++    private Button pick, cape, model, play, driver, systemDriver, microsoft, deviceCode, signOut;
+     private TextView driverStatus, accountStatus, accountChip;
+     private EditText clientId;
+     private LinearLayout codeBox, advancedBox;
+@@ -111,6 +112,9 @@ public class ProfileActivity extends Activity implements View.OnClickListener {
+         pick = Ui.button(this, Ui.t("Скин…", "Skin…"), false);
+         pick.setOnClickListener(this);
+         side.addView(pick, Ui.gap(this, 8));
++        cape = Ui.button(this, Ui.t("Плащ…", "Cape…"), false);
++        cape.setOnClickListener(this);
++        side.addView(cape, Ui.gap(this, 6));
+         slim = readModel();
+         model = Ui.button(this, "", false);
+         model.setOnClickListener(this);
+@@ -365,6 +369,47 @@ public class ProfileActivity extends Activity implements View.OnClickListener {
+     private void saveModel() throws Exception {
+         if (readModel() == slim && new File(dir, "horizon-skin.txt").isFile()) return;
+         write(new File(dir, "horizon-skin.txt"), ("model:" + (slim ? "slim" : "classic") + "\n").getBytes(StandardCharsets.UTF_8));
++        mirrorSkin();
++    }
++
++    /**
++     * Oneshot: other players in a shared game see this skin. The game's network skin share
++     * (android_main.rs) reads files/skin/{skin.png,model.txt,cape.png}, so the picked skin is
++     * copied there. A Mojang-signed textures.signed of an older skin would contradict it: removed.
++     */
++    private void mirrorSkin() {
++        try {
++            File src = new File(dir, "horizon-skin.png");
++            File out = new File(dir, "skin");
++            if (!src.isFile()) return;
++            out.mkdirs();
++            File dst = new File(out, "skin.png");
++            byte[] bytes = Files.readAllBytes(src.toPath());
++            if (!dst.isFile() || !java.util.Arrays.equals(bytes, Files.readAllBytes(dst.toPath()))) {
++                write(dst, bytes);
++                new File(out, "textures.signed").delete();
++            }
++            write(new File(out, "model.txt"), (slim ? "slim\n" : "classic\n").getBytes(StandardCharsets.UTF_8));
++        } catch (Exception ignored) {
++        }
++    }
++
++    /** A cape as the 64x32 RGBA PNG the share sends (an HD cape is scaled down); null when it is no cape. */
++    static byte[] normalizeCape(byte[] bytes) {
++        BitmapFactory.Options o = new BitmapFactory.Options();
++        o.inScaled = false;
++        o.inPremultiplied = false;
++        o.inPreferredConfig = Bitmap.Config.ARGB_8888;
++        Bitmap b = BitmapFactory.decodeByteArray(bytes, 0, bytes.length, o);
++        if (b == null) return null;
++        int w = b.getWidth(), h = b.getHeight();
++        boolean legacy = w == 22 && h == 17;
++        if (!legacy && (w < 64 || w > 1024 || w % 64 != 0 || h * 2 != w)) return null;
++        if (b.getConfig() != Bitmap.Config.ARGB_8888) b = b.copy(Bitmap.Config.ARGB_8888, true);
++        if (!legacy && w != 64) b = Bitmap.createScaledBitmap(b, 64, 32, false);
++        ByteArrayOutputStream out = new ByteArrayOutputStream();
++        if (!b.compress(Bitmap.CompressFormat.PNG, 100, out)) return null;
++        return out.size() > 8000 ? null : out.toByteArray();
+     }
+ 
+     @Override
+@@ -381,6 +426,11 @@ public class ProfileActivity extends Activity implements View.OnClickListener {
+             i.addCategory(Intent.CATEGORY_OPENABLE);
+             i.setType("image/*");
+             startActivityForResult(i, PICK);
++        } else if (v == cape) {
++            Intent i = new Intent(Intent.ACTION_OPEN_DOCUMENT);
++            i.addCategory(Intent.CATEGORY_OPENABLE);
++            i.setType("image/*");
++            startActivityForResult(i, PICK_CAPE);
+         } else if (v == model) {
+             slim = !slim;
+             updateModel();
+@@ -554,6 +604,33 @@ public class ProfileActivity extends Activity implements View.OnClickListener {
+             }
+             return;
+         }
++        if (request == PICK_CAPE) {
++            message.setTextColor(Ui.WARN);
++            try (InputStream in = getContentResolver().openInputStream(data.getData())) {
++                ByteArrayOutputStream out = new ByteArrayOutputStream();
++                byte[] buf = new byte[8192];
++                int n;
++                while ((n = in.read(buf)) > 0) {
++                    out.write(buf, 0, n);
++                    if (out.size() > 4 << 20) throw new Exception("too big");
++                }
++                byte[] png = normalizeCape(out.toByteArray());
++                if (png == null) {
++                    message.setText(Ui.t("Нужен плащ: PNG 64×32 (или 22×17), не больше 8 КБ после сжатия.",
++                            "A cape is needed: a 64×32 (or 22×17) PNG, at most 8 KB once compressed."));
++                    return;
++                }
++                File sd = new File(dir, "skin");
++                sd.mkdirs();
++                write(new File(sd, "cape.png"), png);
++                new File(sd, "textures.signed").delete();
++                message.setTextColor(Ui.GREEN);
++                message.setText(Ui.t("Плащ применён: его увидят другие игроки.", "Cape applied: other players will see it."));
++            } catch (Exception e) {
++                message.setText(Ui.t("Не удалось прочитать файл.", "Could not read the file."));
++            }
++            return;
++        }
+         if (request != PICK) return;
+         message.setTextColor(Ui.WARN);
+         try (InputStream in = getContentResolver().openInputStream(data.getData())) {
+@@ -572,6 +649,7 @@ public class ProfileActivity extends Activity implements View.OnClickListener {
+             }
+             write(new File(dir, "horizon-skin.png"), png);
+             saveModel();
++            mirrorSkin();
+             message.setTextColor(Ui.GREEN);
+             message.setText(Ui.t("Скин применён.", "Skin applied."));
+             showPreview();
