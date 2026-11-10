@@ -1,0 +1,71 @@
+diff --git a/packaging/android/java/dev/horizonlab/horizon/WorldsPage.java b/packaging/android/java/dev/horizonlab/horizon/WorldsPage.java
+index e650aa4..72d98f0 100644
+--- a/packaging/android/java/dev/horizonlab/horizon/WorldsPage.java
++++ b/packaging/android/java/dev/horizonlab/horizon/WorldsPage.java
+@@ -575,9 +575,12 @@ final class WorldsPage extends Page {
+             final String name = o.optString("name", "");
+             final String url = o.optString("url", "");
+             final String sha = o.optString("sha256", "").toLowerCase(java.util.Locale.ROOT);
+-            // Only an https link with a checksum: the file is checked before it becomes a world.
+-            if (name.isEmpty() || !url.startsWith("https://") || !sha.matches("[0-9a-f]{64}")) continue;
+-            long size = o.optLong("size", 0);
++            final String page = o.optString("page", "").trim();
++            // A download only with an https link and a checksum (the file is checked before it becomes a world);
++            // otherwise an https page of the map, which the player opens to download it there.
++            final boolean direct = url.startsWith("https://") && sha.matches("[0-9a-f]{64}");
++            if (name.isEmpty() || (!direct && !page.startsWith("https://"))) continue;
++            long size = direct ? o.optLong("size", 0) : 0;
+             View pic = preview(o.optString("image", ""));
+             if (pic != null) {
+                 LinearLayout.LayoutParams pl = new LinearLayout.LayoutParams(-1, -2);
+@@ -591,12 +594,16 @@ final class WorldsPage extends Page {
+             col.addView(Ui.text(a, name, 14, Ui.TEXT, true));
+             String note = o.optString("note", "");
+             if (size > 0) note = (note.isEmpty() ? "" : note + " · ") + Ui.size(size);
++            String versions = o.optString("versions", ""), author = o.optString("author", "");
++            if (!versions.isEmpty()) note = (note.isEmpty() ? "" : note + " · ") + versions;
++            if (!author.isEmpty()) note = (note.isEmpty() ? "" : note + " · ") + author;
+             if (!note.isEmpty()) col.addView(Ui.text(a, note, 12, Ui.MUTED, false));
+             r.addView(col, new LinearLayout.LayoutParams(0, -2, 1));
+-            TextView get = Ui.chip(a, Ui.t("Скачать", "Download"), true);
++            TextView get = Ui.chip(a, direct ? Ui.t("Скачать", "Download") : Ui.t("На сайте", "On the site"), true);
+             get.setOnClickListener(new View.OnClickListener() {
+                 public void onClick(View v) {
+-                    download(name, url, sha);
++                    if (direct) download(name, url, sha);
++                    else openPage(name, page);
+                 }
+             });
+             r.addView(get);
+@@ -605,6 +612,31 @@ final class WorldsPage extends Page {
+         if (maps.getChildCount() == 0) note(maps, Ui.t("Список пуст.", "The list is empty."));
+     }
+ 
++    // A map the team only links to: the site has the download, so it opens in the browser and the zip comes back
++    // through "Import a world".
++    private void openPage(String name, final String page) {
++        final android.net.Uri uri = android.net.Uri.parse(page);
++        if (!"https".equals(uri.getScheme()) || uri.getHost() == null) return;
++        new AlertDialog.Builder(a)
++                .setTitle(name)
++                .setMessage(Ui.t("Страница карты откроется в браузере (", "The map's page opens in the browser (") + uri.getHost()
++                        + Ui.t("). Скачайте там zip карты, затем вернитесь сюда и нажмите «Импорт мира (zip)…»: карта ляжет рядом с вашими мирами.\n\n"
++                                + "Карта сделана для Minecraft; старые карты Horizon обновляет при открытии, и некоторые могут работать не совсем так, как задумал автор.",
++                        "). Download the map's zip there, then come back and press “Import a world (zip)…”: the map is added next to your worlds.\n\n"
++                                + "The map is made for Minecraft; in Horizon older maps are upgraded when opened, and some may not work exactly as their authors meant."))
++                .setPositiveButton(Ui.t("Открыть", "Open"), new DialogInterface.OnClickListener() {
++                    public void onClick(DialogInterface d, int w) {
++                        try {
++                            a.startActivity(new android.content.Intent(android.content.Intent.ACTION_VIEW, uri));
++                        } catch (android.content.ActivityNotFoundException e) {
++                            a.say(Ui.t("Нет браузера, чтобы открыть ссылку.", "No browser to open the link."), Ui.BAD);
++                        }
++                    }
++                })
++                .setNegativeButton(Ui.t("Отмена", "Cancel"), null)
++                .show();
++    }
++
+     private void download(final String name, final String url, final String sha) {
+         run(new Job() {
+             public String run() throws Exception {
