@@ -1,0 +1,181 @@
+diff --git a/packaging/android/java/dev/horizonlab/horizon/ProfileActivity.java b/packaging/android/java/dev/horizonlab/horizon/ProfileActivity.java
+index b22e60a..2078f6e 100644
+--- a/packaging/android/java/dev/horizonlab/horizon/ProfileActivity.java
++++ b/packaging/android/java/dev/horizonlab/horizon/ProfileActivity.java
+@@ -83,25 +83,38 @@ public class ProfileActivity extends Activity implements View.OnClickListener {
+         LinearLayout head = new LinearLayout(this);
+         head.setOrientation(LinearLayout.HORIZONTAL);
+         head.setGravity(Gravity.CENTER_VERTICAL);
+-        TextView title = Ui.text(this, "Horizon", 22, Ui.TEXT, true);
+-        head.addView(title, new LinearLayout.LayoutParams(0, -2, 1));
++        TextView title = Ui.text(this, "HORIZON", 24, Ui.TEXT, true);
++        title.setLetterSpacing(0.22f);
++        head.addView(title);
++        TextView sub = Ui.text(this, "ONESHOT", 11, Ui.MUTED, true);
++        sub.setLetterSpacing(0.3f);
++        sub.setPadding(Ui.dp(this, 10), Ui.dp(this, 8), 0, 0);
++        head.addView(sub, new LinearLayout.LayoutParams(0, -2, 1));
+         TextView ver = Ui.text(this, version(), 12, Ui.MUTED, false);
+         head.addView(ver);
+         left.addView(head);
++        View rule = new View(this);
++        rule.setBackgroundColor(Ui.EDGE);
++        LinearLayout.LayoutParams ruleLp = new LinearLayout.LayoutParams(-1, 1);
++        ruleLp.topMargin = Ui.dp(this, 8);
++        ruleLp.bottomMargin = Ui.dp(this, 12);
++        left.addView(rule, ruleLp);
+ 
+         LinearLayout who = new LinearLayout(this);
+         who.setOrientation(LinearLayout.HORIZONTAL);
+         preview = new SkinView(this);
+-        preview.setBackground(Ui.rounded(this, FIELD, 0, 12));
++        preview.setBackground(Ui.rounded(this, FIELD, Ui.EDGE, 14));
+         int pv = Ui.dp(this, 6);
+         preview.setPadding(pv, pv, pv, pv);
+         who.addView(preview, new LinearLayout.LayoutParams(0, -1, 1));
+         LinearLayout side = new LinearLayout(this);
+         side.setOrientation(LinearLayout.VERTICAL);
+-        side.setGravity(Gravity.CENTER_VERTICAL);
++        side.setGravity(Gravity.TOP);
+         LinearLayout.LayoutParams sideLp = new LinearLayout.LayoutParams(0, -1, 1.3f);
+         sideLp.leftMargin = p;
+-        side.addView(Ui.text(this, Ui.t("Ник", "Name"), 12, Ui.MUTED, false));
++        TextView nameLabel = Ui.text(this, Ui.t("НИК", "NAME"), 11, Ui.MUTED, true);
++        nameLabel.setLetterSpacing(0.14f);
++        side.addView(nameLabel);
+         name = new EditText(this);
+         name.setSingleLine(true);
+         name.setTextColor(Ui.TEXT);
+@@ -130,16 +143,21 @@ public class ProfileActivity extends Activity implements View.OnClickListener {
+         join.setSingleLine(true);
+         join.setTextColor(Ui.TEXT);
+         join.setHintTextColor(Ui.MUTED);
+-        join.setHint(Ui.t("Код друга (friend:…) — пусто: свой мир", "Friend code (friend:…) — empty: your own world"));
++        join.setHint("friend:\u2026  /  host:port");
+         join.setTextSize(14);
+         join.setPadding(p, Ui.dp(this, 8), p, Ui.dp(this, 8));
+         join.setBackground(Ui.rounded(this, FIELD, Ui.EDGE, 8));
+         join.setImeOptions(android.view.inputmethod.EditorInfo.IME_ACTION_DONE
+                 | android.view.inputmethod.EditorInfo.IME_FLAG_NO_EXTRACT_UI);
+         join.setText(readJoin());
+-        side.addView(join, Ui.gap(this, 6));
++        TextView joinLabel = Ui.text(this, Ui.t("ПОДКЛЮЧИТЬСЯ К ДРУГУ", "JOIN A FRIEND"), 11, Ui.MUTED, true);
++        joinLabel.setLetterSpacing(0.14f);
++        side.addView(joinLabel, Ui.gap(this, 16));
++        side.addView(join);
++        side.addView(Ui.text(this, Ui.t("Пусто — игра откроется в главном меню.", "Empty: the game opens at the main menu."), 11, Ui.MUTED, false));
+         accountChip = Ui.text(this, "", 12, Ui.MUTED, false);
+-        side.addView(accountChip, Ui.gap(this, 6));
++        accountChip.setVisibility(View.GONE);
++        side.addView(accountChip);
+         who.addView(side, sideLp);
+         left.addView(who, new LinearLayout.LayoutParams(-1, 0, 1));
+ 
+@@ -149,7 +167,7 @@ public class ProfileActivity extends Activity implements View.OnClickListener {
+         play = Ui.button(this, Ui.t("ИГРАТЬ", "PLAY"), true);
+         play.setTextSize(22);
+         play.setLetterSpacing(0.1f);
+-        play.setMinHeight(Ui.dp(this, 60));
++        play.setMinHeight(Ui.dp(this, 68));
+         play.setOnClickListener(this);
+         left.addView(play, Ui.gap(this, 6));
+         root.addView(left, new LinearLayout.LayoutParams(0, -1, 1));
+@@ -176,16 +194,18 @@ public class ProfileActivity extends Activity implements View.OnClickListener {
+         catalog.setOnClickListener(this);
+         card.addView(catalog, Ui.gap(this, 8));
+ 
+-        Ui.section(card, Ui.t("Аккаунт Microsoft", "Microsoft account"));
++        LinearLayout msBox = new LinearLayout(this);
++        msBox.setOrientation(LinearLayout.VERTICAL);
++        Ui.section(msBox, Ui.t("Аккаунт Microsoft", "Microsoft account"));
+         accountStatus = Ui.text(this, accountLine(), 15, Ui.TEXT, true);
+-        card.addView(accountStatus);
+-        card.addView(Ui.text(this, Ui.t(
++        msBox.addView(accountStatus);
++        msBox.addView(Ui.text(this, Ui.t(
+                 "Для лицензионных серверов. Войдите почтой и паролем один раз: дальше вход обновляется сам.",
+                 "For licensed servers. Sign in with your email and password once: it renews by itself."),
+                 12, Ui.MUTED, false));
+         microsoft = Ui.button(this, Ui.t("Войти через Microsoft", "Sign in with Microsoft"), true);
+         microsoft.setOnClickListener(this);
+-        card.addView(microsoft, Ui.gap(this, 8));
++        msBox.addView(microsoft, Ui.gap(this, 8));
+         codeBox = new LinearLayout(this);
+         codeBox.setOrientation(LinearLayout.VERTICAL);
+         codeBox.setPadding(p, p, p, p);
+@@ -210,13 +230,13 @@ public class ProfileActivity extends Activity implements View.OnClickListener {
+         half2.leftMargin = Ui.dp(this, 8);
+         row.addView(browser, half2);
+         codeBox.addView(row, Ui.gap(this, 8));
+-        card.addView(codeBox, Ui.gap(this, 8));
++        msBox.addView(codeBox, Ui.gap(this, 8));
+         signOut = Ui.button(this, Ui.t("Выйти из аккаунта", "Sign out"), false);
+         signOut.setOnClickListener(this);
+-        card.addView(signOut, Ui.gap(this, 8));
++        msBox.addView(signOut, Ui.gap(this, 8));
+         advanced = Ui.button(this, Ui.t("Другой способ входа ▾", "Other sign-in ▾"), false);
+         advanced.setOnClickListener(this);
+-        card.addView(advanced, Ui.gap(this, 8));
++        msBox.addView(advanced, Ui.gap(this, 8));
+         advancedBox = new LinearLayout(this);
+         advancedBox.setOrientation(LinearLayout.VERTICAL);
+         advancedBox.addView(Ui.text(this, Ui.t(
+@@ -237,7 +257,11 @@ public class ProfileActivity extends Activity implements View.OnClickListener {
+         deviceCode.setOnClickListener(this);
+         advancedBox.addView(deviceCode, Ui.gap(this, 6));
+         advancedBox.setVisibility(View.GONE);
+-        card.addView(advancedBox, Ui.gap(this, 6));
++        msBox.addView(advancedBox, Ui.gap(this, 6));
++
++        // Oneshot: the Microsoft account is not offered in the main menu.
++        msBox.setVisibility(View.GONE);
++        card.addView(msBox);
+ 
+         Ui.section(card, Ui.t("Драйвер Vulkan · экспериментально", "Vulkan driver · experimental"));
+         driverStatus = Ui.text(this, Turnip.status(this), 13, Ui.TEXT, false);
+@@ -449,7 +473,8 @@ public class ProfileActivity extends Activity implements View.OnClickListener {
+     private String readJoin() {
+         try {
+             File f = new File(dir, "join-last.txt");
+-            return f.isFile() ? new String(Files.readAllBytes(f.toPath()), StandardCharsets.UTF_8).trim() : "";
++            f.delete();
++            return "";
+         } catch (Exception e) {
+             return "";
+         }
+@@ -639,7 +664,9 @@ public class ProfileActivity extends Activity implements View.OnClickListener {
+             Intent i = new Intent(this, HorizonActivity.class);
+             i.addFlags(Intent.FLAG_ACTIVITY_REORDER_TO_FRONT);
+             startActivity(i);
++            overridePendingTransition(0, 0);
+             finish();
++            overridePendingTransition(0, 0);
+         } else if (v == driver) {
+             Intent i = new Intent(Intent.ACTION_OPEN_DOCUMENT);
+             i.addCategory(Intent.CATEGORY_OPENABLE);
+diff --git a/packaging/android/java/dev/horizonlab/horizon/Ui.java b/packaging/android/java/dev/horizonlab/horizon/Ui.java
+index a3afa7a..a213a84 100644
+--- a/packaging/android/java/dev/horizonlab/horizon/Ui.java
++++ b/packaging/android/java/dev/horizonlab/horizon/Ui.java
+@@ -93,8 +93,8 @@ final class Ui {
+         b.setTextSize(primary ? 17 : 15);
+         b.setTextColor(primary ? ON_ACCENT : TEXT);
+         b.setTypeface(Typeface.create("sans-serif-medium", Typeface.BOLD));
+-        b.setBackground(primary ? rounded(c, GREEN, 0, 10) : rounded(c, HIGH, EDGE, 10));
+-        b.setMinHeight(dp(c, primary ? 54 : 44));
++        b.setBackground(primary ? rounded(c, GREEN, 0, 12) : rounded(c, HIGH, EDGE, 12));
++        b.setMinHeight(dp(c, primary ? 54 : 46));
+         b.setStateListAnimator(null);
+         return b;
+     }
+@@ -116,8 +116,8 @@ final class Ui {
+         lp.bottomMargin = dp(c, 8);
+         card.addView(line, lp);
+         if (title.isEmpty()) return;
+-        TextView t = text(c, title.toUpperCase(Locale.getDefault()), 12, MUTED, true);
+-        t.setLetterSpacing(0.08f);
++        TextView t = text(c, "\u258C " + title.toUpperCase(Locale.getDefault()), 12, TEXT, true);
++        t.setLetterSpacing(0.14f);
+         card.addView(t);
+     }
+ 
