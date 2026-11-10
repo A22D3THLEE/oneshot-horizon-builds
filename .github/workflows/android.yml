@@ -66,6 +66,8 @@ jobs:
           git config user.email ci@example.invalid; git config user.name ci
           applied=""; skipped=""
           for p in ../oneshot/patches/*.patch; do
+            # A patch that needs another shape on the port's code has its own copy in android-patches/.
+            [ -f "../oneshot/android-patches/$(basename "$p")" ] && p="../oneshot/android-patches/$(basename "$p")"
             if git apply --whitespace=nowarn "$p"; then applied="$applied $(basename "$p")"; else skipped="$skipped $(basename "$p")"; fi
           done
           echo "applied:$applied"
