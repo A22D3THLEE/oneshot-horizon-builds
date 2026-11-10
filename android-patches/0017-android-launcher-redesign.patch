@@ -1,0 +1,3774 @@
+diff --git a/crates/horizon-client/src/android_main.rs b/crates/horizon-client/src/android_main.rs
+index a8d9480..07d2000 100644
+--- a/crates/horizon-client/src/android_main.rs
++++ b/crates/horizon-client/src/android_main.rs
+@@ -31,6 +31,10 @@ fn android_main(app: AndroidApp) {
+             std::env::set_var("HORIZON_RESOURCES", home.join("resources"));
+         }
+         std::env::set_var("HOME", &home);
++        // Oneshot: the invite code of a shared world, for the launcher's Friends page to copy and share.
++        if std::env::var_os("HORIZON_ONESHOT_INVITE").is_none() {
++            std::env::set_var("HORIZON_ONESHOT_INVITE", home.join("invite-code.txt"));
++        }
+         if let Some(internal) = app.internal_data_path() {
+             std::env::set_var("HORIZON_CACHE", internal.join("horizon-cache"));
+         }
+diff --git a/packaging/android/AndroidManifest.xml b/packaging/android/AndroidManifest.xml
+index b2e3063..1445f98 100644
+--- a/packaging/android/AndroidManifest.xml
++++ b/packaging/android/AndroidManifest.xml
+@@ -34,6 +34,12 @@
+                 <action android:name="android.intent.action.MAIN" />
+                 <category android:name="android.intent.category.LAUNCHER" />
+             </intent-filter>
++            <intent-filter>
++                <action android:name="android.intent.action.VIEW" />
++                <category android:name="android.intent.category.DEFAULT" />
++                <category android:name="android.intent.category.BROWSABLE" />
++                <data android:scheme="oneshot" android:host="join" />
++            </intent-filter>
+         </activity>
+         <activity
+             android:name=".HorizonActivity"
+diff --git a/packaging/android/java/dev/horizonlab/horizon/FriendsPage.java b/packaging/android/java/dev/horizonlab/horizon/FriendsPage.java
+new file mode 100644
+index 0000000..22b9d05
+--- /dev/null
++++ b/packaging/android/java/dev/horizonlab/horizon/FriendsPage.java
+@@ -0,0 +1,221 @@
++package dev.horizonlab.horizon;
++
++import android.content.ClipData;
++import android.content.ClipboardManager;
++import android.content.Context;
++import android.content.Intent;
++import android.view.View;
++import android.widget.Button;
++import android.widget.EditText;
++import android.widget.LinearLayout;
++import android.widget.TextView;
++
++/**
++ * Oneshot: playing together, as the PC launcher's Friends page: the code to join with, the code
++ * the running game shares (invite-code.txt) with a link to send, the relay's state and the
++ * mod/resource pack set as one .oneshotpack file (PackShare).
++ */
++final class FriendsPage extends Page {
++    static final int PACK_OUT = 13;
++    static final int PACK_IN = 14;
++
++    private final TextView hostCode;
++    private final TextView hostNote;
++    private final Button copyCode, shareCode;
++    private final Button restore;
++    private String code;
++
++    FriendsPage(final ProfileActivity a) {
++        super(a);
++        Ui.title(root, Ui.t("Друзья", "Friends"), Ui.t("Игра вместе: по коду приглашения, через сервер Oneshot или по адресу.",
++                "Play together: by invite code, through the Oneshot server or by address."));
++
++        LinearLayout join = block(Ui.t("Подключиться к другу", "Join a friend"));
++        a.join = Ui.field(a, "friend:…  /  host:port");
++        a.join.setTextSize(14);
++        join.addView(a.join, Ui.gap(a, 4));
++        note(join, Ui.t("Код друга (friend:…), steam:… или адрес сервера. Пусто — игра откроется в главном меню. Нажмите ИГРАТЬ.",
++                "A friend's code (friend:…), steam:… or a server address. Empty: the game opens at the main menu. Press PLAY."));
++        Button paste = Ui.button(a, Ui.t("Вставить", "Paste"), false);
++        paste.setOnClickListener(new View.OnClickListener() {
++            public void onClick(View v) {
++                ClipboardManager cm = (ClipboardManager) a.getSystemService(Context.CLIPBOARD_SERVICE);
++                CharSequence s = cm == null || !cm.hasPrimaryClip() || cm.getPrimaryClip().getItemCount() == 0 ? null
++                        : cm.getPrimaryClip().getItemAt(0).coerceToText(a);
++                a.setJoin(s == null ? "" : s.toString());
++            }
++        });
++        Button clear = Ui.button(a, Ui.t("Очистить", "Clear"), false);
++        clear.setOnClickListener(new View.OnClickListener() {
++            public void onClick(View v) {
++                a.join.setText("");
++            }
++        });
++        buttons(join, paste, clear);
++
++        LinearLayout host = block(Ui.t("Позвать друзей", "Invite friends"));
++        hostCode = Ui.text(a, "", 22, Ui.TEXT, true);
++        hostCode.setTypeface(android.graphics.Typeface.MONOSPACE, android.graphics.Typeface.BOLD);
++        hostCode.setTextIsSelectable(true);
++        host.addView(hostCode);
++        hostNote = note(host, "");
++        copyCode = Ui.button(a, Ui.t("Скопировать код", "Copy code"), false);
++        copyCode.setOnClickListener(new View.OnClickListener() {
++            public void onClick(View v) {
++                if (code == null) return;
++                ClipboardManager cm = (ClipboardManager) a.getSystemService(Context.CLIPBOARD_SERVICE);
++                if (cm != null) cm.setPrimaryClip(ClipData.newPlainText("invite", "friend:" + code));
++                a.say(Ui.t("Код скопирован.", "Code copied."), Ui.GREEN);
++            }
++        });
++        shareCode = Ui.button(a, Ui.t("Отправить ссылку…", "Send a link…"), true);
++        shareCode.setOnClickListener(new View.OnClickListener() {
++            public void onClick(View v) {
++                if (code == null) return;
++                Intent i = new Intent(Intent.ACTION_SEND);
++                i.setType("text/plain");
++                i.putExtra(Intent.EXTRA_TEXT, Ui.t("Заходи ко мне в Oneshot: ", "Join me in Oneshot: ") + Net.linkFor(code)
++                        + Ui.t("\nИли вставь код в лаунчере: friend:", "\nOr paste the code in the launcher: friend:") + code);
++                try {
++                    a.startActivity(Intent.createChooser(i, Ui.t("Отправить приглашение", "Send the invite")));
++                } catch (Exception e) {
++                    a.say(Ui.t("Нечем поделиться: скопируйте код.", "Nothing to share with: copy the code."), Ui.WARN);
++                }
++            }
++        });
++        buttons(host, copyCode, shareCode);
++
++        LinearLayout relay = block(Ui.t("Сервер Oneshot", "Oneshot server"));
++        relay.addView(a.relayLabel());
++        note(relay, Ui.t("Через него друзья находят друг друга, когда напрямую не выходит (мобильный интернет, CGNAT). "
++                + "Свой адрес — в relay.txt в папке игры, пустой файл выключает сервер.",
++                "Friends meet through it when they cannot reach each other directly (mobile internet, CGNAT). "
++                + "Your own address goes in relay.txt in the game folder; an empty file turns it off."));
++
++        LinearLayout pack = block(Ui.t("Набор модов и ресурспаков", "Mods and resource packs"));
++        note(pack, Ui.t("Файл .oneshotpack: ваши моды Horizon, ресурспаки и шейдеры — чтобы у друга было то же самое. Открывается и лаунчером на ПК.",
++                "A .oneshotpack file: your Horizon mods, resource packs and shaders, so a friend gets the same set. The PC launcher opens it too."));
++        Button out = Ui.button(a, Ui.t("Сохранить набор…", "Save the set…"), false);
++        out.setOnClickListener(new View.OnClickListener() {
++            public void onClick(View v) {
++                Intent i = new Intent(Intent.ACTION_CREATE_DOCUMENT);
++                i.addCategory(Intent.CATEGORY_OPENABLE);
++                i.setType("application/octet-stream");
++                i.putExtra(Intent.EXTRA_TITLE, "oneshot-" + new java.text.SimpleDateFormat("yyyy-MM-dd", java.util.Locale.ROOT)
++                        .format(new java.util.Date()) + ".oneshotpack");
++                a.startActivityForResult(i, PACK_OUT);
++            }
++        });
++        Button in = Ui.button(a, Ui.t("Открыть набор…", "Open a set…"), false);
++        in.setOnClickListener(new View.OnClickListener() {
++            public void onClick(View v) {
++                Intent i = new Intent(Intent.ACTION_OPEN_DOCUMENT);
++                i.addCategory(Intent.CATEGORY_OPENABLE);
++                i.setType("*/*");
++                a.startActivityForResult(i, PACK_IN);
++            }
++        });
++        buttons(pack, out, in);
++        restore = Ui.button(a, Ui.t("Вернуть мои моды и паки", "Bring my mods and packs back"), false);
++        restore.setOnClickListener(new View.OnClickListener() {
++            public void onClick(View v) {
++                confirmRestore();
++            }
++        });
++        pack.addView(restore, Ui.gap(a, 8));
++    }
++
++    @Override
++    void shown() {
++        code = Net.hostCode(a);
++        boolean has = code != null;
++        hostCode.setVisibility(has ? View.VISIBLE : View.GONE);
++        hostCode.setText(has ? "friend:" + code : "");
++        hostNote.setText(has
++                ? Ui.t("Отправьте ссылку или код другу: он вставит его в «Подключиться к другу» и нажмёт ИГРАТЬ.",
++                        "Send the link or the code: your friend pastes it into Join a friend and presses PLAY.")
++                : Ui.t("Откройте мир для друзей в игре (пауза → «Открыть для друзей») — код появится здесь.",
++                        "Open your world to friends in the game (pause → Open to friends): the code shows up here."));
++        copyCode.setEnabled(has);
++        shareCode.setEnabled(has);
++        copyCode.setAlpha(has ? 1f : 0.4f);
++        shareCode.setAlpha(has ? 1f : 0.4f);
++        restore.setVisibility(PackShare.lastBackup(a.dir) == null ? View.GONE : View.VISIBLE);
++    }
++
++    private void confirmRestore() {
++        new android.app.AlertDialog.Builder(a)
++                .setTitle(Ui.t("Вернуть прежний набор?", "Bring the old set back?"))
++                .setMessage(Ui.t("Моды и паки, что были до открытия последнего набора, вернутся на место; нынешние будут удалены.",
++                        "The mods and packs you had before the last opened set come back; the current ones are deleted."))
++                .setPositiveButton(Ui.t("Вернуть", "Bring back"), new android.content.DialogInterface.OnClickListener() {
++                    public void onClick(android.content.DialogInterface d, int w) {
++                        run(new Job() {
++                            public String run() throws Exception {
++                                PackShare.restore(a.dir);
++                                return Ui.t("Прежний набор возвращён. Перезапустите игру.", "The old set is back. Restart the game.");
++                            }
++                        });
++                    }
++                })
++                .setNegativeButton(Ui.t("Отмена", "Cancel"), null)
++                .show();
++    }
++
++    interface Job {
++        String run() throws Exception;
++    }
++
++    private void run(final Job job) {
++        a.say(Ui.t("Работаем…", "Working…"), Ui.WARN);
++        new Thread(new Runnable() {
++            public void run() {
++                String msg;
++                int color = Ui.GREEN;
++                try {
++                    msg = job.run();
++                } catch (Exception e) {
++                    msg = Ui.t("Не получилось: ", "Failed: ") + e.getMessage();
++                    color = Ui.BAD;
++                }
++                final String m = msg;
++                final int c = color;
++                a.runOnUiThread(new Runnable() {
++                    public void run() {
++                        a.say(m, c);
++                        shown();
++                    }
++                });
++            }
++        }).start();
++    }
++
++    @Override
++    boolean onResult(int request, int result, final Intent data) {
++        if (request != PACK_OUT && request != PACK_IN) return false;
++        if (result != android.app.Activity.RESULT_OK || data == null || data.getData() == null) return true;
++        if (request == PACK_OUT) {
++            run(new Job() {
++                public String run() throws Exception {
++                    int n;
++                    try (java.io.OutputStream o = a.getContentResolver().openOutputStream(data.getData())) {
++                        n = PackShare.export(a, a.dir, o);
++                    }
++                    return Ui.t("Набор сохранён: файлов ", "Set saved: files ") + n;
++                }
++            });
++        } else {
++            run(new Job() {
++                public String run() throws Exception {
++                    int n;
++                    try (java.io.InputStream in = a.getContentResolver().openInputStream(data.getData())) {
++                        n = PackShare.open(a.dir, in);
++                    }
++                    return Ui.t("Набор открыт: файлов ", "Set opened: files ") + n
++                            + Ui.t(". Прежний сохранён — его можно вернуть. Перезапустите игру.", ". The old one is kept and can come back. Restart the game.");
++                }
++            });
++        }
++        return true;
++    }
++}
+diff --git a/packaging/android/java/dev/horizonlab/horizon/GalleryPage.java b/packaging/android/java/dev/horizonlab/horizon/GalleryPage.java
+new file mode 100644
+index 0000000..97a80d0
+--- /dev/null
++++ b/packaging/android/java/dev/horizonlab/horizon/GalleryPage.java
+@@ -0,0 +1,192 @@
++package dev.horizonlab.horizon;
++
++import android.app.AlertDialog;
++import android.content.DialogInterface;
++import android.content.Intent;
++import android.graphics.Bitmap;
++import android.graphics.BitmapFactory;
++import android.net.Uri;
++import android.provider.DocumentsContract;
++import android.view.View;
++import android.widget.ImageView;
++import android.widget.LinearLayout;
++import android.widget.TextView;
++import java.io.File;
++import java.util.ArrayList;
++import java.util.Arrays;
++import java.util.Comparator;
++import java.util.List;
++
++/** Oneshot: the screenshots (F2 in the game), as the PC launcher's Gallery: a grid, a viewer, share and delete. */
++final class GalleryPage extends Page {
++    private static final int MAX = 60;
++    private static final String AUTHORITY = "dev.horizonlab.horizon.documents";
++
++    private final LinearLayout grid;
++    private final TextView count;
++    private int generation;
++
++    GalleryPage(ProfileActivity a) {
++        super(a);
++        Ui.title(root, Ui.t("Галерея", "Gallery"), Ui.t("Скриншоты из игры. Снимок — кнопка F2 на сенсорной панели.",
++                "Screenshots from the game. Take one with F2 on the touch panel."));
++        count = Ui.text(a, "", 12, Ui.MUTED, false);
++        root.addView(count, Ui.gap(a, 4));
++        grid = new LinearLayout(a);
++        grid.setOrientation(LinearLayout.VERTICAL);
++        root.addView(grid, Ui.gap(a, 10));
++    }
++
++    private File dir() {
++        return new File(a.dir, "screenshots");
++    }
++
++    @Override
++    void shown() {
++        final int gen = ++generation;
++        grid.removeAllViews();
++        File[] all = dir().listFiles();
++        List<File> shots = new ArrayList<>();
++        if (all != null) for (File f : all) {
++            String n = f.getName().toLowerCase(java.util.Locale.ROOT);
++            if (f.isFile() && (n.endsWith(".png") || n.endsWith(".jpg") || n.endsWith(".jpeg"))) shots.add(f);
++        }
++        File[] sorted = shots.toArray(new File[0]);
++        Arrays.sort(sorted, new Comparator<File>() {
++            public int compare(File x, File y) {
++                return Long.compare(y.lastModified(), x.lastModified());
++            }
++        });
++        if (sorted.length == 0) {
++            count.setText("");
++            LinearLayout p = Ui.panel(a);
++            p.addView(Ui.text(a, Ui.t("Скриншотов пока нет", "No screenshots yet"), 16, Ui.TEXT, true));
++            note(p, Ui.t("В игре нажмите F2 на сенсорной панели — снимок появится здесь.",
++                    "In the game, press F2 on the touch panel: the shot shows up here."));
++            grid.addView(p);
++            return;
++        }
++        count.setText(sorted.length > MAX
++                ? Ui.t("Показаны " + MAX + " новых из " + sorted.length, "The newest " + MAX + " of " + sorted.length)
++                : Ui.t("Снимков: ", "Shots: ") + sorted.length);
++        int per = a.pageWidthDp() >= 560 ? 4 : 3;
++        int cell = (a.pageWidthDp() - 8 * (per - 1)) / per;
++        final List<ImageView> views = new ArrayList<>();
++        final List<File> files = new ArrayList<>();
++        LinearLayout row = null;
++        for (int i = 0; i < Math.min(MAX, sorted.length); i++) {
++            if (i % per == 0) {
++                row = Ui.row(a);
++                grid.addView(row, Ui.gap(a, i == 0 ? 0 : 8));
++            }
++            final File f = sorted[i];
++            ImageView iv = new ImageView(a);
++            iv.setScaleType(ImageView.ScaleType.CENTER_CROP);
++            iv.setBackground(Ui.rounded(a, Ui.CARD, Ui.EDGE, 10));
++            iv.setClipToOutline(true);
++            iv.setOnClickListener(new View.OnClickListener() {
++                public void onClick(View v) {
++                    view(f);
++                }
++            });
++            LinearLayout.LayoutParams lp = new LinearLayout.LayoutParams(0, dp(cell * 9 / 16f), 1);
++            if (i % per != 0) lp.leftMargin = dp(8);
++            row.addView(iv, lp);
++            views.add(iv);
++            files.add(f);
++        }
++        // Fill the last row so the cells keep their width.
++        if (row != null) for (int k = row.getChildCount(); k < per; k++) {
++            View s = new View(a);
++            LinearLayout.LayoutParams lp = new LinearLayout.LayoutParams(0, 1, 1);
++            lp.leftMargin = dp(8);
++            row.addView(s, lp);
++        }
++        final int px = dp(cell);
++        new Thread(new Runnable() {
++            public void run() {
++                for (int i = 0; i < files.size(); i++) {
++                    if (gen != generation) return;
++                    final Bitmap b = decode(files.get(i), px);
++                    final ImageView iv = views.get(i);
++                    if (b != null) a.runOnUiThread(new Runnable() {
++                        public void run() {
++                            if (gen == generation) iv.setImageBitmap(b);
++                        }
++                    });
++                }
++            }
++        }).start();
++    }
++
++    @Override
++    void hidden() {
++        generation++;
++        grid.removeAllViews();
++    }
++
++    static Bitmap decode(File f, int width) {
++        try {
++            BitmapFactory.Options o = new BitmapFactory.Options();
++            o.inJustDecodeBounds = true;
++            BitmapFactory.decodeFile(f.getPath(), o);
++            int s = 1;
++            while (o.outWidth / (s * 2) >= width) s *= 2;
++            BitmapFactory.Options d = new BitmapFactory.Options();
++            d.inSampleSize = s;
++            return BitmapFactory.decodeFile(f.getPath(), d);
++        } catch (Throwable t) {
++            return null;
++        }
++    }
++
++    private void view(final File f) {
++        ImageView big = new ImageView(a);
++        big.setAdjustViewBounds(true);
++        big.setScaleType(ImageView.ScaleType.FIT_CENTER);
++        Bitmap b = decode(f, Math.max(a.getResources().getDisplayMetrics().widthPixels, 640));
++        if (b != null) big.setImageBitmap(b);
++        new AlertDialog.Builder(a)
++                .setTitle(f.getName() + "  ·  " + Ui.size(f.length()))
++                .setView(big)
++                .setPositiveButton(Ui.t("Поделиться", "Share"), new DialogInterface.OnClickListener() {
++                    public void onClick(DialogInterface d, int w) {
++                        share(f);
++                    }
++                })
++                .setNeutralButton(Ui.t("Удалить", "Delete"), new DialogInterface.OnClickListener() {
++                    public void onClick(DialogInterface d, int w) {
++                        confirmDelete(f);
++                    }
++                })
++                .setNegativeButton(Ui.t("Закрыть", "Close"), null)
++                .show();
++    }
++
++    private void share(File f) {
++        Uri uri = DocumentsContract.buildDocumentUri(AUTHORITY, "root:screenshots/" + f.getName());
++        Intent i = new Intent(Intent.ACTION_SEND);
++        i.setType(f.getName().toLowerCase(java.util.Locale.ROOT).endsWith(".png") ? "image/png" : "image/jpeg");
++        i.putExtra(Intent.EXTRA_STREAM, uri);
++        i.addFlags(Intent.FLAG_GRANT_READ_URI_PERMISSION);
++        try {
++            a.startActivity(Intent.createChooser(i, Ui.t("Поделиться скриншотом", "Share the screenshot")));
++        } catch (Exception e) {
++            a.say(Ui.t("Нечем поделиться.", "Nothing to share with."), Ui.WARN);
++        }
++    }
++
++    private void confirmDelete(final File f) {
++        new AlertDialog.Builder(a)
++                .setTitle(Ui.t("Удалить скриншот?", "Delete the screenshot?"))
++                .setMessage(f.getName())
++                .setPositiveButton(Ui.t("Удалить", "Delete"), new DialogInterface.OnClickListener() {
++                    public void onClick(DialogInterface d, int w) {
++                        if (f.delete()) a.say(Ui.t("Скриншот удалён.", "Screenshot deleted."), Ui.GREEN);
++                        shown();
++                    }
++                })
++                .setNegativeButton(Ui.t("Отмена", "Cancel"), null)
++                .show();
++    }
++}
+diff --git a/packaging/android/java/dev/horizonlab/horizon/HomePage.java b/packaging/android/java/dev/horizonlab/horizon/HomePage.java
+new file mode 100644
+index 0000000..7449b1f
+--- /dev/null
++++ b/packaging/android/java/dev/horizonlab/horizon/HomePage.java
+@@ -0,0 +1,171 @@
++package dev.horizonlab.horizon;
++
++import android.view.View;
++import android.widget.LinearLayout;
++import android.widget.TextView;
++import java.io.File;
++import java.util.Calendar;
++import java.util.List;
++import java.util.Map;
++
++/** Oneshot: the start page, as the PC launcher's Home (HomePage.cs): play time, last worlds, news, a tip. */
++final class HomePage extends Page {
++    private static final String[][] TIPS = {
++        {"Скриншот — кнопка F2 на сенсорной панели. Снимки появятся в «Галерее».",
++            "Screenshot: the F2 button on the touch panel. Shots show up in the Gallery."},
++        {"Чтобы позвать друга, откройте мир для друзей в игре: код приглашения появится на странице «Друзья».",
++            "To invite a friend, open your world to friends in the game: the invite code shows up on the Friends page."},
++        {"Перед обновлением игры сделайте бэкап миров на странице «Миры».",
++            "Back your worlds up on the Worlds page before updating the game."},
++        {"Миры переносятся между телефоном и ПК обычным zip — экспорт и импорт на странице «Миры».",
++            "Worlds move between the phone and the PC as a plain zip: export and import on the Worlds page."},
++        {"Набор модов и ресурспаков можно передать другу одним файлом .oneshotpack («Друзья»).",
++            "Hand your mods and resource packs to a friend as one .oneshotpack file (Friends)."},
++        {"Игра тормозит на Snapdragon? Попробуйте драйвер Turnip в «Настройках».",
++            "Slow on a Snapdragon? Try the Turnip driver in Settings."},
++        {"Вылет? Лог можно посмотреть и отправить из «Настроек» — так проще найти причину.",
++            "A crash? View and send the log from Settings: it makes the cause easier to find."},
++    };
++
++    private final TextView hello;
++    private final LinearLayout figures;
++    private final Ui.Week week;
++    private final TextView weekTotal;
++    private final LinearLayout recent;
++    private final LinearLayout news;
++    private boolean newsLoaded;
++
++    HomePage(ProfileActivity a) {
++        super(a);
++        hello = Ui.text(a, "", 26, Ui.TEXT, true);
++        root.addView(hello);
++        LinearLayout status = Ui.row(a);
++        status.addView(Ui.chip(a, "v" + UpdateActivity.versionName(a), false));
++        TextView relay = a.relayLabel();
++        LinearLayout.LayoutParams rl = new LinearLayout.LayoutParams(-2, -2);
++        rl.leftMargin = dp(8);
++        status.addView(relay, rl);
++        root.addView(status, Ui.gap(a, 4));
++
++        figures = new LinearLayout(a);
++        figures.setOrientation(LinearLayout.VERTICAL);
++        root.addView(figures, Ui.gap(a, 14));
++
++        LinearLayout wk = block(Ui.t("Последние 7 дней", "Last 7 days"));
++        week = new Ui.Week(a);
++        wk.addView(week, Ui.gap(a, 6));
++        weekTotal = note(wk, "");
++
++        LinearLayout rec = block(Ui.t("Недавние миры", "Recent worlds"));
++        recent = new LinearLayout(a);
++        recent.setOrientation(LinearLayout.VERTICAL);
++        rec.addView(recent);
++
++        LinearLayout nw = block(Ui.t("Новости", "News"));
++        news = new LinearLayout(a);
++        news.setOrientation(LinearLayout.VERTICAL);
++        nw.addView(news);
++
++        LinearLayout tip = block(Ui.t("Совет", "Tip"));
++        String[] t = TIPS[Calendar.getInstance().get(Calendar.DAY_OF_YEAR) % TIPS.length];
++        tip.addView(Ui.text(a, Ui.t(t[0], t[1]), 14, Ui.TEXT, false));
++    }
++
++    @Override
++    void shown() {
++        String name = a.readName();
++        int hour = Calendar.getInstance().get(Calendar.HOUR_OF_DAY);
++        String greet = hour < 5 ? Ui.t("Доброй ночи", "Good night") : hour < 12 ? Ui.t("Доброе утро", "Good morning")
++                : hour < 18 ? Ui.t("Добрый день", "Good afternoon") : Ui.t("Добрый вечер", "Good evening");
++        hello.setText(greet + (name.isEmpty() ? "" : ", " + name));
++
++        Map<String, String> t = PlayStats.totals(a);
++        figures.removeAllViews();
++        View[] tiles = {
++            Ui.tile(a, Ui.duration(PlayStats.num(t, "total")), Ui.t("всего в игре", "played")),
++            Ui.tile(a, "" + PlayStats.num(t, "sessions"), Ui.t("запусков", "sessions")),
++            Ui.tile(a, Ui.duration(PlayStats.num(t, "longest")), Ui.t("самая долгая", "longest")),
++            Ui.tile(a, Ui.duration(PlayStats.num(t, "friends")), Ui.t("с друзьями", "with friends")),
++        };
++        // Four in a row when there is room, else two rows of two.
++        int per = a.pageWidthDp() >= 560 ? 4 : 2;
++        for (int i = 0; i < tiles.length; i += per) {
++            LinearLayout r = Ui.row(a);
++            for (int j = 0; j < per && i + j < tiles.length; j++) r.addView(tiles[i + j], Ui.part(a, j == 0));
++            figures.addView(r, Ui.gap(a, i == 0 ? 0 : 10));
++        }
++        String[] names = new String[7];
++        long[] days = PlayStats.week(t, names);
++        week.set(days, names);
++        long sum = 0;
++        for (long d : days) sum += d;
++        long last = PlayStats.num(t, "last");
++        weekTotal.setText(Ui.t("За неделю: ", "This week: ") + Ui.duration(sum)
++                + Ui.t(" · последняя игра: ", " · last played: ") + Ui.ago(last));
++
++        recent.removeAllViews();
++        List<File> worlds = WorldsPage.worlds(a.dir);
++        if (worlds.isEmpty()) {
++            note(recent, Ui.t("Миров пока нет: создайте первый в игре.", "No worlds yet: create the first one in the game."));
++        }
++        for (int i = 0; i < Math.min(3, worlds.size()); i++) {
++            File w = worlds.get(i);
++            LinearLayout r = Ui.row(a);
++            TextView n = Ui.text(a, w.getName(), 15, Ui.TEXT, true);
++            n.setSingleLine(true);
++            n.setEllipsize(android.text.TextUtils.TruncateAt.END);
++            r.addView(n, new LinearLayout.LayoutParams(0, -2, 1));
++            r.addView(Ui.text(a, Ui.ago(new File(w, "level.dat").lastModified()), 12, Ui.MUTED, false));
++            r.setOnClickListener(new View.OnClickListener() {
++                public void onClick(View v) {
++                    a.show(ProfileActivity.WORLDS);
++                }
++            });
++            recent.addView(r);
++        }
++
++        if (!newsLoaded) loadNews();
++    }
++
++    private void loadNews() {
++        newsLoaded = true;
++        news.removeAllViews();
++        note(news, Ui.t("Загружаем…", "Loading…"));
++        new Thread(new Runnable() {
++            public void run() {
++                List<UpdateActivity.Release> list = null;
++                try {
++                    list = UpdateActivity.releases(a, false);
++                } catch (Exception ignored) {
++                }
++                final List<UpdateActivity.Release> got = list;
++                a.runOnUiThread(new Runnable() {
++                    public void run() {
++                        if (a.isFinishing()) return;
++                        news.removeAllViews();
++                        if (got == null || got.isEmpty()) {
++                            newsLoaded = false;
++                            note(news, Ui.t("Нет связи с GitHub — новости появятся позже.", "No connection to GitHub: news later."));
++                            return;
++                        }
++                        for (int i = 0; i < Math.min(3, got.size()); i++) {
++                            UpdateActivity.Release r = got.get(i);
++                            news.addView(Ui.text(a, r.name + (r.date.isEmpty() ? "" : "  ·  " + r.date), 14, i == 0 ? Ui.GREEN : Ui.TEXT, true),
++                                    Ui.gap(a, i == 0 ? 0 : 8));
++                            String notes = r.notes.replaceAll("[#*`>]", "").replaceAll("\\s+", " ").trim();
++                            if (notes.length() > 220) notes = notes.substring(0, 220) + "…";
++                            if (!notes.isEmpty()) note(news, notes);
++                        }
++                        TextView more = Ui.text(a, Ui.t("Все версии →", "All versions →"), 13, Ui.GREEN, true);
++                        more.setOnClickListener(new View.OnClickListener() {
++                            public void onClick(View v) {
++                                a.startActivity(new android.content.Intent(a, UpdateActivity.class));
++                            }
++                        });
++                        news.addView(more, Ui.gap(a, 6));
++                    }
++                });
++            }
++        }).start();
++    }
++}
+diff --git a/packaging/android/java/dev/horizonlab/horizon/HorizonActivity.java b/packaging/android/java/dev/horizonlab/horizon/HorizonActivity.java
+index d272751..354f622 100644
+--- a/packaging/android/java/dev/horizonlab/horizon/HorizonActivity.java
++++ b/packaging/android/java/dev/horizonlab/horizon/HorizonActivity.java
+@@ -35,10 +35,28 @@ public class HorizonActivity extends NativeActivity {
+ 
+     private TextSink sink;
+     private volatile boolean quitting;
++    /** Oneshot: the play-time heartbeat (PlayStats), once a minute while the game is in front. */
++    private final android.os.Handler beats = new android.os.Handler();
++    private final Runnable beat = new Runnable() {
++        public void run() {
++            PlayStats.beat(HorizonActivity.this, null);
++            beats.postDelayed(this, 60000);
++        }
++    };
+ 
+     @Override
+     protected void onCreate(Bundle state) {
+         super.onCreate(state);
++        Ui.load(this);
++        if (!PlayStats.alive) {
++            // A new game in this process (not the same one recreated): a new play session. A left-over
++            // invite code belongs to the game before; the game writes a new one when sharing starts.
++            java.io.File home = new java.io.File(SetupActivity.home(this));
++            new java.io.File(home, "invite-code.txt").delete();
++            // join-last.txt: the game's thread may already have taken join.txt.
++            PlayStats.begin(this, new java.io.File(home, "join.txt").isFile() || new java.io.File(home, "join-last.txt").isFile());
++            PlayStats.alive = true;
++        }
+         applyCutout(this);
+         sink = new TextSink(this);
+         addContentView(sink, new ViewGroup.LayoutParams(1, 1));
+@@ -180,6 +198,9 @@ public class HorizonActivity extends NativeActivity {
+     @Override
+     protected void onResume() {
+         super.onResume();
++        PlayStats.beat(this, false);
++        beats.removeCallbacks(beat);
++        beats.postDelayed(beat, 60000);
+         // The setting may have just changed on the profile screen.
+         applyCutout(this);
+         renewAccount();
+@@ -216,6 +237,7 @@ public class HorizonActivity extends NativeActivity {
+      */
+     public void quit() {
+         quitting = true;
++        PlayStats.end(this);
+         runOnUiThread(new Runnable() {
+             public void run() {
+                 finishAndRemoveTask();
+@@ -232,6 +254,13 @@ public class HorizonActivity extends NativeActivity {
+         }, "horizon-quit").start();
+     }
+ 
++    @Override
++    protected void onPause() {
++        super.onPause();
++        beats.removeCallbacks(beat);
++        PlayStats.beat(this, true);
++    }
++
+     @Override
+     protected void onDestroy() {
+         super.onDestroy();
+@@ -242,6 +271,7 @@ public class HorizonActivity extends NativeActivity {
+             // The player closed it: not a failed start, however short (android_main.rs).
+             new java.io.File(getFilesDir(), "launch.pending").delete();
+             new java.io.File(getFilesDir(), "vulkan-driver.pending").delete();
++            PlayStats.end(this);
+             System.exit(0);
+         }
+     }
+diff --git a/packaging/android/java/dev/horizonlab/horizon/Net.java b/packaging/android/java/dev/horizonlab/horizon/Net.java
+new file mode 100644
+index 0000000..336bb23
+--- /dev/null
++++ b/packaging/android/java/dev/horizonlab/horizon/Net.java
+@@ -0,0 +1,218 @@
++package dev.horizonlab.horizon;
++
++import android.app.Activity;
++import android.net.Uri;
++import java.io.ByteArrayOutputStream;
++import java.io.File;
++import java.io.InputStream;
++import java.io.OutputStream;
++import java.net.HttpURLConnection;
++import java.net.InetSocketAddress;
++import java.net.Socket;
++import java.net.URL;
++import java.nio.charset.StandardCharsets;
++import java.nio.file.Files;
++import java.util.Locale;
++
++/**
++ * Oneshot: the network bits of the PC launcher (RelayStatus.cs, Invites.cs). The relay is the
++ * server friends meet through when they cannot reach each other directly; its address is the
++ * game's (android_main.rs: relay.txt in the game folder, else Oneshot's VPS).
++ */
++final class Net {
++    static final String REPO = "A22D3THLEE/oneshot-horizon-builds";
++    /** The page that turns an http link (clickable in any chat) into oneshot://join/<code>. */
++    static final String JOIN_PAGE = "https://a22d3thlee.github.io/oneshot-horizon-builds/join.html";
++    static final String DEFAULT_RELAY = "166.1.36.218:7000";
++
++    private Net() {}
++
++    /** The relay the game uses, or "" when it is turned off. */
++    static String relay(Activity a) {
++        try {
++            return new String(Files.readAllBytes(new File(SetupActivity.home(a), "relay.txt").toPath()), StandardCharsets.UTF_8).trim();
++        } catch (Exception e) {
++            return DEFAULT_RELAY;
++        }
++    }
++
++    /** An invite code as the game prints it, or null: Crockford base32, 20+ characters, friend: optional. */
++    static String normalize(String raw) {
++        if (raw == null) return null;
++        String code = Uri.decode(raw).toUpperCase(Locale.ROOT).replaceAll("[\\s\\-/]", "");
++        if (code.startsWith("FRIEND:")) code = code.substring(7);
++        code = code.replace('O', '0').replace('I', '1').replace('L', '1');
++        return code.matches("[0-9A-HJKMNP-TV-Z]{20,}") ? code : null;
++    }
++
++    /** The code the running game shares now (invite-code.txt), or null. */
++    static String hostCode(Activity a) {
++        try {
++            File f = new File(SetupActivity.home(a), "invite-code.txt");
++            return f.isFile() ? normalize(new String(Files.readAllBytes(f.toPath()), StandardCharsets.UTF_8).trim()) : null;
++        } catch (Exception e) {
++            return null;
++        }
++    }
++
++    static String linkFor(String code) {
++        return JOIN_PAGE + "#" + code;
++    }
++
++    /** Watches the relay: a TCP connect every 5 s, like the PC launcher's status line. */
++    static final class Relay {
++        interface Listener {
++            /** ms >= 0 online (0: answered too fast to be the real server), -1 offline, -2 turned off. */
++            void onStatus(long ms);
++        }
++
++        private volatile boolean running;
++        private Thread thread;
++
++        void start(final Activity a, final Listener l) {
++            stop();
++            running = true;
++            final String relay = relay(a);
++            thread = new Thread(new Runnable() {
++                public void run() {
++                    int misses = 0;
++                    while (running) {
++                        long ms = -2;
++                        if (!relay.isEmpty()) {
++                            ms = ping(relay);
++                            if (ms < 0) {
++                                misses++;
++                                // One lost try is noise on mobile internet; two in a row is offline.
++                                if (misses < 2) ms = Long.MIN_VALUE;
++                            } else {
++                                misses = 0;
++                            }
++                        }
++                        final long shown = ms;
++                        if (shown != Long.MIN_VALUE && running) {
++                            a.runOnUiThread(new Runnable() {
++                                public void run() {
++                                    if (running) l.onStatus(shown);
++                                }
++                            });
++                        }
++                        try {
++                            Thread.sleep(5000);
++                        } catch (InterruptedException e) {
++                            return;
++                        }
++                    }
++                }
++            }, "oneshot-relay-ping");
++            thread.setDaemon(true);
++            thread.start();
++        }
++
++        void stop() {
++            running = false;
++            if (thread != null) thread.interrupt();
++            thread = null;
++        }
++
++        private static long ping(String relay) {
++            String hostPort = relay.replaceFirst("^[a-z]+://", "");
++            int slash = hostPort.indexOf('/');
++            if (slash >= 0) hostPort = hostPort.substring(0, slash);
++            int colon = hostPort.lastIndexOf(':');
++            String host = colon > 0 ? hostPort.substring(0, colon) : hostPort;
++            int port = 7000;
++            try {
++                if (colon > 0) port = Integer.parseInt(hostPort.substring(colon + 1));
++            } catch (Exception ignored) {
++            }
++            try (Socket s = new Socket()) {
++                long t = System.nanoTime();
++                s.connect(new InetSocketAddress(host, port), 3000);
++                long ms = (System.nanoTime() - t) / 1000000;
++                // Under 1 ms is a local tunnel answering, not the server itself.
++                return ms < 1 ? 0 : ms;
++            } catch (Exception e) {
++                return -1;
++            }
++        }
++
++        static String label(long ms) {
++            if (ms == -2) return Ui.t("Сервер Oneshot: выключен (relay.txt пуст)", "Oneshot server: off (relay.txt is empty)");
++            if (ms < 0) return Ui.t("Сервер Oneshot: недоступен", "Oneshot server: offline");
++            if (ms == 0) return Ui.t("Сервер Oneshot: доступен", "Oneshot server: reachable");
++            return Ui.t("Сервер Oneshot: онлайн · ", "Oneshot server: online · ") + ms + Ui.t(" мс", " ms");
++        }
++    }
++
++    static HttpURLConnection open(String url) throws Exception {
++        for (int i = 0; i < 5; i++) {
++            if (!url.startsWith("https://")) throw new java.io.IOException("not https: " + url);
++            HttpURLConnection c = (HttpURLConnection) new URL(url).openConnection();
++            c.setInstanceFollowRedirects(false);
++            c.setConnectTimeout(15000);
++            c.setReadTimeout(30000);
++            c.setRequestProperty("User-Agent", "OneshotAndroid");
++            int code = c.getResponseCode();
++            if (code >= 300 && code < 400 && c.getHeaderField("Location") != null) {
++                url = new URL(new URL(url), c.getHeaderField("Location")).toString();
++                c.disconnect();
++                continue;
++            }
++            if (code != 200) {
++                c.disconnect();
++                throw new java.io.IOException("HTTP " + code);
++            }
++            return c;
++        }
++        throw new java.io.IOException("too many redirects");
++    }
++
++    static String get(String url) throws Exception {
++        HttpURLConnection c = open(url);
++        try (InputStream in = c.getInputStream()) {
++            return new String(readAll(in, 4 << 20), StandardCharsets.UTF_8);
++        } finally {
++            c.disconnect();
++        }
++    }
++
++    /** A form POST (application/x-www-form-urlencoded); the answer's body. */
++    static String post(String url, String field, String value) throws Exception {
++        HttpURLConnection c = (HttpURLConnection) new URL(url).openConnection();
++        c.setConnectTimeout(15000);
++        c.setReadTimeout(60000);
++        c.setDoOutput(true);
++        c.setRequestMethod("POST");
++        c.setRequestProperty("User-Agent", "OneshotAndroid");
++        c.setRequestProperty("Content-Type", "application/x-www-form-urlencoded");
++        byte[] body = (field + "=" + java.net.URLEncoder.encode(value, "UTF-8")).getBytes(StandardCharsets.UTF_8);
++        try (OutputStream out = c.getOutputStream()) {
++            out.write(body);
++        }
++        int code = c.getResponseCode();
++        InputStream in = code < 400 ? c.getInputStream() : c.getErrorStream();
++        try {
++            return in == null ? "" : new String(readAll(in, 1 << 20), StandardCharsets.UTF_8);
++        } finally {
++            if (in != null) in.close();
++            c.disconnect();
++        }
++    }
++
++    static byte[] readAll(InputStream in, long max) throws Exception {
++        ByteArrayOutputStream out = new ByteArrayOutputStream();
++        byte[] buf = new byte[16384];
++        int n;
++        while ((n = in.read(buf)) > 0) {
++            out.write(buf, 0, n);
++            if (out.size() > max) throw new java.io.IOException("too big");
++        }
++        return out.toByteArray();
++    }
++
++    static String hex(byte[] b) {
++        StringBuilder s = new StringBuilder();
++        for (byte x : b) s.append(String.format(Locale.ROOT, "%02x", x & 0xff));
++        return s.toString();
++    }
++}
+diff --git a/packaging/android/java/dev/horizonlab/horizon/PackShare.java b/packaging/android/java/dev/horizonlab/horizon/PackShare.java
+new file mode 100644
+index 0000000..6ebef71
+--- /dev/null
++++ b/packaging/android/java/dev/horizonlab/horizon/PackShare.java
+@@ -0,0 +1,228 @@
++package dev.horizonlab.horizon;
++
++import android.content.Context;
++import java.io.File;
++import java.io.FileOutputStream;
++import java.io.InputStream;
++import java.io.OutputStream;
++import java.nio.charset.StandardCharsets;
++import java.nio.file.Files;
++import java.util.ArrayList;
++import java.util.List;
++import java.util.zip.ZipEntry;
++import java.util.zip.ZipInputStream;
++import java.util.zip.ZipOutputStream;
++import org.json.JSONArray;
++import org.json.JSONObject;
++
++/**
++ * Oneshot: the PC launcher's .oneshotpack (PackShare.cs): a zip with oneshot-pack.json
++ * {Format:1, Version, Mods:[ids], ResourcePacks:[...], Made} and the folders horizon-mods,
++ * resourcepacks and shaderpacks. Opening one moves the player's own set to pack-backups first.
++ */
++final class PackShare {
++    static final String[] FOLDERS = {"horizon-mods", "resourcepacks", "shaderpacks"};
++
++    private PackShare() {}
++
++    /** The ids switched on in horizon-mods.txt (lines mod.<id>:true). */
++    static List<String> enabledMods(File home) {
++        List<String> ids = new ArrayList<>();
++        for (String l : lines(new File(home, "horizon-mods.txt"))) {
++            l = l.trim();
++            if (l.startsWith("mod.") && l.endsWith(":true")) ids.add(l.substring(4, l.length() - 5));
++        }
++        return ids;
++    }
++
++    /** The resource packs options.txt turns on, without the built-in vanilla. */
++    static List<String> enabledPacks(File home) {
++        List<String> out = new ArrayList<>();
++        for (String l : lines(new File(home, "options.txt"))) {
++            if (!l.startsWith("resourcePacks:")) continue;
++            try {
++                JSONArray arr = new JSONArray(l.substring("resourcePacks:".length()).trim());
++                for (int i = 0; i < arr.length(); i++) if (!"vanilla".equals(arr.getString(i))) out.add(arr.getString(i));
++            } catch (Exception ignored) {
++            }
++        }
++        return out;
++    }
++
++    static int export(Context c, File home, OutputStream raw) throws Exception {
++        int files = 0;
++        try (ZipOutputStream zip = new ZipOutputStream(raw)) {
++            JSONObject meta = new JSONObject();
++            meta.put("Format", 1);
++            meta.put("Version", UpdateActivity.versionName(c));
++            meta.put("Mods", new JSONArray(enabledMods(home)));
++            meta.put("ResourcePacks", new JSONArray(enabledPacks(home)));
++            meta.put("Made", new java.text.SimpleDateFormat("yyyy-MM-dd'T'HH:mm:ss", java.util.Locale.ROOT).format(new java.util.Date()));
++            zip.putNextEntry(new ZipEntry("oneshot-pack.json"));
++            zip.write(meta.toString(2).getBytes(StandardCharsets.UTF_8));
++            zip.closeEntry();
++            for (String f : FOLDERS) files += add(zip, new File(home, f), f);
++        }
++        return files;
++    }
++
++    private static int add(ZipOutputStream zip, File f, String rel) throws Exception {
++        if (f.isDirectory()) {
++            int n = 0;
++            File[] kids = f.listFiles();
++            if (kids != null) for (File k : kids) n += add(zip, k, rel + "/" + k.getName());
++            return n;
++        }
++        if (!f.isFile()) return 0;
++        zip.putNextEntry(new ZipEntry(rel));
++        Files.copy(f.toPath(), zip);
++        zip.closeEntry();
++        return 1;
++    }
++
++    /** Unpacks a set over the player's own (kept in pack-backups/<time>); the number of files. */
++    static int open(File home, InputStream raw) throws Exception {
++        File staging = new File(home, "pack-import.tmp");
++        ProfileActivity.deleteTree(staging);
++        staging.mkdirs();
++        JSONObject meta = null;
++        int files = 0;
++        long total = 0;
++        try {
++            try (ZipInputStream zin = new ZipInputStream(raw)) {
++                ZipEntry e;
++                byte[] buf = new byte[65536];
++                while ((e = zin.getNextEntry()) != null) {
++                    String n = e.getName().replace('\\', '/');
++                    if (n.startsWith("/") || n.contains("../") || n.equals("..") || e.isDirectory()) continue;
++                    if (n.equals("oneshot-pack.json")) {
++                        meta = new JSONObject(new String(Net.readAll(zin, 1 << 20), StandardCharsets.UTF_8));
++                        continue;
++                    }
++                    boolean ours = false;
++                    for (String f : FOLDERS) if (n.startsWith(f + "/")) ours = true;
++                    if (!ours) continue;
++                    File out = new File(staging, n);
++                    out.getParentFile().mkdirs();
++                    try (FileOutputStream fo = new FileOutputStream(out)) {
++                        int r;
++                        while ((r = zin.read(buf)) > 0) {
++                            fo.write(buf, 0, r);
++                            total += r;
++                            if (total > (2L << 30)) throw new Exception(Ui.t("набор больше 2 ГБ", "the set is over 2 GB"));
++                        }
++                    }
++                    files++;
++                }
++            }
++            if (meta == null || meta.optInt("Format", 0) != 1) {
++                throw new Exception(Ui.t("это не файл .oneshotpack", "not a .oneshotpack file"));
++            }
++            // The player's own set first, so nothing is lost.
++            File backup = new File(new File(home, "pack-backups"), new java.text.SimpleDateFormat("yyyy-MM-dd_HH-mm-ss",
++                    java.util.Locale.ROOT).format(new java.util.Date()));
++            backup.mkdirs();
++            for (String f : FOLDERS) {
++                File cur = new File(home, f);
++                if (cur.exists() && !cur.renameTo(new File(backup, f))) throw new Exception("backup " + f);
++                File got = new File(staging, f);
++                if (got.isDirectory()) {
++                    if (!got.renameTo(cur)) throw new Exception("move " + f);
++                } else {
++                    cur.mkdirs();
++                }
++            }
++            copyIfThere(new File(home, "horizon-mods.txt"), new File(backup, "horizon-mods.txt"));
++            copyIfThere(new File(home, "options.txt"), new File(backup, "options.txt"));
++            List<String> mods = new ArrayList<>();
++            JSONArray m = meta.optJSONArray("Mods");
++            if (m != null) for (int i = 0; i < m.length(); i++) mods.add(m.getString(i));
++            List<String> packs = new ArrayList<>();
++            JSONArray p = meta.optJSONArray("ResourcePacks");
++            if (p != null) for (int i = 0; i < p.length(); i++) packs.add(p.getString(i));
++            setMods(home, mods);
++            setPacks(home, packs);
++            return files;
++        } finally {
++            ProfileActivity.deleteTree(staging);
++        }
++    }
++
++    /** The newest folder in pack-backups, or null. */
++    static File lastBackup(File home) {
++        File[] all = new File(home, "pack-backups").listFiles();
++        File best = null;
++        if (all != null) for (File f : all) if (f.isDirectory() && (best == null || f.getName().compareTo(best.getName()) > 0)) best = f;
++        return best;
++    }
++
++    static void restore(File home) throws Exception {
++        File b = lastBackup(home);
++        if (b == null) throw new Exception(Ui.t("нет сохранённого набора", "no saved set"));
++        for (String f : FOLDERS) {
++            File cur = new File(home, f);
++            ProfileActivity.deleteTree(cur);
++            File old = new File(b, f);
++            if (old.isDirectory()) {
++                if (!old.renameTo(cur)) throw new Exception("restore " + f);
++            } else {
++                cur.mkdirs();
++            }
++        }
++        File mods = new File(b, "horizon-mods.txt");
++        if (mods.isFile()) Files.copy(mods.toPath(), new File(home, "horizon-mods.txt").toPath(), java.nio.file.StandardCopyOption.REPLACE_EXISTING);
++        File opts = new File(b, "options.txt");
++        if (opts.isFile()) setPacks(home, enabledPacks(b));
++        ProfileActivity.deleteTree(b);
++    }
++
++    private static void copyIfThere(File from, File to) throws Exception {
++        if (from.isFile()) Files.copy(from.toPath(), to.toPath(), java.nio.file.StandardCopyOption.REPLACE_EXISTING);
++    }
++
++    /** As the PC's SetEnabledSet: exactly these mods on, every other mod.* line off. */
++    private static void setMods(File home, List<String> ids) throws Exception {
++        StringBuilder b = new StringBuilder();
++        for (String l : lines(new File(home, "horizon-mods.txt"))) {
++            String t = l.trim();
++            if (t.isEmpty()) continue;
++            if (t.startsWith("mod.") && t.contains(":")) {
++                String id = t.substring(4, t.lastIndexOf(':'));
++                if (!ids.contains(id)) b.append("mod.").append(id).append(":false\n");
++            } else {
++                b.append(l).append('\n');
++            }
++        }
++        for (String id : ids) b.append("mod.").append(id).append(":true\n");
++        Files.write(new File(home, "horizon-mods.txt").toPath(), b.toString().getBytes(StandardCharsets.UTF_8));
++    }
++
++    /** resourcePacks:["vanilla", ...] in options.txt; the other options stay as they are. */
++    private static void setPacks(File home, List<String> packs) throws Exception {
++        JSONArray arr = new JSONArray();
++        arr.put("vanilla");
++        for (String s : packs) arr.put(s);
++        String line = "resourcePacks:" + arr.toString().replace("\\/", "/");
++        StringBuilder b = new StringBuilder();
++        boolean done = false;
++        for (String l : lines(new File(home, "options.txt"))) {
++            if (l.startsWith("resourcePacks:")) {
++                b.append(line).append('\n');
++                done = true;
++            } else if (!l.isEmpty()) {
++                b.append(l).append('\n');
++            }
++        }
++        if (!done) b.append(line).append('\n');
++        Files.write(new File(home, "options.txt").toPath(), b.toString().getBytes(StandardCharsets.UTF_8));
++    }
++
++    static List<String> lines(File f) {
++        List<String> out = new ArrayList<>();
++        try {
++            for (String l : new String(Files.readAllBytes(f.toPath()), StandardCharsets.UTF_8).split("\n")) out.add(l.replace("\r", ""));
++        } catch (Exception ignored) {
++        }
++        return out;
++    }
++}
+diff --git a/packaging/android/java/dev/horizonlab/horizon/Page.java b/packaging/android/java/dev/horizonlab/horizon/Page.java
+new file mode 100644
+index 0000000..a388cc2
+--- /dev/null
++++ b/packaging/android/java/dev/horizonlab/horizon/Page.java
+@@ -0,0 +1,54 @@
++package dev.horizonlab.horizon;
++
++import android.content.Intent;
++import android.view.View;
++import android.widget.LinearLayout;
++import android.widget.TextView;
++
++/** One page of the launcher (ProfileActivity's left rail picks it): built once, refreshed when shown. */
++abstract class Page {
++    final ProfileActivity a;
++    final LinearLayout root;
++
++    Page(ProfileActivity a) {
++        this.a = a;
++        root = new LinearLayout(a);
++        root.setOrientation(LinearLayout.VERTICAL);
++    }
++
++    /** The page came in front (also the first time). */
++    void shown() {}
++
++    void hidden() {}
++
++    /** A file picker or share sheet answered; true when it was this page's request. */
++    boolean onResult(int request, int result, Intent data) {
++        return false;
++    }
++
++    int dp(float v) {
++        return Ui.dp(a, v);
++    }
++
++    /** A block with a caption, added to the page with the usual gap. */
++    LinearLayout block(String caption) {
++        LinearLayout p = Ui.panel(a);
++        if (caption != null) p.addView(Ui.caption(a, caption));
++        root.addView(p, Ui.gap(a, 12));
++        return p;
++    }
++
++    TextView note(LinearLayout into, String s) {
++        TextView t = Ui.text(a, s, 12, Ui.MUTED, false);
++        into.addView(t);
++        return t;
++    }
++
++    /** A row of buttons sharing the width. */
++    LinearLayout buttons(LinearLayout into, View... views) {
++        LinearLayout r = Ui.row(a);
++        for (int i = 0; i < views.length; i++) r.addView(views[i], Ui.part(a, i == 0));
++        into.addView(r, Ui.gap(a, 8));
++        return r;
++    }
++}
+diff --git a/packaging/android/java/dev/horizonlab/horizon/PlayStats.java b/packaging/android/java/dev/horizonlab/horizon/PlayStats.java
+new file mode 100644
+index 0000000..c5ca639
+--- /dev/null
++++ b/packaging/android/java/dev/horizonlab/horizon/PlayStats.java
+@@ -0,0 +1,160 @@
++package dev.horizonlab.horizon;
++
++import android.content.Context;
++import java.io.File;
++import java.nio.charset.StandardCharsets;
++import java.nio.file.Files;
++import java.text.SimpleDateFormat;
++import java.util.Calendar;
++import java.util.LinkedHashMap;
++import java.util.Locale;
++import java.util.Map;
++
++/**
++ * Oneshot: play time, as the PC launcher keeps it (PlayStats.cs). The game screen writes the
++ * running session to session.txt (start, a heartbeat every minute, paused or not, a clean end);
++ * the launcher folds a finished one into play-stats.txt. A session that stopped without a clean
++ * end while the game was in front is a crash: the launcher then offers the crash screen.
++ *
++ * play-stats.txt: key=value lines, total / sessions / longest / last / friends (ms or epoch ms),
++ * d.yyyy-MM-dd (ms that day) and v.<version> (ms on that app version).
++ */
++final class PlayStats {
++    /** A game screen runs in this process (the launcher was opened from the game). */
++    static volatile boolean alive;
++
++    private PlayStats() {}
++
++    private static File session(Context c) {
++        return new File(c.getFilesDir(), "session.txt");
++    }
++
++    private static File stats(Context c) {
++        return new File(c.getFilesDir(), "play-stats.txt");
++    }
++
++    static Map<String, String> read(File f) {
++        Map<String, String> m = new LinkedHashMap<>();
++        try {
++            for (String l : new String(Files.readAllBytes(f.toPath()), StandardCharsets.UTF_8).split("\n")) {
++                int eq = l.indexOf('=');
++                if (eq > 0) m.put(l.substring(0, eq).trim(), l.substring(eq + 1).trim());
++            }
++        } catch (Exception ignored) {
++        }
++        return m;
++    }
++
++    private static void write(File f, Map<String, String> m) {
++        StringBuilder b = new StringBuilder();
++        for (Map.Entry<String, String> e : m.entrySet()) b.append(e.getKey()).append('=').append(e.getValue()).append('\n');
++        try {
++            File tmp = new File(f.getPath() + ".tmp");
++            Files.write(tmp.toPath(), b.toString().getBytes(StandardCharsets.UTF_8));
++            if (!tmp.renameTo(f)) {
++                f.delete();
++                tmp.renameTo(f);
++            }
++        } catch (Exception ignored) {
++        }
++    }
++
++    static long num(Map<String, String> m, String key) {
++        try {
++            String v = m.get(key);
++            return v == null ? 0 : Long.parseLong(v);
++        } catch (Exception e) {
++            return 0;
++        }
++    }
++
++    private static String day(long when) {
++        return new SimpleDateFormat("yyyy-MM-dd", Locale.ROOT).format(new java.util.Date(when));
++    }
++
++    /** The game screen opened: a new session (a left-over one is folded first). */
++    static synchronized void begin(Context c, boolean friends) {
++        fold(c);
++        long now = System.currentTimeMillis();
++        Map<String, String> s = new LinkedHashMap<>();
++        s.put("start", "" + now);
++        s.put("beat", "" + now);
++        s.put("paused", "0");
++        s.put("clean", "0");
++        s.put("friends", friends ? "1" : "0");
++        s.put("version", UpdateActivity.versionName(c));
++        write(session(c), s);
++    }
++
++    /** The heartbeat; paused null keeps the flag. Sharing the world counts as playing with friends. */
++    static synchronized void beat(Context c, Boolean paused) {
++        File f = session(c);
++        if (!f.isFile()) return;
++        Map<String, String> s = read(f);
++        long now = System.currentTimeMillis();
++        // Time in the background is not play time: a pause ends the counted stretch.
++        if (!"1".equals(s.get("paused"))) s.put("played", "" + (num(s, "played") + Math.max(0, Math.min(now - num(s, "beat"), 120000))));
++        s.put("beat", "" + now);
++        if (paused != null) s.put("paused", paused ? "1" : "0");
++        if (new File(SetupActivity.home(c), "invite-code.txt").isFile()) s.put("friends", "1");
++        write(f, s);
++    }
++
++    /** The player left the game on purpose. */
++    static synchronized void end(Context c) {
++        File f = session(c);
++        if (!f.isFile()) return;
++        beat(c, null);
++        Map<String, String> s = read(f);
++        s.put("clean", "1");
++        write(f, s);
++        boolean was = alive;
++        alive = false;
++        fold(c);
++        alive = was;
++    }
++
++    /**
++     * A finished session into the totals. True when it ended in a crash: no clean end while the
++     * game was in front (a game the system closed in the background is no crash).
++     */
++    static synchronized boolean fold(Context c) {
++        if (alive) return false;
++        File f = session(c);
++        if (!f.isFile()) return false;
++        Map<String, String> s = read(f);
++        f.delete();
++        long played = Math.max(0, Math.min(num(s, "played"), 24L * 3600000));
++        long start = num(s, "start");
++        Map<String, String> t = read(stats(c));
++        t.put("total", "" + (num(t, "total") + played));
++        t.put("sessions", "" + (num(t, "sessions") + 1));
++        t.put("longest", "" + Math.max(num(t, "longest"), played));
++        t.put("last", "" + Math.max(num(t, "last"), num(s, "beat")));
++        if ("1".equals(s.get("friends"))) t.put("friends", "" + (num(t, "friends") + played));
++        String d = "d." + day(start > 0 ? start : System.currentTimeMillis());
++        t.put(d, "" + (num(t, d) + played));
++        String v = "v." + (s.get("version") == null ? "?" : s.get("version"));
++        t.put(v, "" + (num(t, v) + played));
++        write(stats(c), t);
++        return !"1".equals(s.get("clean")) && !"1".equals(s.get("paused")) && start > 0;
++    }
++
++    static Map<String, String> totals(Context c) {
++        return read(stats(c));
++    }
++
++    /** The last seven days, oldest first: ms played and short day names. */
++    static long[] week(Map<String, String> t, String[] names) {
++        long[] out = new long[7];
++        Calendar cal = Calendar.getInstance();
++        cal.add(Calendar.DAY_OF_MONTH, -6);
++        SimpleDateFormat dn = new SimpleDateFormat("EE", Ui.ru() ? new Locale("ru") : Locale.ENGLISH);
++        for (int i = 0; i < 7; i++) {
++            out[i] = num(t, "d." + day(cal.getTimeInMillis()));
++            names[i] = dn.format(cal.getTime());
++            cal.add(Calendar.DAY_OF_MONTH, 1);
++        }
++        return out;
++    }
++}
+diff --git a/packaging/android/java/dev/horizonlab/horizon/ProfileActivity.java b/packaging/android/java/dev/horizonlab/horizon/ProfileActivity.java
+index 313af82..1e63a91 100644
+--- a/packaging/android/java/dev/horizonlab/horizon/ProfileActivity.java
++++ b/packaging/android/java/dev/horizonlab/horizon/ProfileActivity.java
+@@ -1,11 +1,12 @@
+ package dev.horizonlab.horizon;
+ 
+ import android.app.Activity;
++import android.app.AlertDialog;
++import android.content.DialogInterface;
+ import android.content.Intent;
+ import android.graphics.Bitmap;
+ import android.graphics.BitmapFactory;
+-import android.graphics.Color;
+-import android.graphics.drawable.GradientDrawable;
++import android.graphics.Typeface;
+ import android.net.Uri;
+ import android.os.Bundle;
+ import android.text.InputFilter;
+@@ -24,10 +25,12 @@ import java.io.FileOutputStream;
+ import java.io.InputStream;
+ import java.nio.charset.StandardCharsets;
+ import java.nio.file.Files;
++import java.util.ArrayList;
++import java.util.List;
+ 
+ /**
+- * The launcher, landscape and on one screen: the skin with its picker and arm model, the
+- * name, the account, a big Play button and every setting on the right.
++ * The launcher, as the PC one: a rail on the left (Home, Profile, Friends, Worlds, Gallery,
++ * Content, Settings and the PLAY button) and the picked page on the right.
+  *
+  * The name goes to horizon-player.txt (offline_name.rs: the name used on servers and LAN);
+  * the skin, a PNG picked with the system file picker, to horizon-skin.png as a plain 64x64
+@@ -40,13 +43,16 @@ public class ProfileActivity extends Activity implements View.OnClickListener {
+     private static final int PICK_CAPE = 10;
+     private static final int WORLD_IN = 11;
+     private static final int WORLD_OUT = 12;
+-    private File dir;
++
++    static final int HOME = 0, PROFILE = 1, FRIENDS = 2, WORLDS = 3, GALLERY = 4, CONTENT = 5, SETTINGS = 6;
++    private static final int RAIL_DP = 172;
++
++    File dir;
++    EditText join;
+     private EditText name;
+     private TextView message;
+     private SkinView preview;
+-    private EditText join;
+     private String exportWorld;
+-    private Button worldIn, worldOut;
+     private Button catalog, versions;
+     private Button pick, cape, model, play, driver, systemDriver, microsoft, deviceCode, signOut;
+     private TextView driverStatus, accountStatus, accountChip;
+@@ -57,270 +63,320 @@ public class ProfileActivity extends Activity implements View.OnClickListener {
+     private String verifyUri = "https://www.microsoft.com/link";
+     private boolean slim;
+ 
+-    private static final int PANEL = Color.rgb(19, 19, 19);
+-    private static final int FIELD = Color.rgb(28, 28, 28);
++    private Page[] pages;
++    private TextView[] tabs;
++    private FrameLayout host;
++    private ScrollView pageScroll;
++    private int current = -1;
++    private final Net.Relay relay = new Net.Relay();
++    private final List<TextView> relayLabels = new ArrayList<>();
++    private long relayMs = Long.MIN_VALUE;
++    private boolean updateReady;
+ 
+     @Override
+     protected void onCreate(Bundle state) {
+         super.onCreate(state);
++        Ui.load(this);
+         dir = new File(SetupActivity.home(this));
+         // Resize, not pan: the keyboard takes most of a phone's landscape height, and the
+-        // scrolling columns keep the focused field in view above it.
++        // scrolling page keeps the focused field in view above it.
+         getWindow().setSoftInputMode(WindowManager.LayoutParams.SOFT_INPUT_ADJUST_RESIZE
+                 | WindowManager.LayoutParams.SOFT_INPUT_STATE_HIDDEN);
+-        int p = Ui.dp(this, 12);
+ 
+         LinearLayout root = new LinearLayout(this);
+         root.setOrientation(LinearLayout.HORIZONTAL);
+-        root.setBackground(new GradientDrawable(GradientDrawable.Orientation.TL_BR,
+-                new int[] {Ui.BG, Ui.BG}));
+-        int pad = Ui.dp(this, 16);
++        root.setBackgroundColor(Ui.BG);
++        int pad = Ui.dp(this, 12);
+         root.setPadding(pad, pad, pad, pad);
+ 
+-        // Left: who plays.
+-        LinearLayout left = new LinearLayout(this);
+-        left.setOrientation(LinearLayout.VERTICAL);
+-        left.setPadding(p, p, p, p);
+-        left.setBackground(Ui.rounded(this, PANEL, Ui.EDGE, 16));
+-        LinearLayout head = new LinearLayout(this);
+-        head.setOrientation(LinearLayout.HORIZONTAL);
+-        head.setGravity(Gravity.CENTER_VERTICAL);
+-        TextView title = Ui.text(this, "HORIZON", 24, Ui.TEXT, true);
++        // ---- The rail ----
++        LinearLayout rail = new LinearLayout(this);
++        rail.setOrientation(LinearLayout.VERTICAL);
++        rail.setPadding(Ui.dp(this, 10), Ui.dp(this, 12), Ui.dp(this, 10), Ui.dp(this, 10));
++        rail.setBackground(Ui.rounded(this, Ui.CARD, Ui.EDGE, 18));
++        TextView title = Ui.text(this, "HORIZON", 20, Ui.TEXT, true);
+         title.setLetterSpacing(0.22f);
+-        head.addView(title);
+-        TextView sub = Ui.text(this, "ONESHOT", 11, Ui.MUTED, true);
+-        sub.setLetterSpacing(0.3f);
+-        sub.setPadding(Ui.dp(this, 10), Ui.dp(this, 8), 0, 0);
+-        head.addView(sub, new LinearLayout.LayoutParams(0, -2, 1));
+-        TextView ver = Ui.text(this, version(), 12, Ui.MUTED, false);
+-        head.addView(ver);
+-        left.addView(head);
+-        View rule = new View(this);
+-        rule.setBackgroundColor(Ui.EDGE);
+-        LinearLayout.LayoutParams ruleLp = new LinearLayout.LayoutParams(-1, 1);
+-        ruleLp.topMargin = Ui.dp(this, 8);
+-        ruleLp.bottomMargin = Ui.dp(this, 12);
+-        left.addView(rule, ruleLp);
+-
+-        LinearLayout who = new LinearLayout(this);
+-        who.setOrientation(LinearLayout.HORIZONTAL);
++        title.setPadding(Ui.dp(this, 8), 0, 0, 0);
++        rail.addView(title);
++        TextView sub = Ui.text(this, "ONESHOT · v" + UpdateActivity.versionName(this), 11, Ui.MUTED, true);
++        sub.setLetterSpacing(0.14f);
++        sub.setPadding(Ui.dp(this, 8), 0, 0, 0);
++        rail.addView(sub);
++
++        String[] labels = {Ui.t("Главная", "Home"), Ui.t("Профиль", "Profile"), Ui.t("Друзья", "Friends"),
++            Ui.t("Миры", "Worlds"), Ui.t("Галерея", "Gallery"), Ui.t("Контент", "Content"), Ui.t("Настройки", "Settings")};
++        LinearLayout nav = new LinearLayout(this);
++        nav.setOrientation(LinearLayout.VERTICAL);
++        tabs = new TextView[labels.length];
++        for (int i = 0; i < labels.length; i++) {
++            final int index = i;
++            TextView t = Ui.text(this, labels[i], 15, Ui.MUTED, true);
++            t.setSingleLine(true);
++            t.setGravity(Gravity.CENTER_VERTICAL);
++            t.setMinHeight(Ui.dp(this, 44));
++            t.setPadding(Ui.dp(this, 12), 0, Ui.dp(this, 8), 0);
++            t.setOnClickListener(new View.OnClickListener() {
++                public void onClick(View v) {
++                    show(index);
++                }
++            });
++            tabs[i] = t;
++            nav.addView(t, Ui.gap(this, i == 0 ? 0 : 2));
++        }
++        // A phone in landscape is about 360 dp high: the list scrolls, PLAY stays.
++        ScrollView navScroll = new ScrollView(this);
++        navScroll.setVerticalScrollBarEnabled(false);
++        navScroll.addView(nav);
++        LinearLayout.LayoutParams navLp = new LinearLayout.LayoutParams(-1, 0, 1);
++        navLp.topMargin = Ui.dp(this, 10);
++        rail.addView(navScroll, navLp);
++
++        accountChip = Ui.text(this, "", 11, Ui.MUTED, false);
++        accountChip.setSingleLine(true);
++        accountChip.setPadding(Ui.dp(this, 8), 0, 0, 0);
++        rail.addView(accountChip, Ui.gap(this, 4));
++        play = Ui.button(this, Ui.t("ИГРАТЬ", "PLAY"), true);
++        play.setTextSize(19);
++        play.setLetterSpacing(0.1f);
++        play.setMinHeight(Ui.dp(this, 56));
++        play.setOnClickListener(this);
++        rail.addView(play, Ui.gap(this, 4));
++        root.addView(rail, new LinearLayout.LayoutParams(Ui.dp(this, RAIL_DP), -1));
++
++        // ---- The page ----
++        LinearLayout right = new LinearLayout(this);
++        right.setOrientation(LinearLayout.VERTICAL);
++        pageScroll = new ScrollView(this);
++        pageScroll.setVerticalScrollBarEnabled(false);
++        host = new FrameLayout(this);
++        host.setPadding(Ui.dp(this, 8), Ui.dp(this, 4), Ui.dp(this, 8), Ui.dp(this, 16));
++        pageScroll.addView(host);
++        right.addView(pageScroll, new LinearLayout.LayoutParams(-1, 0, 1));
++        message = Ui.text(this, "", 12, Ui.WARN, false);
++        message.setMaxLines(3);
++        message.setPadding(Ui.dp(this, 12), Ui.dp(this, 6), Ui.dp(this, 12), Ui.dp(this, 6));
++        message.setBackground(Ui.rounded(this, Ui.CARD, Ui.EDGE, 12));
++        message.setVisibility(View.GONE);
++        right.addView(message, Ui.gap(this, 6));
++        LinearLayout.LayoutParams rightLp = new LinearLayout.LayoutParams(0, -1, 1);
++        rightLp.leftMargin = Ui.dp(this, 12);
++        root.addView(right, rightLp);
++
++        pages = new Page[7];
++        pages[HOME] = new HomePage(this);
++        pages[PROFILE] = profilePage();
++        pages[FRIENDS] = new FriendsPage(this);
++        pages[WORLDS] = new WorldsPage(this);
++        pages[GALLERY] = new GalleryPage(this);
++        pages[CONTENT] = contentPage();
++        SettingsPage settings = new SettingsPage(this);
++        settingsBlocks(settings);
++        settings.tail();
++        pages[SETTINGS] = settings;
++        join.setText(readJoin());
++
++        setContentView(root);
++        Ui.fitInsets(root);
++        hideBars();
++        refreshAccount();
++        updateModel();
++        showPreview();
++        checkUpdate();
++        show(state == null ? HOME : state.getInt("page", HOME));
++
++        if (state == null) {
++            if (PlayStats.fold(this)) crashDialog();
++            else welcome();
++        }
++    }
++
++    @Override
++    protected void onSaveInstanceState(Bundle out) {
++        super.onSaveInstanceState(out);
++        out.putInt("page", current);
++    }
++
++    // ---- Pages and what they share --------------------------------------------------------------
++
++    void show(int i) {
++        if (i < 0 || i >= pages.length) i = HOME;
++        if (current == i) {
++            pages[i].shown();
++            return;
++        }
++        if (current >= 0) pages[current].hidden();
++        current = i;
++        host.removeAllViews();
++        host.addView(pages[i].root, new FrameLayout.LayoutParams(-1, -2));
++        for (int k = 0; k < tabs.length; k++) {
++            boolean on = k == i;
++            tabs[k].setTextColor(on ? Ui.GREEN : Ui.MUTED);
++            tabs[k].setBackground(on ? Ui.rounded(this, Ui.HIGH, Ui.GREEN_DARK, 12) : null);
++            tabs[k].setPadding(Ui.dp(this, 12), 0, Ui.dp(this, 8), 0);
++        }
++        String content = Ui.t("Контент", "Content");
++        tabs[CONTENT].setText(updateReady ? content + "  ●" : content);
++        pages[i].shown();
++        pageScroll.scrollTo(0, 0);
++    }
++
++    /** The width a page has, in dp (the screen minus the rail and the paddings). */
++    int pageWidthDp() {
++        return Math.max(280, Ui.widthDp(this) - RAIL_DP - 24 - 12 - 16);
++    }
++
++    void say(String s, int color) {
++        message.setTextColor(color);
++        message.setText(s);
++        message.setVisibility(s == null || s.isEmpty() ? View.GONE : View.VISIBLE);
++    }
++
++    /** A pasted or linked code as friend:CODE, else the text as it is (an address, steam:…). */
++    void setJoin(String raw) {
++        String c = Net.normalize(raw);
++        join.setText(c != null ? "friend:" + c : raw == null ? "" : raw.trim());
++    }
++
++    /** A line with the Oneshot server's state, kept current while the launcher is in front. */
++    TextView relayLabel() {
++        TextView t = Ui.text(this, Ui.t("Сервер Oneshot: проверяем…", "Oneshot server: checking…"), 12, Ui.MUTED, true);
++        relayLabels.add(t);
++        if (relayMs != Long.MIN_VALUE) paintRelay(t);
++        return t;
++    }
++
++    private void paintRelay(TextView t) {
++        t.setText("●  " + Net.Relay.label(relayMs));
++        t.setTextColor(relayMs >= 0 ? Ui.GOOD : relayMs == -1 ? Ui.BAD : Ui.MUTED);
++    }
++
++    private void checkUpdate() {
++        new Thread(new Runnable() {
++            public void run() {
++                final UpdateActivity.Release r = UpdateActivity.newer(ProfileActivity.this);
++                if (r == null) return;
++                runOnUiThread(new Runnable() {
++                    public void run() {
++                        if (isFinishing()) return;
++                        updateReady = true;
++                        versions.setText(Ui.t("Доступно обновление: ", "Update available: ") + r.name);
++                        versions.setBackground(Ui.rounded(ProfileActivity.this, Ui.GREEN, 0, 12));
++                        versions.setTextColor(Ui.ON_ACCENT);
++                        tabs[CONTENT].setText(Ui.t("Контент", "Content") + "  ●");
++                    }
++                });
++            }
++        }).start();
++    }
++
++    // ---- The Profile page ---------------------------------------------------------------------
++
++    private Page profilePage() {
++        Page pg = new Page(this) {};
++        Ui.title(pg.root, Ui.t("Профиль", "Profile"), Ui.t("Ник, скин и плащ — их видят другие игроки.",
++                "Name, skin and cape: other players see them."));
++        LinearLayout panel = pg.block(null);
++        LinearLayout who = Ui.row(this);
++        who.setGravity(Gravity.TOP);
+         preview = new SkinView(this);
+-        preview.setBackground(Ui.rounded(this, FIELD, Ui.EDGE, 14));
++        preview.setBackground(Ui.rounded(this, Ui.HIGH, Ui.EDGE, 14));
+         int pv = Ui.dp(this, 6);
+         preview.setPadding(pv, pv, pv, pv);
+-        preview.setMinimumHeight(Ui.dp(this, 170));
+-        who.addView(preview, new LinearLayout.LayoutParams(0, -1, 1));
++        who.addView(preview, new LinearLayout.LayoutParams(0, Ui.dp(this, 230), 1));
+         LinearLayout side = new LinearLayout(this);
+         side.setOrientation(LinearLayout.VERTICAL);
+-        side.setGravity(Gravity.TOP);
+-        LinearLayout.LayoutParams sideLp = new LinearLayout.LayoutParams(0, -1, 1.3f);
+-        sideLp.leftMargin = p;
+-        TextView nameLabel = Ui.text(this, Ui.t("НИК", "NAME"), 11, Ui.MUTED, true);
+-        nameLabel.setLetterSpacing(0.14f);
+-        side.addView(nameLabel);
+-        name = new EditText(this);
+-        name.setSingleLine(true);
+-        name.setTextColor(Ui.TEXT);
+-        name.setHintTextColor(Ui.MUTED);
+-        name.setHint("Steve_123");
++        LinearLayout.LayoutParams sideLp = new LinearLayout.LayoutParams(0, -2, 1.4f);
++        sideLp.leftMargin = Ui.dp(this, 14);
++        side.addView(Ui.caption(this, Ui.t("Ник", "Name")));
++        name = Ui.field(this, "Steve_123");
+         name.setTextSize(16);
+         name.setFilters(new InputFilter[] {new InputFilter.LengthFilter(16)});
+-        name.setPadding(p, Ui.dp(this, 8), p, Ui.dp(this, 8));
+-        name.setBackground(Ui.rounded(this, FIELD, Ui.EDGE, 8));
+-        name.setImeOptions(android.view.inputmethod.EditorInfo.IME_ACTION_DONE
+-                | android.view.inputmethod.EditorInfo.IME_FLAG_NO_EXTRACT_UI);
+         name.setText(readName());
+         side.addView(name);
++        side.addView(Ui.text(this, Ui.t("3–16 символов: латиница, цифры и _.", "3–16 characters: letters, digits and _."), 12, Ui.MUTED, false));
+         pick = Ui.button(this, Ui.t("Скин…", "Skin…"), false);
+         pick.setOnClickListener(this);
+-        side.addView(pick, Ui.gap(this, 8));
+         cape = Ui.button(this, Ui.t("Плащ…", "Cape…"), false);
+         cape.setOnClickListener(this);
+-        side.addView(cape, Ui.gap(this, 6));
++        LinearLayout pr = Ui.row(this);
++        pr.addView(pick, Ui.part(this, true));
++        pr.addView(cape, Ui.part(this, false));
++        side.addView(pr, Ui.gap(this, 8));
+         slim = readModel();
+         model = Ui.button(this, "", false);
+         model.setOnClickListener(this);
+-        side.addView(model, Ui.gap(this, 6));
+-        // Oneshot: join a friend's game from the PLAY button: friend:CODE, steam:CODE or HOST[:PORT].
+-        join = new EditText(this);
+-        join.setSingleLine(true);
+-        join.setTextColor(Ui.TEXT);
+-        join.setHintTextColor(Ui.MUTED);
+-        join.setHint("friend:\u2026  /  host:port");
+-        join.setTextSize(14);
+-        join.setPadding(p, Ui.dp(this, 8), p, Ui.dp(this, 8));
+-        join.setBackground(Ui.rounded(this, FIELD, Ui.EDGE, 8));
+-        join.setImeOptions(android.view.inputmethod.EditorInfo.IME_ACTION_DONE
+-                | android.view.inputmethod.EditorInfo.IME_FLAG_NO_EXTRACT_UI);
+-        join.setText(readJoin());
+-        TextView joinLabel = Ui.text(this, Ui.t("ПОДКЛЮЧИТЬСЯ К ДРУГУ", "JOIN A FRIEND"), 11, Ui.MUTED, true);
+-        joinLabel.setLetterSpacing(0.14f);
+-        side.addView(joinLabel, Ui.gap(this, 16));
+-        side.addView(join);
+-        side.addView(Ui.text(this, Ui.t("Пусто — игра откроется в главном меню.", "Empty: the game opens at the main menu."), 11, Ui.MUTED, false));
+-        accountChip = Ui.text(this, "", 12, Ui.MUTED, false);
+-        accountChip.setVisibility(View.GONE);
+-        side.addView(accountChip);
++        side.addView(model, Ui.gap(this, 8));
+         who.addView(side, sideLp);
+-        // Scrolls on a short (phone) screen; the message and the Play button stay below it.
+-        ScrollView whoScroll = new ScrollView(this);
+-        whoScroll.setFillViewport(true);
+-        whoScroll.setVerticalScrollBarEnabled(false);
+-        whoScroll.addView(who, new FrameLayout.LayoutParams(-1, -2));
+-        left.addView(whoScroll, new LinearLayout.LayoutParams(-1, 0, 1));
++        panel.addView(who);
+ 
+-        message = Ui.text(this, "", 12, Ui.WARN, false);
+-        message.setMaxLines(3);
+-        left.addView(message, Ui.gap(this, 4));
+-        play = Ui.button(this, Ui.t("ИГРАТЬ", "PLAY"), true);
+-        play.setTextSize(22);
+-        play.setLetterSpacing(0.1f);
+-        play.setMinHeight(Ui.dp(this, 68));
+-        play.setOnClickListener(this);
+-        left.addView(play, Ui.gap(this, 6));
+-        root.addView(left, new LinearLayout.LayoutParams(0, -1, 1));
+-
+-        // Right: settings.
+-        ScrollView scroll = new ScrollView(this);
+-        scroll.setBackground(Ui.rounded(this, PANEL, Ui.EDGE, 16));
+-        scroll.setVerticalScrollBarEnabled(false);
+-        LinearLayout card = new LinearLayout(this);
+-        card.setOrientation(LinearLayout.VERTICAL);
+-        card.setPadding(Ui.dp(this, 16), Ui.dp(this, 4), Ui.dp(this, 16), Ui.dp(this, 16));
+-        scroll.addView(card);
+-        LinearLayout.LayoutParams rightLp = new LinearLayout.LayoutParams(0, -1, 1.15f);
+-        rightLp.leftMargin = Ui.dp(this, 14);
+-        root.addView(scroll, rightLp);
+-
+-        // Oneshot: the launcher's catalogs (skins, capes, resource packs, Horizon mods).
+-        Ui.section(card, Ui.t("Каталог", "Catalog"));
+-        card.addView(Ui.text(this, Ui.t(
+-                "Скины, плащи, ресурспаки и моды Horizon — как в лаунчере OneShot на ПК.",
+-                "Skins, capes, resource packs and Horizon mods — as in the OneShot launcher on the PC."),
+-                12, Ui.MUTED, false));
++        LinearLayout cat = pg.block(Ui.t("Каталог", "Catalog"));
++        pg.note(cat, Ui.t("Готовые скины и плащи — в каталоге, как в лаунчере на ПК.", "Ready skins and capes are in the catalog, as on the PC."));
++        Button open = Ui.button(this, Ui.t("Скины и плащи из каталога", "Skins and capes from the catalog"), false);
++        open.setOnClickListener(new View.OnClickListener() {
++            public void onClick(View v) {
++                startActivity(new Intent(ProfileActivity.this, CatalogActivity.class));
++            }
++        });
++        cat.addView(open, Ui.gap(this, 8));
++        return pg;
++    }
++
++    // ---- The Content page ---------------------------------------------------------------------
++
++    private Page contentPage() {
++        Page pg = new Page(this) {};
++        Ui.title(pg.root, Ui.t("Контент", "Content"), Ui.t("Каталог, моды и версии игры.", "The catalog, mods and game versions."));
++        LinearLayout c = pg.block(Ui.t("Каталог", "Catalog"));
++        pg.note(c, Ui.t("Скины, плащи, ресурспаки и моды Horizon — как в лаунчере OneShot на ПК.",
++                "Skins, capes, resource packs and Horizon mods, as in the OneShot launcher on the PC."));
+         catalog = Ui.button(this, Ui.t("Открыть каталог", "Open the catalog"), true);
+         catalog.setOnClickListener(this);
+-        card.addView(catalog, Ui.gap(this, 8));
++        c.addView(catalog, Ui.gap(this, 8));
+ 
+-        // Oneshot: versions and updates, as in the PC launcher (UpdateActivity).
+-        Ui.section(card, Ui.t("Версия", "Version"));
++        LinearLayout m = pg.block(Ui.t("Моды", "Mods"));
++        pg.note(m, Ui.t(".hnmod со сборкой для Android или .hmod. Или положите файл в Android/data/dev.horizonlab.horizon/files/mods/.",
++                "A .hnmod with an Android build, or a .hmod. Or drop the file into Android/data/dev.horizonlab.horizon/files/mods/."));
++        mods = Ui.button(this, Ui.t("Установить мод", "Install a mod"), false);
++        mods.setOnClickListener(this);
++        m.addView(mods, Ui.gap(this, 8));
++
++        LinearLayout v = pg.block(Ui.t("Версия", "Version"));
++        pg.note(v, Ui.t("Установлена ", "Installed: ") + UpdateActivity.versionName(this)
++                + Ui.t(". Обновления и прежние версии — как в лаунчере на ПК.", ". Updates and older versions, as in the PC launcher."));
+         versions = Ui.button(this, Ui.t("Версии и обновления", "Versions and updates"), false);
+         versions.setOnClickListener(new View.OnClickListener() {
+-            public void onClick(View v) {
++            public void onClick(View x) {
+                 startActivity(new Intent(ProfileActivity.this, UpdateActivity.class));
+             }
+         });
+-        card.addView(versions, Ui.gap(this, 8));
+-        new Thread(new Runnable() {
+-            public void run() {
+-                final UpdateActivity.Release r = UpdateActivity.newer(ProfileActivity.this);
+-                if (r == null) return;
+-                runOnUiThread(new Runnable() {
+-                    public void run() {
+-                        versions.setText(Ui.t("Доступно обновление: ", "Update available: ") + r.name);
+-                        versions.setBackground(Ui.rounded(ProfileActivity.this, Ui.GREEN, 0, 12));
+-                        versions.setTextColor(Ui.ON_ACCENT);
+-                    }
+-                });
+-            }
+-        }).start();
+-
+-        LinearLayout msBox = new LinearLayout(this);
+-        msBox.setOrientation(LinearLayout.VERTICAL);
+-        Ui.section(msBox, Ui.t("Аккаунт Microsoft", "Microsoft account"));
+-        accountStatus = Ui.text(this, accountLine(), 15, Ui.TEXT, true);
+-        msBox.addView(accountStatus);
+-        msBox.addView(Ui.text(this, Ui.t(
+-                "Для лицензионных серверов. Войдите почтой и паролем один раз: дальше вход обновляется сам.",
+-                "For licensed servers. Sign in with your email and password once: it renews by itself."),
+-                12, Ui.MUTED, false));
+-        microsoft = Ui.button(this, Ui.t("Войти через Microsoft", "Sign in with Microsoft"), true);
+-        microsoft.setOnClickListener(this);
+-        msBox.addView(microsoft, Ui.gap(this, 8));
+-        codeBox = new LinearLayout(this);
+-        codeBox.setOrientation(LinearLayout.VERTICAL);
+-        codeBox.setPadding(p, p, p, p);
+-        codeBox.setBackground(Ui.rounded(this, FIELD, Ui.GREEN_DARK, 10));
+-        codeBox.setVisibility(View.GONE);
+-        codeHint = Ui.text(this, "", 13, Ui.MUTED, false);
+-        codeBox.addView(codeHint);
+-        code = Ui.text(this, "", 28, Ui.TEXT, true);
+-        code.setGravity(Gravity.CENTER);
+-        code.setTypeface(android.graphics.Typeface.MONOSPACE, android.graphics.Typeface.BOLD);
+-        code.setLetterSpacing(0.12f);
+-        code.setTextIsSelectable(true);
+-        codeBox.addView(code, Ui.gap(this, 4));
+-        LinearLayout row = new LinearLayout(this);
+-        row.setOrientation(LinearLayout.HORIZONTAL);
+-        copy = Ui.button(this, Ui.t("Скопировать код", "Copy code"), false);
+-        copy.setOnClickListener(this);
+-        browser = Ui.button(this, Ui.t("Открыть браузер", "Open browser"), true);
+-        browser.setOnClickListener(this);
+-        row.addView(copy, new LinearLayout.LayoutParams(0, -2, 1));
+-        LinearLayout.LayoutParams half2 = new LinearLayout.LayoutParams(0, -2, 1);
+-        half2.leftMargin = Ui.dp(this, 8);
+-        row.addView(browser, half2);
+-        codeBox.addView(row, Ui.gap(this, 8));
+-        msBox.addView(codeBox, Ui.gap(this, 8));
+-        signOut = Ui.button(this, Ui.t("Выйти из аккаунта", "Sign out"), false);
+-        signOut.setOnClickListener(this);
+-        msBox.addView(signOut, Ui.gap(this, 8));
+-        advanced = Ui.button(this, Ui.t("Другой способ входа ▾", "Other sign-in ▾"), false);
+-        advanced.setOnClickListener(this);
+-        msBox.addView(advanced, Ui.gap(this, 8));
+-        advancedBox = new LinearLayout(this);
+-        advancedBox.setOrientation(LinearLayout.VERTICAL);
+-        advancedBox.addView(Ui.text(this, Ui.t(
+-                "Вход по коду через свой Azure client ID, одобренный Mojang (aka.ms/mce-reviewappid). Нужен, только если вход выше не работает.",
+-                "Code sign-in with your own Azure client ID approved by Mojang (aka.ms/mce-reviewappid). Only needed if the sign-in above fails."),
+-                12, Ui.MUTED, false));
+-        clientId = new EditText(this);
+-        clientId.setSingleLine(true);
+-        clientId.setTextColor(Ui.TEXT);
+-        clientId.setHintTextColor(Ui.MUTED);
+-        clientId.setHint("00000000-0000-0000-0000-000000000000");
+-        clientId.setText(Msa.clientId(this));
+-        clientId.setPadding(p, p, p, p);
+-        clientId.setBackground(Ui.rounded(this, FIELD, Ui.EDGE, 8));
+-        clientId.setImeOptions(android.view.inputmethod.EditorInfo.IME_FLAG_NO_EXTRACT_UI);
+-        advancedBox.addView(clientId, Ui.gap(this, 6));
+-        deviceCode = Ui.button(this, Ui.t("Войти по коду", "Sign in with a code"), false);
+-        deviceCode.setOnClickListener(this);
+-        advancedBox.addView(deviceCode, Ui.gap(this, 6));
+-        advancedBox.setVisibility(View.GONE);
+-        msBox.addView(advancedBox, Ui.gap(this, 6));
++        v.addView(versions, Ui.gap(this, 8));
++        return pg;
++    }
+ 
+-        // Oneshot: the Microsoft account is not offered in the main menu.
+-        msBox.setVisibility(View.GONE);
+-        card.addView(msBox);
++    // ---- Settings: graphics, screen, the Microsoft account ------------------------------------
+ 
+-        Ui.section(card, Ui.t("Драйвер Vulkan · экспериментально", "Vulkan driver · experimental"));
++    private void settingsBlocks(SettingsPage pg) {
++        int p = Ui.dp(this, 12);
++        LinearLayout g = pg.block(Ui.t("Драйвер Vulkan · экспериментально", "Vulkan driver · experimental"));
+         driverStatus = Ui.text(this, Turnip.status(this), 13, Ui.TEXT, false);
+-        card.addView(driverStatus);
++        g.addView(driverStatus);
+         if (new File(getFilesDir(), "vulkan-driver.failed").isFile()) {
+-            card.addView(Ui.text(this, Ui.t(
++            g.addView(Ui.text(this, Ui.t(
+                     "Свой драйвер не запустился в прошлый раз, игра вернулась на системный. Попробуйте другую сборку Turnip.",
+                     "The custom driver did not start last time, so the game went back to the system one. Try another Turnip build."),
+                     12, Ui.WARN, false));
+         }
+-        card.addView(Ui.text(this, Ui.t(
++        pg.note(g, Ui.t(
+                 "Zip с Turnip (libvulkan_freedreno.so). На части Snapdragon быстрее системного. Если игра с ним не стартует, следующий запуск будет на системном.",
+-                "A Turnip zip (libvulkan_freedreno.so). Faster than the system driver on some Snapdragons. If the game fails to start with it, the next launch uses the system one."),
+-                12, Ui.MUTED, false));
+-        LinearLayout drivers = new LinearLayout(this);
+-        drivers.setOrientation(LinearLayout.HORIZONTAL);
++                "A Turnip zip (libvulkan_freedreno.so). Faster than the system driver on some Snapdragons. If the game fails to start with it, the next launch uses the system one."));
+         driver = Ui.button(this, Ui.t("Установить Turnip", "Install Turnip"), false);
+         driver.setOnClickListener(this);
+         systemDriver = Ui.button(this, Ui.t("Системный", "System"), false);
+         systemDriver.setOnClickListener(this);
+-        drivers.addView(driver, new LinearLayout.LayoutParams(0, -2, 1));
+-        LinearLayout.LayoutParams dl = new LinearLayout.LayoutParams(0, -2, 1);
+-        dl.leftMargin = Ui.dp(this, 8);
+-        drivers.addView(systemDriver, dl);
+-        card.addView(drivers, Ui.gap(this, 8));
++        pg.buttons(g, driver, systemDriver);
+         final File safeMode = new File(getFilesDir(), "safe-mode.txt");
+         if (safeMode.isFile()) {
+-            card.addView(Ui.text(this, Ui.t(
++            g.addView(Ui.text(this, Ui.t(
+                     "Безопасный запуск: Vulkan не стартовал, игра работает на OpenGL ES и может быть медленнее.",
+                     "Safe start: Vulkan did not start, so the game runs on OpenGL ES and can be slower."),
+                     12, Ui.WARN, false), Ui.gap(this, 8));
+@@ -333,10 +389,11 @@ public class ProfileActivity extends Activity implements View.OnClickListener {
+                     ((Button) v).setText(Ui.t("Перезапустите игру", "Restart the game"));
+                 }
+             });
+-            card.addView(vulkan, Ui.gap(this, 8));
++            g.addView(vulkan, Ui.gap(this, 8));
+         }
+ 
+-        Ui.section(card, Ui.t("Экран", "Screen"));
++        LinearLayout s = pg.block(Ui.t("Экран", "Screen"));
++        pg.note(s, Ui.t("Как игра обходит вырез под камеру.", "How the game deals with the camera cutout."));
+         Button cutout = Ui.button(this, cutoutLabel(), false);
+         cutout.setOnClickListener(new View.OnClickListener() {
+             public void onClick(View v) {
+@@ -352,74 +409,164 @@ public class ProfileActivity extends Activity implements View.OnClickListener {
+                 ((Button) v).setText(cutoutLabel());
+             }
+         });
+-        card.addView(cutout, Ui.gap(this, 4));
++        s.addView(cutout, Ui.gap(this, 8));
+ 
+-        Ui.section(card, Ui.t("Моды", "Mods"));
+-        card.addView(Ui.text(this, Ui.t(
+-                ".hnmod со сборкой для Android или .hmod. Или положите файл в Android/data/dev.horizonlab.horizon/files/mods/.",
+-                "A .hnmod with an Android build, or a .hmod. Or drop the file into Android/data/dev.horizonlab.horizon/files/mods/."),
+-                12, Ui.MUTED, false));
+-        mods = Ui.button(this, Ui.t("Установить мод", "Install a mod"), false);
+-        mods.setOnClickListener(this);
+-        card.addView(mods, Ui.gap(this, 8));
+-
+-        Ui.section(card, Ui.t("Миры", "Worlds"));
+-        card.addView(Ui.text(this, Ui.t(
+-                "Перенос миров между телефоном и ПК: zip одного мира (его делает и лаунчер на ПК).",
+-                "Move worlds between the phone and the PC: a zip of one world (the PC launcher makes the same)."),
+-                12, Ui.MUTED, false));
+-        worldIn = Ui.button(this, Ui.t("Импорт мира (zip)…", "Import a world (zip)…"), false);
+-        worldIn.setOnClickListener(this);
+-        card.addView(worldIn, Ui.gap(this, 8));
+-        worldOut = Ui.button(this, Ui.t("Экспорт мира (zip)…", "Export a world (zip)…"), false);
+-        worldOut.setOnClickListener(this);
+-        card.addView(worldOut, Ui.gap(this, 6));
+-
+-        View content = root;
+-        if (Ui.widthDp(this) < 640) {
+-            // A narrow screen: the two columns become two tabs.
+-            final View pLeft = left, pRight = scroll;
+-            rightLp.leftMargin = 0;
+-            pRight.setVisibility(View.GONE);
+-            final Button tabProfile = Ui.button(this, Ui.t("Профиль", "Profile"), true);
+-            final Button tabSettings = Ui.button(this, Ui.t("Настройки", "Settings"), false);
+-            View.OnClickListener switcher = new View.OnClickListener() {
+-                public void onClick(View v) {
+-                    boolean settings = v == tabSettings;
+-                    pLeft.setVisibility(settings ? View.GONE : View.VISIBLE);
+-                    pRight.setVisibility(settings ? View.VISIBLE : View.GONE);
+-                    tabProfile.setBackground(settings ? Ui.rounded(ProfileActivity.this, Ui.HIGH, Ui.EDGE, 12)
+-                            : Ui.rounded(ProfileActivity.this, Ui.GREEN, 0, 12));
+-                    tabProfile.setTextColor(settings ? Ui.TEXT : Ui.ON_ACCENT);
+-                    tabSettings.setBackground(settings ? Ui.rounded(ProfileActivity.this, Ui.GREEN, 0, 12)
+-                            : Ui.rounded(ProfileActivity.this, Ui.HIGH, Ui.EDGE, 12));
+-                    tabSettings.setTextColor(settings ? Ui.ON_ACCENT : Ui.TEXT);
+-                }
+-            };
+-            tabProfile.setOnClickListener(switcher);
+-            tabSettings.setOnClickListener(switcher);
+-            tabProfile.setMinHeight(Ui.dp(this, 44));
+-            tabSettings.setMinHeight(Ui.dp(this, 44));
+-            LinearLayout tabRow = new LinearLayout(this);
+-            tabRow.setOrientation(LinearLayout.HORIZONTAL);
+-            tabRow.setPadding(pad, pad / 2, pad, 0);
+-            tabRow.addView(tabProfile, new LinearLayout.LayoutParams(0, -2, 1));
+-            LinearLayout.LayoutParams second = new LinearLayout.LayoutParams(0, -2, 1);
+-            second.leftMargin = Ui.dp(this, 8);
+-            tabRow.addView(tabSettings, second);
+-            LinearLayout outer = new LinearLayout(this);
+-            outer.setOrientation(LinearLayout.VERTICAL);
+-            outer.setBackgroundColor(Ui.BG);
+-            outer.addView(tabRow);
+-            outer.addView(root, new LinearLayout.LayoutParams(-1, 0, 1));
+-            content = outer;
++        LinearLayout msBox = pg.block(Ui.t("Аккаунт Microsoft", "Microsoft account"));
++        accountStatus = Ui.text(this, accountLine(), 15, Ui.TEXT, true);
++        msBox.addView(accountStatus);
++        pg.note(msBox, Ui.t(
++                "Для лицензионных серверов. Войдите почтой и паролем один раз: дальше вход обновляется сам.",
++                "For licensed servers. Sign in with your email and password once: it renews by itself."));
++        microsoft = Ui.button(this, Ui.t("Войти через Microsoft", "Sign in with Microsoft"), true);
++        microsoft.setOnClickListener(this);
++        msBox.addView(microsoft, Ui.gap(this, 8));
++        codeBox = new LinearLayout(this);
++        codeBox.setOrientation(LinearLayout.VERTICAL);
++        codeBox.setPadding(p, p, p, p);
++        codeBox.setBackground(Ui.rounded(this, Ui.HIGH, Ui.GREEN_DARK, 10));
++        codeBox.setVisibility(View.GONE);
++        codeHint = Ui.text(this, "", 13, Ui.MUTED, false);
++        codeBox.addView(codeHint);
++        code = Ui.text(this, "", 28, Ui.TEXT, true);
++        code.setGravity(Gravity.CENTER);
++        code.setTypeface(Typeface.MONOSPACE, Typeface.BOLD);
++        code.setLetterSpacing(0.12f);
++        code.setTextIsSelectable(true);
++        codeBox.addView(code, Ui.gap(this, 4));
++        copy = Ui.button(this, Ui.t("Скопировать код", "Copy code"), false);
++        copy.setOnClickListener(this);
++        browser = Ui.button(this, Ui.t("Открыть браузер", "Open browser"), true);
++        browser.setOnClickListener(this);
++        pg.buttons(codeBox, copy, browser);
++        msBox.addView(codeBox, Ui.gap(this, 8));
++        signOut = Ui.button(this, Ui.t("Выйти из аккаунта", "Sign out"), false);
++        signOut.setOnClickListener(this);
++        msBox.addView(signOut, Ui.gap(this, 8));
++        advanced = Ui.button(this, Ui.t("Другой способ входа ▾", "Other sign-in ▾"), false);
++        advanced.setOnClickListener(this);
++        msBox.addView(advanced, Ui.gap(this, 8));
++        advancedBox = new LinearLayout(this);
++        advancedBox.setOrientation(LinearLayout.VERTICAL);
++        pg.note(advancedBox, Ui.t(
++                "Вход по коду через свой Azure client ID, одобренный Mojang (aka.ms/mce-reviewappid). Нужен, только если вход выше не работает.",
++                "Code sign-in with your own Azure client ID approved by Mojang (aka.ms/mce-reviewappid). Only needed if the sign-in above fails."));
++        clientId = Ui.field(this, "00000000-0000-0000-0000-000000000000");
++        clientId.setText(Msa.clientId(this));
++        advancedBox.addView(clientId, Ui.gap(this, 6));
++        deviceCode = Ui.button(this, Ui.t("Войти по коду", "Sign in with a code"), false);
++        deviceCode.setOnClickListener(this);
++        advancedBox.addView(deviceCode, Ui.gap(this, 6));
++        advancedBox.setVisibility(View.GONE);
++        msBox.addView(advancedBox, Ui.gap(this, 6));
++        // Oneshot: the Microsoft account is not offered in the launcher for now.
++        msBox.setVisibility(View.GONE);
++
++        // The join field lives on the Friends page; the rest of the code reads it from here.
++        if (join == null) join = Ui.field(this, "");
++    }
++
++    // ---- First start, a crash, a link --------------------------------------------------------
++
++    /** The last game ended without a clean exit: offer to start again or to send the log. */
++    private void crashDialog() {
++        String tail = SettingsPage.tail(this, 12).trim();
++        if (tail.length() > 1500) tail = "…" + tail.substring(tail.length() - 1500);
++        TextView t = Ui.text(this, tail.isEmpty() ? Ui.t("Лог пуст.", "The log is empty.") : tail, 11, Ui.MUTED, false);
++        t.setTypeface(Typeface.MONOSPACE);
++        t.setTextSize(11);
++        int p = Ui.dp(this, 20);
++        t.setPadding(p, 0, p, 0);
++        ScrollView s = new ScrollView(this);
++        s.addView(t);
++        new AlertDialog.Builder(this)
++                .setTitle(Ui.t("Игра закрылась с ошибкой", "The game closed with an error"))
++                .setMessage(Ui.t("Последние строки лога:", "The last lines of the log:"))
++                .setView(s)
++                .setPositiveButton(Ui.t("Запустить снова", "Start again"), new DialogInterface.OnClickListener() {
++                    public void onClick(DialogInterface d, int w) {
++                        play();
++                    }
++                })
++                .setNeutralButton(Ui.t("Отправить лог…", "Send the log…"), new DialogInterface.OnClickListener() {
++                    public void onClick(DialogInterface d, int w) {
++                        SettingsPage.confirmUpload(ProfileActivity.this);
++                    }
++                })
++                .setNegativeButton(Ui.t("Закрыть", "Close"), null)
++                .show();
++    }
++
++    /** The first start: a name, and whether to play alone or with friends. */
++    private void welcome() {
++        final File done = new File(getFilesDir(), "welcome.done");
++        if (done.isFile() || !readName().isEmpty()) return;
++        LinearLayout box = new LinearLayout(this);
++        box.setOrientation(LinearLayout.VERTICAL);
++        int p = Ui.dp(this, 20);
++        box.setPadding(p, Ui.dp(this, 4), p, 0);
++        box.addView(Ui.text(this, Ui.t("Как вас будут видеть другие игроки? Ник можно поменять позже в «Профиле».",
++                "What name will other players see? You can change it later in Profile."), 13, Ui.MUTED, false));
++        final EditText n = Ui.field(this, "Steve_123");
++        n.setFilters(new InputFilter[] {new InputFilter.LengthFilter(16)});
++        box.addView(n, Ui.gap(this, 8));
++        new AlertDialog.Builder(this)
++                .setTitle(Ui.t("Добро пожаловать в Oneshot", "Welcome to Oneshot"))
++                .setView(box)
++                .setCancelable(false)
++                .setPositiveButton(Ui.t("С друзьями", "With friends"), new DialogInterface.OnClickListener() {
++                    public void onClick(DialogInterface d, int w) {
++                        welcomeDone(done, n.getText().toString().trim());
++                        show(FRIENDS);
++                    }
++                })
++                .setNegativeButton(Ui.t("Один", "Alone"), new DialogInterface.OnClickListener() {
++                    public void onClick(DialogInterface d, int w) {
++                        welcomeDone(done, n.getText().toString().trim());
++                    }
++                })
++                .setNeutralButton(Ui.ru() ? "English" : "Русский", new DialogInterface.OnClickListener() {
++                    public void onClick(DialogInterface d, int w) {
++                        Ui.setPref(ProfileActivity.this, "lang.txt", Ui.ru() ? "en" : "ru");
++                        Ui.load(ProfileActivity.this);
++                        recreate();
++                    }
++                })
++                .show();
++    }
++
++    private void welcomeDone(File done, String n) {
++        try {
++            write(done, new byte[0]);
++        } catch (Exception ignored) {
+         }
+-        setContentView(content);
+-        Ui.fitInsets(content);
+-        hideBars();
+-        refreshAccount();
+-        updateModel();
+-        showPreview();
++        if (n.isEmpty()) return;
++        if (!validName(n)) {
++            say(Ui.t("Ник: 3–16 символов, только латиница, цифры и _. Поправьте его в «Профиле».",
++                    "Name: 3–16 characters, letters, digits and _ only. Fix it in Profile."), Ui.WARN);
++            return;
++        }
++        name.setText(n);
++        saveProfile();
++        if (current >= 0) pages[current].shown();
++    }
++
++    /** SetupActivity keeps an oneshot://join link here: the code goes into the join field. */
++    private void pendingJoin() {
++        File f = new File(dir, "join-pending.txt");
++        if (!f.isFile()) return;
++        String c = "";
++        try {
++            c = new String(Files.readAllBytes(f.toPath()), StandardCharsets.UTF_8).trim();
++        } catch (Exception ignored) {
++        }
++        f.delete();
++        if (c.isEmpty()) return;
++        setJoin(c);
++        show(FRIENDS);
++        say(PlayStats.alive
++                ? Ui.t("Код друга вставлен. Сначала выйдите из игры (меню → Выйти из игры), затем нажмите ИГРАТЬ.",
++                        "The friend's code is in. Quit the game first (menu → Quit Game), then press PLAY.")
++                : Ui.t("Код друга вставлен — нажмите ИГРАТЬ.", "The friend's code is in: press PLAY."), Ui.GREEN);
+     }
+ 
+     @Override
+@@ -431,6 +578,23 @@ public class ProfileActivity extends Activity implements View.OnClickListener {
+             updateModel();
+             showPreview();
+         }
++        relay.start(this, new Net.Relay.Listener() {
++            public void onStatus(long ms) {
++                relayMs = ms;
++                for (TextView t : relayLabels) paintRelay(t);
++            }
++        });
++        pendingJoin();
++        if (current >= 0) pages[current].shown();
++    }
++
++    @Override
++    protected void onPause() {
++        super.onPause();
++        relay.stop();
++        // Leaving for the game or the file picker keeps what was typed.
++        String n = name.getText().toString().trim();
++        if (n.isEmpty() || validName(n)) saveProfile();
+     }
+ 
+     @Override
+@@ -449,15 +613,7 @@ public class ProfileActivity extends Activity implements View.OnClickListener {
+         }
+     }
+ 
+-    private String version() {
+-        try {
+-            return "v" + getPackageManager().getPackageInfo(getPackageName(), 0).versionName;
+-        } catch (Exception e) {
+-            return "";
+-        }
+-    }
+-
+-    private String readName() {
++    String readName() {
+         try {
+             for (String l : new String(Files.readAllBytes(new File(dir, "horizon-player.txt").toPath()), StandardCharsets.UTF_8).split("\n")) {
+                 if (l.startsWith("name:")) return l.substring(5).trim();
+@@ -489,7 +645,8 @@ public class ProfileActivity extends Activity implements View.OnClickListener {
+         accountStatus.setText(accountLine());
+         signOut.setVisibility(n.isEmpty() ? View.GONE : View.VISIBLE);
+         microsoft.setVisibility(n.isEmpty() ? View.VISIBLE : View.GONE);
+-        accountChip.setText(n.isEmpty() ? Ui.t("● Без лицензии (офлайн)", "● Offline (no license)") : Ui.t("● Лицензия: ", "● Licensed: ") + n);
++        String who = readName();
++        accountChip.setText(n.isEmpty() ? "● " + (who.isEmpty() ? Ui.t("Офлайн", "Offline") : who) : Ui.t("● Лицензия: ", "● Licensed: ") + n);
+         accountChip.setTextColor(n.isEmpty() ? Ui.MUTED : Ui.GREEN);
+     }
+ 
+@@ -497,18 +654,18 @@ public class ProfileActivity extends Activity implements View.OnClickListener {
+     private boolean saveProfile() {
+         String n = name.getText().toString().trim();
+         if (!n.isEmpty() && !validName(n)) {
+-            message.setTextColor(Ui.WARN);
+-            message.setText(Ui.t("Ник: 3–16 символов, только латиница, цифры и _.", "Name: 3–16 characters, letters, digits and _ only."));
++            say(Ui.t("Ник: 3–16 символов, только латиница, цифры и _.", "Name: 3–16 characters, letters, digits and _ only."), Ui.WARN);
+             return false;
+         }
+         try {
+             if (!n.isEmpty() && !n.equals(readName())) {
+                 write(new File(dir, "horizon-player.txt"), ("name:" + n + "\n").getBytes(StandardCharsets.UTF_8));
++                refreshAccount();
+             }
+             saveModel();
+             return true;
+         } catch (Exception e) {
+-            message.setText(Ui.t("Не удалось сохранить.", "Could not save."));
++            say(Ui.t("Не удалось сохранить.", "Could not save."), Ui.WARN);
+             return false;
+         }
+     }
+@@ -542,13 +699,8 @@ public class ProfileActivity extends Activity implements View.OnClickListener {
+     }
+ 
+     private String readJoin() {
+-        try {
+-            File f = new File(dir, "join-last.txt");
+-            f.delete();
+-            return "";
+-        } catch (Exception e) {
+-            return "";
+-        }
++        new File(dir, "join-last.txt").delete();
++        return "";
+     }
+ 
+     /** join.txt is read once by the game at start (android_main.rs) and deleted; join-last.txt keeps the field. */
+@@ -567,35 +719,57 @@ public class ProfileActivity extends Activity implements View.OnClickListener {
+         }
+     }
+ 
+-    private void exportDialog() {
+-        File[] all = new File(dir, "saves").listFiles();
+-        final java.util.ArrayList<String> names = new java.util.ArrayList<>();
+-        if (all != null) {
+-            for (File w : all) if (w.isDirectory() && new File(w, "level.dat").isFile()) names.add(w.getName());
++    private void play() {
++        if (!saveProfile()) {
++            show(PROFILE);
++            return;
+         }
+-        java.util.Collections.sort(names);
+-        if (names.isEmpty()) {
+-            message.setTextColor(Ui.WARN);
+-            message.setText(Ui.t("Миров нет: сначала создайте мир в игре.", "No worlds yet: create one in the game first."));
++        saveJoin();
++        Intent i = new Intent(this, HorizonActivity.class);
++        i.addFlags(Intent.FLAG_ACTIVITY_REORDER_TO_FRONT);
++        startActivity(i);
++        overridePendingTransition(0, 0);
++        finish();
++        overridePendingTransition(0, 0);
++    }
++
++    // ---- Worlds: zip in and out (WorldsPage asks for these) -----------------------------------
++
++    void pickWorldZip() {
++        Intent i = new Intent(Intent.ACTION_OPEN_DOCUMENT);
++        i.addCategory(Intent.CATEGORY_OPENABLE);
++        i.setType("*/*");
++        startActivityForResult(i, WORLD_IN);
++    }
++
++    void exportDialog() {
++        final List<File> all = WorldsPage.worlds(dir);
++        if (all.isEmpty()) {
++            say(Ui.t("Миров нет: сначала создайте мир в игре.", "No worlds yet: create one in the game first."), Ui.WARN);
+             return;
+         }
+-        new android.app.AlertDialog.Builder(this)
++        String[] names = new String[all.size()];
++        for (int i = 0; i < names.length; i++) names[i] = all.get(i).getName();
++        new AlertDialog.Builder(this)
+                 .setTitle(Ui.t("Какой мир выгрузить?", "Which world to export?"))
+-                .setItems(names.toArray(new String[0]), new android.content.DialogInterface.OnClickListener() {
+-                    @Override
+-                    public void onClick(android.content.DialogInterface d, int which) {
+-                        exportWorld = names.get(which);
+-                        Intent i = new Intent(Intent.ACTION_CREATE_DOCUMENT);
+-                        i.addCategory(Intent.CATEGORY_OPENABLE);
+-                        i.setType("application/zip");
+-                        i.putExtra(Intent.EXTRA_TITLE, exportWorld + ".zip");
+-                        startActivityForResult(i, WORLD_OUT);
++                .setItems(names, new DialogInterface.OnClickListener() {
++                    public void onClick(DialogInterface d, int which) {
++                        exportWorld(all.get(which).getName());
+                     }
+                 })
+                 .show();
+     }
+ 
+-    private void zipWorld(File root, File world, java.util.zip.ZipOutputStream zip) throws Exception {
++    void exportWorld(String world) {
++        exportWorld = world;
++        Intent i = new Intent(Intent.ACTION_CREATE_DOCUMENT);
++        i.addCategory(Intent.CATEGORY_OPENABLE);
++        i.setType("application/zip");
++        i.putExtra(Intent.EXTRA_TITLE, world + ".zip");
++        startActivityForResult(i, WORLD_OUT);
++    }
++
++    private static void zipWorld(File root, File world, java.util.zip.ZipOutputStream zip) throws Exception {
+         File[] list = world.listFiles();
+         if (list == null) return;
+         for (File f : list) {
+@@ -611,7 +785,7 @@ public class ProfileActivity extends Activity implements View.OnClickListener {
+     }
+ 
+     /** Unpacks a zip with one world beside the saves under a free folder name; returns that name or null. */
+-    private String importWorld(InputStream raw) throws Exception {
++    String importWorld(InputStream raw) throws Exception {
+         File saves = new File(dir, "saves");
+         saves.mkdirs();
+         File staging = new File(saves, "import-" + System.currentTimeMillis() + ".importing");
+@@ -620,7 +794,7 @@ public class ProfileActivity extends Activity implements View.OnClickListener {
+         long total = 0;
+         try (java.util.zip.ZipInputStream zin = new java.util.zip.ZipInputStream(raw)) {
+             java.util.zip.ZipEntry e;
+-            java.util.ArrayList<String> names = new java.util.ArrayList<>();
++            ArrayList<String> names = new ArrayList<>();
+             File all = new File(staging, "all");
+             all.mkdirs();
+             byte[] buf = new byte[65536];
+@@ -657,19 +831,19 @@ public class ProfileActivity extends Activity implements View.OnClickListener {
+             String base = prefix.isEmpty() ? "Imported world" : prefix.substring(0, prefix.length() - 1);
+             base = base.substring(base.lastIndexOf('/') + 1);
+             if (base.isEmpty()) base = "Imported world";
+-            String name = base;
+-            for (int i = 1; new File(saves, name).exists(); i++) name = base + " (" + i + ")";
++            String world = base;
++            for (int i = 1; new File(saves, world).exists(); i++) world = base + " (" + i + ")";
+             File src = prefix.isEmpty() ? all : new File(all, prefix);
+-            if (!src.renameTo(new File(saves, name))) throw new Exception("move failed");
++            if (!src.renameTo(new File(saves, world))) throw new Exception("move failed");
+             deleteTree(staging);
+-            return name;
++            return world;
+         } catch (Exception ex) {
+             deleteTree(staging);
+             throw ex;
+         }
+     }
+ 
+-    private static void deleteTree(File f) {
++    static void deleteTree(File f) {
+         File[] kids = f.listFiles();
+         if (kids != null) for (File k : kids) deleteTree(k);
+         f.delete();
+@@ -693,14 +867,6 @@ public class ProfileActivity extends Activity implements View.OnClickListener {
+         return out.size() > 8000 ? null : out.toByteArray();
+     }
+ 
+-    @Override
+-    protected void onPause() {
+-        super.onPause();
+-        // Leaving for the game or the file picker keeps what was typed.
+-        String n = name.getText().toString().trim();
+-        if (n.isEmpty() || validName(n)) saveProfile();
+-    }
+-
+     public void onClick(View v) {
+         if (v == pick) {
+             Intent i = new Intent(Intent.ACTION_OPEN_DOCUMENT);
+@@ -722,22 +888,8 @@ public class ProfileActivity extends Activity implements View.OnClickListener {
+             }
+         } else if (v == catalog) {
+             startActivity(new Intent(this, CatalogActivity.class));
+-        } else if (v == worldIn) {
+-            Intent i = new Intent(Intent.ACTION_OPEN_DOCUMENT);
+-            i.addCategory(Intent.CATEGORY_OPENABLE);
+-            i.setType("*/*");
+-            startActivityForResult(i, WORLD_IN);
+-        } else if (v == worldOut) {
+-            exportDialog();
+         } else if (v == play) {
+-            if (!saveProfile()) return;
+-            saveJoin();
+-            Intent i = new Intent(this, HorizonActivity.class);
+-            i.addFlags(Intent.FLAG_ACTIVITY_REORDER_TO_FRONT);
+-            startActivity(i);
+-            overridePendingTransition(0, 0);
+-            finish();
+-            overridePendingTransition(0, 0);
++            play();
+         } else if (v == driver) {
+             Intent i = new Intent(Intent.ACTION_OPEN_DOCUMENT);
+             i.addCategory(Intent.CATEGORY_OPENABLE);
+@@ -746,8 +898,7 @@ public class ProfileActivity extends Activity implements View.OnClickListener {
+         } else if (v == systemDriver) {
+             Turnip.useSystem(this);
+             driverStatus.setText(Turnip.status(this));
+-            message.setTextColor(Ui.GREEN);
+-            message.setText(Ui.t("Системный драйвер. Перезапустите игру.", "System driver. Restart the game."));
++            say(Ui.t("Системный драйвер. Перезапустите игру.", "System driver. Restart the game."), Ui.GREEN);
+         } else if (v == copy) {
+             android.content.ClipboardManager cm = (android.content.ClipboardManager) getSystemService(CLIPBOARD_SERVICE);
+             if (cm != null) cm.setPrimaryClip(android.content.ClipData.newPlainText("code", code.getText()));
+@@ -756,7 +907,7 @@ public class ProfileActivity extends Activity implements View.OnClickListener {
+             try {
+                 startActivity(new Intent(Intent.ACTION_VIEW, Uri.parse(verifyUri)));
+             } catch (Exception e) {
+-                message.setText(Ui.t("Нет браузера. Откройте ", "No browser. Open ") + verifyUri);
++                say(Ui.t("Нет браузера. Откройте ", "No browser. Open ") + verifyUri, Ui.WARN);
+             }
+         } else if (v == advanced) {
+             advancedBox.setVisibility(advancedBox.getVisibility() == View.VISIBLE ? View.GONE : View.VISIBLE);
+@@ -765,8 +916,7 @@ public class ProfileActivity extends Activity implements View.OnClickListener {
+                 startActivityForResult(new Intent(this, MsaLoginActivity.class), MS_LOGIN);
+             } catch (Exception e) {
+                 advancedBox.setVisibility(View.VISIBLE);
+-                message.setTextColor(Ui.WARN);
+-                message.setText(Ui.t("Нет WebView на телефоне: войдите по коду ниже.", "No WebView on this phone: sign in with a code below."));
++                say(Ui.t("Нет WebView на телефоне: войдите по коду ниже.", "No WebView on this phone: sign in with a code below."), Ui.WARN);
+             }
+         } else if (v == deviceCode) {
+             startDeviceCode();
+@@ -778,8 +928,7 @@ public class ProfileActivity extends Activity implements View.OnClickListener {
+             microsoft.setEnabled(true);
+             deviceCode.setEnabled(true);
+             refreshAccount();
+-            message.setTextColor(Ui.GREEN);
+-            message.setText(Ui.t("Вышли из аккаунта.", "Signed out."));
++            say(Ui.t("Вышли из аккаунта.", "Signed out."), Ui.GREEN);
+         } else if (v == mods) {
+             startActivity(new Intent(this, ModImportActivity.class));
+         }
+@@ -795,22 +944,20 @@ public class ProfileActivity extends Activity implements View.OnClickListener {
+             copy.setText(Ui.t("Скопировать код", "Copy code"));
+             codeBox.setVisibility(View.VISIBLE);
+             deviceCode.setText(Ui.t("Ждём вход…", "Waiting for sign-in…"));
+-            message.setText("");
++            say("", Ui.WARN);
+         }
+ 
+         public void onDone(String n) {
+             codeBox.setVisibility(View.GONE);
+             resetButtons();
+             refreshAccount();
+-            message.setTextColor(Ui.GREEN);
+-            message.setText(Ui.t("Вход выполнен: ", "Signed in: ") + n);
++            say(Ui.t("Вход выполнен: ", "Signed in: ") + n, Ui.GREEN);
+         }
+ 
+         public void onError(String error) {
+             codeBox.setVisibility(View.GONE);
+             resetButtons();
+-            message.setTextColor(Ui.WARN);
+-            message.setText(error);
++            say(error, Ui.WARN);
+         }
+     };
+ 
+@@ -824,18 +971,16 @@ public class ProfileActivity extends Activity implements View.OnClickListener {
+     private void startDeviceCode() {
+         String id = clientId.getText().toString().trim();
+         if (!id.matches("[0-9a-fA-F]{8}-[0-9a-fA-F]{4}-[0-9a-fA-F]{4}-[0-9a-fA-F]{4}-[0-9a-fA-F]{12}")) {
+-            message.setTextColor(Ui.WARN);
+-            message.setText(Ui.t("Вставьте свой Azure client ID.", "Paste your own Azure client ID."));
++            say(Ui.t("Вставьте свой Azure client ID.", "Paste your own Azure client ID."), Ui.WARN);
+             return;
+         }
+         try {
+             Msa.saveClientId(this, id);
+         } catch (Exception e) {
+-            message.setText(Ui.t("Не удалось сохранить client ID.", "Could not save the client ID."));
++            say(Ui.t("Не удалось сохранить client ID.", "Could not save the client ID."), Ui.WARN);
+             return;
+         }
+-        message.setTextColor(Ui.WARN);
+-        message.setText(Ui.t("Запрашиваем код…", "Requesting a code…"));
++        say(Ui.t("Запрашиваем код…", "Requesting a code…"), Ui.WARN);
+         deviceCode.setEnabled(false);
+         microsoft.setEnabled(false);
+         Msa.start(this, id, listener);
+@@ -862,21 +1007,62 @@ public class ProfileActivity extends Activity implements View.OnClickListener {
+         return Ui.t("Аккаунт: ", "Account: ") + n;
+     }
+ 
++    /** A world zip in or out, off the main thread: a big world takes a while. */
++    private void worldJob(final int request, final Uri uri) {
++        say(Ui.t("Работаем с миром…", "Working on the world…"), Ui.WARN);
++        new Thread(new Runnable() {
++            public void run() {
++                String msg;
++                int color = Ui.GREEN;
++                try {
++                    if (request == WORLD_IN) {
++                        String w;
++                        try (InputStream in = getContentResolver().openInputStream(uri)) {
++                            w = importWorld(in);
++                        }
++                        if (w == null) {
++                            msg = Ui.t("В архиве нет мира (нужен level.dat).", "No world in that zip (level.dat is missing).");
++                            color = Ui.WARN;
++                        } else {
++                            msg = Ui.t("Мир добавлен: ", "World added: ") + w;
++                        }
++                    } else {
++                        File w = new File(new File(dir, "saves"), exportWorld);
++                        try (java.util.zip.ZipOutputStream zip = new java.util.zip.ZipOutputStream(
++                                getContentResolver().openOutputStream(uri))) {
++                            zipWorld(w.getParentFile(), w, zip);
++                        }
++                        msg = Ui.t("Мир выгружен: ", "World exported: ") + exportWorld;
++                    }
++                } catch (Exception e) {
++                    msg = Ui.t("Не получилось: ", "Failed: ") + e.getMessage();
++                    color = Ui.BAD;
++                }
++                final String m = msg;
++                final int c = color;
++                runOnUiThread(new Runnable() {
++                    public void run() {
++                        if (isFinishing()) return;
++                        say(m, c);
++                        if (current >= 0) pages[current].shown();
++                    }
++                });
++            }
++        }).start();
++    }
++
+     @Override
+     protected void onActivityResult(int request, int result, Intent data) {
+         super.onActivityResult(request, result, data);
++        for (Page pg : pages) if (pg.onResult(request, result, data)) return;
+         if (request == MS_LOGIN) {
+             String c = data == null ? null : data.getStringExtra("code");
+             if (result != RESULT_OK || c == null) {
+                 String err = data == null ? null : data.getStringExtra("error");
+-                if (err != null && !err.isEmpty()) {
+-                    message.setTextColor(Ui.WARN);
+-                    message.setText(Ui.t("Вход отменён: ", "Sign-in cancelled: ") + err);
+-                }
++                if (err != null && !err.isEmpty()) say(Ui.t("Вход отменён: ", "Sign-in cancelled: ") + err, Ui.WARN);
+                 return;
+             }
+-            message.setTextColor(Ui.WARN);
+-            message.setText(Ui.t("Входим в Xbox и Minecraft…", "Signing in to Xbox and Minecraft…"));
++            say(Ui.t("Входим в Xbox и Minecraft…", "Signing in to Xbox and Minecraft…"), Ui.WARN);
+             microsoft.setEnabled(false);
+             microsoft.setText(Ui.t("Входим…", "Signing in…"));
+             Msa.startWithCode(this, c, listener);
+@@ -884,99 +1070,54 @@ public class ProfileActivity extends Activity implements View.OnClickListener {
+         }
+         if (result != RESULT_OK || data == null || data.getData() == null) return;
+         if (request == PICK_DRIVER) {
+-            message.setTextColor(Ui.WARN);
+             try {
+                 String n = Turnip.install(this, data.getData());
+                 driverStatus.setText(Turnip.status(this));
+-                message.setTextColor(Ui.GREEN);
+-                message.setText(Ui.t("Драйвер установлен: ", "Driver installed: ") + n
+-                        + Ui.t(". Полностью закройте игру и откройте снова.", ". Fully close the game and open it again."));
++                say(Ui.t("Драйвер установлен: ", "Driver installed: ") + n
++                        + Ui.t(". Полностью закройте игру и откройте снова.", ". Fully close the game and open it again."), Ui.GREEN);
+             } catch (Exception e) {
+-                message.setText(Ui.t("В архиве нет .so драйвера (нужен zip с libvulkan_freedreno.so).",
+-                        "The archive has no driver .so (a zip with libvulkan_freedreno.so is needed)."));
++                say(Ui.t("В архиве нет .so драйвера (нужен zip с libvulkan_freedreno.so).",
++                        "The archive has no driver .so (a zip with libvulkan_freedreno.so is needed)."), Ui.WARN);
+             }
+             return;
+         }
+-        if (request == WORLD_IN || request == WORLD_OUT) {
+-            if (result != RESULT_OK || data == null || data.getData() == null) return;
+-            message.setTextColor(Ui.WARN);
+-            try {
+-                if (request == WORLD_IN) {
+-                    String name;
+-                    try (InputStream in = getContentResolver().openInputStream(data.getData())) {
+-                        name = importWorld(in);
+-                    }
+-                    if (name == null) {
+-                        message.setText(Ui.t("В архиве нет мира (нужен level.dat).", "No world in that zip (level.dat is missing)."));
+-                    } else {
+-                        message.setTextColor(Ui.GREEN);
+-                        message.setText(Ui.t("Мир добавлен: ", "World added: ") + name);
+-                    }
+-                } else {
+-                    File w = new File(new File(dir, "saves"), exportWorld);
+-                    try (java.util.zip.ZipOutputStream zip = new java.util.zip.ZipOutputStream(
+-                            getContentResolver().openOutputStream(data.getData()))) {
+-                        zipWorld(w.getParentFile(), w, zip);
+-                    }
+-                    message.setTextColor(Ui.GREEN);
+-                    message.setText(Ui.t("Мир выгружен: ", "World exported: ") + exportWorld);
+-                }
+-            } catch (Exception e) {
+-                message.setText(Ui.t("Не получилось: ", "Failed: ") + e.getMessage());
+-            }
++        if (request == WORLD_IN || (request == WORLD_OUT && exportWorld != null)) {
++            worldJob(request, data.getData());
+             return;
+         }
+         if (request == PICK_CAPE) {
+-            message.setTextColor(Ui.WARN);
+             try (InputStream in = getContentResolver().openInputStream(data.getData())) {
+-                ByteArrayOutputStream out = new ByteArrayOutputStream();
+-                byte[] buf = new byte[8192];
+-                int n;
+-                while ((n = in.read(buf)) > 0) {
+-                    out.write(buf, 0, n);
+-                    if (out.size() > 4 << 20) throw new Exception("too big");
+-                }
+-                byte[] png = normalizeCape(out.toByteArray());
++                byte[] png = normalizeCape(Net.readAll(in, 4 << 20));
+                 if (png == null) {
+-                    message.setText(Ui.t("Нужен плащ: PNG 64×32 (или 22×17), не больше 8 КБ после сжатия.",
+-                            "A cape is needed: a 64×32 (or 22×17) PNG, at most 8 KB once compressed."));
++                    say(Ui.t("Нужен плащ: PNG 64×32 (или 22×17), не больше 8 КБ после сжатия.",
++                            "A cape is needed: a 64×32 (or 22×17) PNG, at most 8 KB once compressed."), Ui.WARN);
+                     return;
+                 }
+                 File sd = new File(dir, "skin");
+                 sd.mkdirs();
+                 write(new File(sd, "cape.png"), png);
+                 new File(sd, "textures.signed").delete();
+-                message.setTextColor(Ui.GREEN);
+-                message.setText(Ui.t("Плащ применён: его увидят другие игроки.", "Cape applied: other players will see it."));
++                say(Ui.t("Плащ применён: его увидят другие игроки.", "Cape applied: other players will see it."), Ui.GREEN);
+             } catch (Exception e) {
+-                message.setText(Ui.t("Не удалось прочитать файл.", "Could not read the file."));
++                say(Ui.t("Не удалось прочитать файл.", "Could not read the file."), Ui.WARN);
+             }
+             return;
+         }
+         if (request != PICK) return;
+-        message.setTextColor(Ui.WARN);
+         try (InputStream in = getContentResolver().openInputStream(data.getData())) {
+-            ByteArrayOutputStream out = new ByteArrayOutputStream();
+-            byte[] buf = new byte[8192];
+-            int n;
+-            while ((n = in.read(buf)) > 0) {
+-                out.write(buf, 0, n);
+-                if (out.size() > 4 << 20) throw new Exception("too big");
+-            }
+-            byte[] png = normalizeSkin(out.toByteArray());
++            byte[] png = normalizeSkin(Net.readAll(in, 4 << 20));
+             if (png == null) {
+-                message.setText(Ui.t("Нужен скин: PNG 64×64 или 64×32 (HD 128/256… тоже подойдёт).",
+-                        "A skin is needed: a 64×64 or 64×32 PNG (HD 128/256… works too)."));
++                say(Ui.t("Нужен скин: PNG 64×64 или 64×32 (HD 128/256… тоже подойдёт).",
++                        "A skin is needed: a 64×64 or 64×32 PNG (HD 128/256… works too)."), Ui.WARN);
+                 return;
+             }
+             write(new File(dir, "horizon-skin.png"), png);
+             saveModel();
+             mirrorSkin();
+-            message.setTextColor(Ui.GREEN);
+-            message.setText(Ui.t("Скин применён.", "Skin applied."));
++            say(Ui.t("Скин применён.", "Skin applied."), Ui.GREEN);
+             showPreview();
+         } catch (Exception e) {
+-            message.setText(Ui.t("Не удалось прочитать файл.", "Could not read the file."));
++            say(Ui.t("Не удалось прочитать файл.", "Could not read the file."), Ui.WARN);
+         }
+     }
+ 
+@@ -1018,7 +1159,7 @@ public class ProfileActivity extends Activity implements View.OnClickListener {
+         return out.toByteArray();
+     }
+ 
+-    private static void write(File f, byte[] bytes) throws Exception {
++    static void write(File f, byte[] bytes) throws Exception {
+         File tmp = new File(f.getPath() + ".tmp");
+         try (FileOutputStream out = new FileOutputStream(tmp)) {
+             out.write(bytes);
+diff --git a/packaging/android/java/dev/horizonlab/horizon/SettingsPage.java b/packaging/android/java/dev/horizonlab/horizon/SettingsPage.java
+new file mode 100644
+index 0000000..b076e7a
+--- /dev/null
++++ b/packaging/android/java/dev/horizonlab/horizon/SettingsPage.java
+@@ -0,0 +1,232 @@
++package dev.horizonlab.horizon;
++
++import android.app.AlertDialog;
++import android.content.ClipData;
++import android.content.ClipboardManager;
++import android.content.Context;
++import android.content.DialogInterface;
++import android.content.Intent;
++import android.net.Uri;
++import android.view.View;
++import android.widget.LinearLayout;
++import android.widget.ScrollView;
++import android.widget.TextView;
++import java.io.File;
++import java.nio.charset.StandardCharsets;
++import java.nio.file.Files;
++import java.util.List;
++
++/**
++ * Oneshot: Settings, as the PC launcher's: language and accent (the look), the graphics blocks
++ * ProfileActivity adds (driver, safe mode, cutout, the Microsoft account), then the log and About.
++ */
++final class SettingsPage extends Page {
++    private static final String[] LANG_IDS = {"", "ru", "en"};
++
++    SettingsPage(final ProfileActivity a) {
++        super(a);
++        Ui.title(root, Ui.t("Настройки", "Settings"), Ui.t("Внешний вид, графика, вырез экрана, аккаунт и лог.",
++                "Look, graphics, the screen cutout, the account and the log."));
++
++        LinearLayout look = block(Ui.t("Язык", "Language"));
++        LinearLayout langs = Ui.row(a);
++        String[] names = {Ui.t("Системный", "System"), "Русский", "English"};
++        for (int i = 0; i < LANG_IDS.length; i++) {
++            final String id = LANG_IDS[i];
++            TextView c = Ui.chip(a, names[i], id.equals(Ui.lang));
++            c.setOnClickListener(new View.OnClickListener() {
++                public void onClick(View v) {
++                    if (id.equals(Ui.lang)) return;
++                    Ui.setPref(a, "lang.txt", id);
++                    Ui.load(a);
++                    a.recreate();
++                }
++            });
++            LinearLayout.LayoutParams lp = new LinearLayout.LayoutParams(-2, -2);
++            if (i > 0) lp.leftMargin = dp(8);
++            langs.addView(c, lp);
++        }
++        look.addView(langs, Ui.gap(a, 4));
++
++        LinearLayout acc = block(Ui.t("Акцент", "Accent"));
++        String cur = Ui.pref(a, "accent.txt");
++        if (cur.isEmpty()) cur = Ui.ACCENT_IDS[0];
++        android.widget.HorizontalScrollView hs = new android.widget.HorizontalScrollView(a);
++        hs.setHorizontalScrollBarEnabled(false);
++        LinearLayout chips = Ui.row(a);
++        for (int i = 0; i < Ui.ACCENT_IDS.length; i++) {
++            final String id = Ui.ACCENT_IDS[i];
++            boolean on = id.equals(cur);
++            TextView c = Ui.text(a, "●  " + Ui.t(Ui.ACCENT_RU[i], Ui.ACCENT_EN[i]), 13, on ? Ui.ON_ACCENT : Ui.TEXT, true);
++            c.setPadding(dp(12), dp(6), dp(14), dp(6));
++            c.setBackground(on ? Ui.rounded(a, Ui.ACCENT_COLORS[i], 0, 20) : Ui.rounded(a, Ui.HIGH, Ui.EDGE, 20));
++            if (!on) {
++                android.text.SpannableString s = new android.text.SpannableString(c.getText());
++                s.setSpan(new android.text.style.ForegroundColorSpan(Ui.ACCENT_COLORS[i]), 0, 1, 0);
++                c.setText(s);
++            }
++            c.setOnClickListener(new View.OnClickListener() {
++                public void onClick(View v) {
++                    Ui.setPref(a, "accent.txt", id);
++                    Ui.load(a);
++                    a.recreate();
++                }
++            });
++            LinearLayout.LayoutParams lp = new LinearLayout.LayoutParams(-2, -2);
++            if (i > 0) lp.leftMargin = dp(8);
++            chips.addView(c, lp);
++        }
++        hs.addView(chips);
++        acc.addView(hs, Ui.gap(a, 4));
++    }
++
++    /** The blocks after ProfileActivity's own: the log and About. */
++    void tail() {
++        LinearLayout log = block(Ui.t("Лог игры", "Game log"));
++        note(log, Ui.t("Если игра вылетает или что-то не работает, лог поможет найти причину.",
++                "When the game crashes or something does not work, the log helps find the cause."));
++        android.widget.Button view = Ui.button(a, Ui.t("Посмотреть лог", "View the log"), false);
++        view.setOnClickListener(new View.OnClickListener() {
++            public void onClick(View v) {
++                showLog(a);
++            }
++        });
++        android.widget.Button send = Ui.button(a, Ui.t("Отправить лог…", "Send the log…"), false);
++        send.setOnClickListener(new View.OnClickListener() {
++            public void onClick(View v) {
++                confirmUpload(a);
++            }
++        });
++        buttons(log, view, send);
++
++        LinearLayout about = block(Ui.t("О программе", "About"));
++        about.addView(Ui.text(a, "Oneshot · Horizon " + UpdateActivity.versionName(a), 15, Ui.TEXT, true));
++        note(about, Ui.t("Порт Horizon на Android. Сборки, исходники и вопросы — на GitHub.",
++                "Horizon's Android port. Builds, sources and questions: on GitHub."));
++        TextView gh = Ui.text(a, "github.com/" + Net.REPO + " →", 13, Ui.GREEN, true);
++        gh.setOnClickListener(new View.OnClickListener() {
++            public void onClick(View v) {
++                try {
++                    a.startActivity(new Intent(Intent.ACTION_VIEW, Uri.parse("https://github.com/" + Net.REPO)));
++                } catch (Exception ignored) {
++                }
++            }
++        });
++        about.addView(gh, Ui.gap(a, 4));
++    }
++
++    static File logFile(Context c) {
++        return new File(new File(SetupActivity.home(c)), "logs/latest.log");
++    }
++
++    /** The last lines of the log (all of it when shorter). */
++    static String tail(Context c, int lines) {
++        List<String> all = PackShare.lines(logFile(c));
++        int from = Math.max(0, all.size() - lines);
++        StringBuilder b = new StringBuilder();
++        for (int i = from; i < all.size(); i++) b.append(all.get(i)).append('\n');
++        return b.toString();
++    }
++
++    static void showLog(Context c) {
++        String text = tail(c, 200);
++        if (text.trim().isEmpty()) text = Ui.t("Лог пуст: игра ещё не запускалась.", "The log is empty: the game has not run yet.");
++        TextView t = Ui.text(c, text, 12, Ui.TEXT, false);
++        t.setTypeface(android.graphics.Typeface.MONOSPACE);
++        t.setTextSize(11);
++        t.setTextIsSelectable(true);
++        int p = Ui.dp(c, 16);
++        t.setPadding(p, p / 2, p, p / 2);
++        final ScrollView s = new ScrollView(c);
++        s.addView(t);
++        s.post(new Runnable() {
++            public void run() {
++                s.fullScroll(View.FOCUS_DOWN);
++            }
++        });
++        new AlertDialog.Builder(c)
++                .setTitle("logs/latest.log")
++                .setView(s)
++                .setPositiveButton(Ui.t("Закрыть", "Close"), null)
++                .show();
++    }
++
++    /** The log goes to mclo.gs only after the player read what happens and agreed. */
++    static void confirmUpload(final ProfileActivity a) {
++        if (!logFile(a).isFile()) {
++            a.say(Ui.t("Лога ещё нет: игра не запускалась.", "No log yet: the game has not run."), Ui.WARN);
++            return;
++        }
++        new AlertDialog.Builder(a)
++                .setTitle(Ui.t("Отправить лог на mclo.gs?", "Send the log to mclo.gs?"))
++                .setMessage(Ui.t("Лог загрузится на сайт mclo.gs, и вы получите ссылку — её можно отправить тем, кто помогает с ошибкой. "
++                        + "Ссылку увидит любой, у кого она есть. Пути к папкам и ваш ник перед отправкой убираются.",
++                        "The log is uploaded to mclo.gs and you get a link to give to whoever helps with the problem. "
++                        + "Anyone with the link can see it. Folder paths and your name are removed before sending."))
++                .setPositiveButton(Ui.t("Отправить", "Send"), new DialogInterface.OnClickListener() {
++                    public void onClick(DialogInterface d, int w) {
++                        upload(a);
++                    }
++                })
++                .setNegativeButton(Ui.t("Отмена", "Cancel"), null)
++                .show();
++    }
++
++    static String scrub(Context c, String text, String name) {
++        String[] paths = {SetupActivity.home(c), c.getFilesDir().getAbsolutePath(), "/storage/emulated/0", "/data/user/0", "/data/data"};
++        for (String p : paths) if (p != null && !p.isEmpty()) text = text.replace(p, "~");
++        if (name != null && name.length() >= 3) text = text.replace(name, "<player>");
++        return text;
++    }
++
++    private static void upload(final ProfileActivity a) {
++        a.say(Ui.t("Отправляем лог…", "Sending the log…"), Ui.WARN);
++        final String name = a.readName();
++        new Thread(new Runnable() {
++            public void run() {
++                String url = null, error = null;
++                try {
++                    String body = scrub(a, tail(a, 20000), name);
++                    org.json.JSONObject r = new org.json.JSONObject(Net.post("https://api.mclo.gs/1/log", "content", body));
++                    if (!r.optBoolean("success", false)) throw new Exception(r.optString("error", "mclo.gs"));
++                    url = r.getString("url");
++                } catch (Exception e) {
++                    error = e.getMessage();
++                }
++                final String u = url, err = error;
++                a.runOnUiThread(new Runnable() {
++                    public void run() {
++                        if (a.isFinishing()) return;
++                        if (u == null) {
++                            a.say(Ui.t("Не удалось отправить: ", "Could not send: ") + err, Ui.BAD);
++                            return;
++                        }
++                        a.say(Ui.t("Лог отправлен: ", "Log sent: ") + u, Ui.GREEN);
++                        new AlertDialog.Builder(a)
++                                .setTitle(Ui.t("Лог отправлен", "Log sent"))
++                                .setMessage(u)
++                                .setPositiveButton(Ui.t("Скопировать", "Copy"), new DialogInterface.OnClickListener() {
++                                    public void onClick(DialogInterface d, int w) {
++                                        ClipboardManager cm = (ClipboardManager) a.getSystemService(Context.CLIPBOARD_SERVICE);
++                                        if (cm != null) cm.setPrimaryClip(ClipData.newPlainText("log", u));
++                                    }
++                                })
++                                .setNeutralButton(Ui.t("Поделиться", "Share"), new DialogInterface.OnClickListener() {
++                                    public void onClick(DialogInterface d, int w) {
++                                        Intent i = new Intent(Intent.ACTION_SEND);
++                                        i.setType("text/plain");
++                                        i.putExtra(Intent.EXTRA_TEXT, u);
++                                        try {
++                                            a.startActivity(Intent.createChooser(i, Ui.t("Отправить ссылку", "Send the link")));
++                                        } catch (Exception ignored) {
++                                        }
++                                    }
++                                })
++                                .setNegativeButton(Ui.t("Закрыть", "Close"), null)
++                                .show();
++                    }
++                });
++            }
++        }).start();
++    }
++}
+diff --git a/packaging/android/java/dev/horizonlab/horizon/SetupActivity.java b/packaging/android/java/dev/horizonlab/horizon/SetupActivity.java
+index ba65b24..216bd30 100644
+--- a/packaging/android/java/dev/horizonlab/horizon/SetupActivity.java
++++ b/packaging/android/java/dev/horizonlab/horizon/SetupActivity.java
+@@ -62,6 +62,18 @@ public class SetupActivity extends Activity
+     protected void onCreate(Bundle state) {
+         super.onCreate(state);
+         home = home(this);
++        // Oneshot: an oneshot://join/CODE (or #CODE) link from the join page puts the code in the launcher.
++        android.net.Uri link = getIntent() == null ? null : getIntent().getData();
++        if (link != null && "oneshot".equals(link.getScheme())) {
++            String raw = link.getFragment() != null ? link.getFragment() : link.getPath();
++            String c = Net.normalize(raw == null ? "" : raw.replace("/", ""));
++            if (c != null) {
++                try {
++                    ProfileActivity.write(new File(home, "join-pending.txt"), c.getBytes(java.nio.charset.StandardCharsets.UTF_8));
++                } catch (Exception ignored) {
++                }
++            }
++        }
+         if (nativeReady(home) == 1) {
+             launch();
+             return;
+diff --git a/packaging/android/java/dev/horizonlab/horizon/Ui.java b/packaging/android/java/dev/horizonlab/horizon/Ui.java
+index 532e7d7..50c3e10 100644
+--- a/packaging/android/java/dev/horizonlab/horizon/Ui.java
++++ b/packaging/android/java/dev/horizonlab/horizon/Ui.java
+@@ -20,17 +20,65 @@ final class Ui {
+     static final int BG = Color.rgb(10, 10, 10);
+     static final int CARD = Color.rgb(19, 19, 19);
+     static final int EDGE = Color.rgb(42, 42, 42);
+-    static final int GREEN = Color.rgb(232, 232, 232);       // the launcher's accent: white
+-    static final int GREEN_DARK = Color.rgb(66, 66, 66);
++    // The accent (white by default, or the colour picked in Settings: accent.txt).
++    static int GREEN = Color.rgb(232, 232, 232);
++    static int GREEN_DARK = Color.rgb(66, 66, 66);
+     static final int HIGH = Color.rgb(28, 28, 28);
+     static final int ON_ACCENT = Color.rgb(10, 10, 10);
+     static final int TEXT = Color.rgb(244, 244, 244);
+     static final int MUTED = Color.rgb(150, 150, 150);
+     static final int WARN = Color.rgb(196, 196, 196);
++    static final int BAD = Color.rgb(248, 113, 113);
++    static final int GOOD = Color.rgb(110, 231, 183);
++
++    /** The accents offered in Settings: id, Russian and English name, colour. */
++    static final String[] ACCENT_IDS = {"white", "mint", "sky", "amber", "rose", "violet"};
++    static final String[] ACCENT_RU = {"Белый", "Мятный", "Голубой", "Янтарный", "Розовый", "Фиолетовый"};
++    static final String[] ACCENT_EN = {"White", "Mint", "Sky", "Amber", "Rose", "Violet"};
++    static final int[] ACCENT_COLORS = {Color.rgb(232, 232, 232), Color.rgb(110, 231, 183), Color.rgb(125, 211, 252),
++            Color.rgb(252, 211, 77), Color.rgb(249, 168, 212), Color.rgb(196, 181, 253)};
++
++    /** "" follows the system, else "ru" or "en" (lang.txt). */
++    static String lang = "";
++    private static boolean loaded;
+ 
+     private Ui() {}
+ 
++    /** The player's language and accent, read once per process (and again after a change). */
++    static void load(Context c) {
++        loaded = true;
++        lang = pref(c, "lang.txt");
++        accent(pref(c, "accent.txt"));
++    }
++
++    static void accent(String id) {
++        int color = ACCENT_COLORS[0];
++        for (int i = 0; i < ACCENT_IDS.length; i++) if (ACCENT_IDS[i].equals(id)) color = ACCENT_COLORS[i];
++        GREEN = color;
++        GREEN_DARK = Color.rgb(Color.red(color) * 2 / 7, Color.green(color) * 2 / 7, Color.blue(color) * 2 / 7);
++    }
++
++    /** A one-line setting in the app's internal files; "" when there is none. */
++    static String pref(Context c, String name) {
++        try {
++            return new String(java.nio.file.Files.readAllBytes(new java.io.File(c.getFilesDir(), name).toPath()),
++                    java.nio.charset.StandardCharsets.UTF_8).trim();
++        } catch (Exception e) {
++            return "";
++        }
++    }
++
++    static void setPref(Context c, String name, String value) {
++        try {
++            java.nio.file.Files.write(new java.io.File(c.getFilesDir(), name).toPath(),
++                    (value + "\n").getBytes(java.nio.charset.StandardCharsets.UTF_8));
++        } catch (Exception ignored) {
++        }
++    }
++
+     static boolean ru() {
++        if ("ru".equals(lang)) return true;
++        if ("en".equals(lang)) return false;
+         return "ru".equals(Locale.getDefault().getLanguage());
+     }
+ 
+@@ -165,6 +213,169 @@ final class Ui {
+         card.addView(t);
+     }
+ 
++    /** A page's big title and its grey subtitle. */
++    static void title(LinearLayout page, String title, String sub) {
++        Context c = page.getContext();
++        TextView t = text(c, title, 26, TEXT, true);
++        t.setLetterSpacing(0.02f);
++        page.addView(t);
++        if (sub != null && !sub.isEmpty()) page.addView(text(c, sub, 13, MUTED, false));
++    }
++
++    /** A rounded block of the page (a card): vertical, padded. */
++    static LinearLayout panel(Context c) {
++        LinearLayout p = new LinearLayout(c);
++        p.setOrientation(LinearLayout.VERTICAL);
++        int pad = dp(c, 16);
++        p.setPadding(pad, dp(c, 12), pad, dp(c, 14));
++        p.setBackground(rounded(c, CARD, EDGE, 16));
++        return p;
++    }
++
++    /** A small spaced-out caption over a block. */
++    static TextView caption(Context c, String s) {
++        TextView t = text(c, s.toUpperCase(Locale.getDefault()), 11, MUTED, true);
++        t.setLetterSpacing(0.16f);
++        return t;
++    }
++
++    static LinearLayout row(Context c) {
++        LinearLayout r = new LinearLayout(c);
++        r.setOrientation(LinearLayout.HORIZONTAL);
++        r.setGravity(Gravity.CENTER_VERTICAL);
++        return r;
++    }
++
++    /** Equal parts of a row, with a gap between them. */
++    static LinearLayout.LayoutParams part(Context c, boolean first) {
++        LinearLayout.LayoutParams lp = new LinearLayout.LayoutParams(0, LinearLayout.LayoutParams.WRAP_CONTENT, 1);
++        if (!first) lp.leftMargin = dp(c, 10);
++        return lp;
++    }
++
++    /** A number with its label under it (the Home page's figures). */
++    static LinearLayout tile(Context c, String value, String label) {
++        LinearLayout t = new LinearLayout(c);
++        t.setOrientation(LinearLayout.VERTICAL);
++        int pad = dp(c, 14);
++        t.setPadding(pad, dp(c, 10), pad, dp(c, 10));
++        t.setBackground(rounded(c, HIGH, EDGE, 14));
++        TextView v = text(c, value, 22, TEXT, true);
++        v.setSingleLine(true);
++        t.addView(v);
++        TextView l = text(c, label, 12, MUTED, false);
++        l.setSingleLine(true);
++        t.addView(l);
++        return t;
++    }
++
++    /** A small rounded label; on = the accent. */
++    static TextView chip(Context c, String s, boolean on) {
++        TextView t = text(c, s, 12, on ? ON_ACCENT : TEXT, true);
++        t.setPadding(dp(c, 12), dp(c, 5), dp(c, 12), dp(c, 5));
++        t.setBackground(on ? rounded(c, GREEN, 0, 20) : rounded(c, HIGH, EDGE, 20));
++        return t;
++    }
++
++    /** A plain text field in the launcher's style. */
++    static android.widget.EditText field(Context c, String hint) {
++        android.widget.EditText e = new android.widget.EditText(c);
++        e.setSingleLine(true);
++        e.setTextColor(TEXT);
++        e.setHintTextColor(MUTED);
++        e.setHint(hint);
++        e.setTextSize(15);
++        int p = dp(c, 12);
++        e.setPadding(p, dp(c, 9), p, dp(c, 9));
++        e.setBackground(rounded(c, HIGH, EDGE, 10));
++        e.setImeOptions(android.view.inputmethod.EditorInfo.IME_ACTION_DONE
++                | android.view.inputmethod.EditorInfo.IME_FLAG_NO_EXTRACT_UI);
++        return e;
++    }
++
++    /** 3 h 25 min, 12 min, < 1 min. */
++    static String duration(long ms) {
++        long min = ms / 60000;
++        if (min < 1) return t("< 1 мин", "< 1 min");
++        long h = min / 60;
++        if (h == 0) return min + t(" мин", " min");
++        return h + t(" ч ", " h ") + (min % 60) + t(" мин", " min");
++    }
++
++    /** today, yesterday, 3 days ago, or the date. */
++    static String ago(long when) {
++        if (when <= 0) return t("никогда", "never");
++        java.util.Calendar a = java.util.Calendar.getInstance(), b = java.util.Calendar.getInstance();
++        a.setTimeInMillis(when);
++        long days = (startOfDay(b) - startOfDay(a)) / 86400000L;
++        if (days <= 0) return t("сегодня", "today") + String.format(Locale.ROOT, " %02d:%02d", a.get(java.util.Calendar.HOUR_OF_DAY), a.get(java.util.Calendar.MINUTE));
++        if (days == 1) return t("вчера", "yesterday");
++        if (days < 7) return days + t(" дн. назад", " days ago");
++        return new java.text.SimpleDateFormat("d MMM yyyy", ru() ? new Locale("ru") : Locale.ENGLISH).format(new java.util.Date(when));
++    }
++
++    private static long startOfDay(java.util.Calendar c) {
++        java.util.Calendar d = (java.util.Calendar) c.clone();
++        d.set(java.util.Calendar.HOUR_OF_DAY, 0);
++        d.set(java.util.Calendar.MINUTE, 0);
++        d.set(java.util.Calendar.SECOND, 0);
++        d.set(java.util.Calendar.MILLISECOND, 0);
++        return d.getTimeInMillis();
++    }
++
++    static String size(long bytes) {
++        if (bytes < 1024 * 1024) return Math.max(1, bytes / 1024) + t(" КБ", " KB");
++        if (bytes < 1024L * 1024 * 1024) return String.format(Locale.ROOT, "%.1f", bytes / 1048576.0) + t(" МБ", " MB");
++        return String.format(Locale.ROOT, "%.2f", bytes / 1073741824.0) + t(" ГБ", " GB");
++    }
++
++    /** Seven bars: the minutes played on each of the last seven days, today last. */
++    static final class Week extends View {
++        private final Paint paint = new Paint(Paint.ANTI_ALIAS_FLAG);
++        private final RectF r = new RectF();
++        private long[] days = new long[7];
++        private String[] labels = new String[7];
++
++        Week(Context c) {
++            super(c);
++            paint.setTextSize(dp(c, 11));
++            paint.setTextAlign(Paint.Align.CENTER);
++        }
++
++        void set(long[] ms, String[] names) {
++            days = ms;
++            labels = names;
++            invalidate();
++        }
++
++        @Override
++        protected void onMeasure(int w, int h) {
++            setMeasuredDimension(MeasureSpec.getSize(w), dp(getContext(), 96));
++        }
++
++        @Override
++        protected void onDraw(Canvas canvas) {
++            long max = 1;
++            for (long d : days) max = Math.max(max, d);
++            float gap = dp(getContext(), 8), label = dp(getContext(), 18);
++            float w = (getWidth() - gap * 6) / 7f, top = dp(getContext(), 4), bottom = getHeight() - label;
++            for (int i = 0; i < 7; i++) {
++                float x = i * (w + gap);
++                r.set(x, top, x + w, bottom);
++                paint.setColor(HIGH);
++                canvas.drawRoundRect(r, dp(getContext(), 6), dp(getContext(), 6), paint);
++                if (days[i] > 0) {
++                    float hgt = Math.max(dp(getContext(), 6), (bottom - top) * days[i] / (float) max);
++                    r.set(x, bottom - hgt, x + w, bottom);
++                    paint.setColor(i == 6 ? GREEN : GREEN_DARK);
++                    canvas.drawRoundRect(r, dp(getContext(), 6), dp(getContext(), 6), paint);
++                }
++                paint.setColor(i == 6 ? TEXT : MUTED);
++                if (labels[i] != null) canvas.drawText(labels[i], x + w / 2, getHeight() - dp(getContext(), 4), paint);
++            }
++        }
++    }
++
+     /** A rounded progress bar, 0..1000. */
+     static final class Bar extends View {
+         private final Paint paint = new Paint(Paint.ANTI_ALIAS_FLAG);
+diff --git a/packaging/android/java/dev/horizonlab/horizon/WorldsPage.java b/packaging/android/java/dev/horizonlab/horizon/WorldsPage.java
+new file mode 100644
+index 0000000..9fa226d
+--- /dev/null
++++ b/packaging/android/java/dev/horizonlab/horizon/WorldsPage.java
+@@ -0,0 +1,515 @@
++package dev.horizonlab.horizon;
++
++import android.app.AlertDialog;
++import android.content.ClipData;
++import android.content.ClipboardManager;
++import android.content.Context;
++import android.content.DialogInterface;
++import android.view.View;
++import android.widget.Button;
++import android.widget.EditText;
++import android.widget.LinearLayout;
++import android.widget.TextView;
++import java.io.File;
++import java.io.FileInputStream;
++import java.io.FileOutputStream;
++import java.io.InputStream;
++import java.net.HttpURLConnection;
++import java.nio.charset.StandardCharsets;
++import java.nio.file.Files;
++import java.security.MessageDigest;
++import java.util.ArrayList;
++import java.util.Collections;
++import java.util.Comparator;
++import java.util.List;
++import org.json.JSONArray;
++import org.json.JSONObject;
++
++/**
++ * Oneshot: the worlds, as the PC launcher's Worlds page: the list (export, delete), zip import,
++ * one backup of all saves, seeds (your own and the team's, SeedBook.cs) and ready maps.
++ */
++final class WorldsPage extends Page {
++    static final String CATALOG = "https://raw.githubusercontent.com/" + Net.REPO + "/main/catalog/";
++
++    private final LinearLayout list;
++    private final TextView backupInfo;
++    private final Button restore;
++    private final LinearLayout mySeeds, teamSeeds, maps;
++    private boolean teamLoaded;
++    private volatile boolean busy;
++
++    WorldsPage(final ProfileActivity a) {
++        super(a);
++        Ui.title(root, Ui.t("Миры", "Worlds"), Ui.t("Ваши сохранения, перенос между телефоном и ПК, бэкап, сиды и карты.",
++                "Your saves, moving them between the phone and the PC, a backup, seeds and maps."));
++
++        LinearLayout w = block(Ui.t("Сохранения", "Saves"));
++        list = new LinearLayout(a);
++        list.setOrientation(LinearLayout.VERTICAL);
++        w.addView(list);
++        Button in = Ui.button(a, Ui.t("Импорт мира (zip)…", "Import a world (zip)…"), false);
++        in.setOnClickListener(new View.OnClickListener() {
++            public void onClick(View v) {
++                a.pickWorldZip();
++            }
++        });
++        Button out = Ui.button(a, Ui.t("Экспорт мира…", "Export a world…"), false);
++        out.setOnClickListener(new View.OnClickListener() {
++            public void onClick(View v) {
++                a.exportDialog();
++            }
++        });
++        buttons(w, in, out);
++        note(w, Ui.t("Zip одного мира — такой же делает и лаунчер на ПК.", "A zip of one world: the PC launcher makes the same."));
++
++        LinearLayout b = block(Ui.t("Бэкап", "Backup"));
++        backupInfo = note(b, "");
++        Button make = Ui.button(a, Ui.t("Сделать бэкап", "Back up now"), true);
++        make.setOnClickListener(new View.OnClickListener() {
++            public void onClick(View v) {
++                backup();
++            }
++        });
++        restore = Ui.button(a, Ui.t("Восстановить…", "Restore…"), false);
++        restore.setOnClickListener(new View.OnClickListener() {
++            public void onClick(View v) {
++                confirmRestore();
++            }
++        });
++        buttons(b, make, restore);
++
++        LinearLayout s = block(Ui.t("Сиды", "Seeds"));
++        note(s, Ui.t("Нажмите на сид, чтобы скопировать, и вставьте его при создании мира. Свой сид — удержанием удалить.",
++                "Tap a seed to copy it, then paste it when creating a world. Hold one of yours to delete it."));
++        mySeeds = new LinearLayout(a);
++        mySeeds.setOrientation(LinearLayout.VERTICAL);
++        s.addView(mySeeds);
++        Button add = Ui.button(a, Ui.t("Добавить свой сид…", "Add your own seed…"), false);
++        add.setOnClickListener(new View.OnClickListener() {
++            public void onClick(View v) {
++                addSeed();
++            }
++        });
++        s.addView(add, Ui.gap(a, 8));
++        s.addView(Ui.caption(a, Ui.t("Сиды команды Oneshot", "Oneshot team seeds")), Ui.gap(a, 12));
++        teamSeeds = new LinearLayout(a);
++        teamSeeds.setOrientation(LinearLayout.VERTICAL);
++        s.addView(teamSeeds);
++
++        LinearLayout m = block(Ui.t("Готовые карты", "Ready maps"));
++        maps = new LinearLayout(a);
++        maps.setOrientation(LinearLayout.VERTICAL);
++        m.addView(maps);
++    }
++
++    /** Folders with a level.dat, the last played first. */
++    static List<File> worlds(File home) {
++        List<File> out = new ArrayList<>();
++        File[] all = new File(home, "saves").listFiles();
++        if (all != null) for (File f : all) if (f.isDirectory() && new File(f, "level.dat").isFile()) out.add(f);
++        Collections.sort(out, new Comparator<File>() {
++            public int compare(File x, File y) {
++                return Long.compare(new File(y, "level.dat").lastModified(), new File(x, "level.dat").lastModified());
++            }
++        });
++        return out;
++    }
++
++    @Override
++    void shown() {
++        list.removeAllViews();
++        List<File> all = worlds(a.dir);
++        if (all.isEmpty()) note(list, Ui.t("Миров пока нет: создайте первый в игре или импортируйте zip.",
++                "No worlds yet: create one in the game or import a zip."));
++        for (final File w : all) {
++            LinearLayout r = Ui.row(a);
++            r.setPadding(0, dp(6), 0, dp(6));
++            LinearLayout col = new LinearLayout(a);
++            col.setOrientation(LinearLayout.VERTICAL);
++            TextView n = Ui.text(a, w.getName(), 15, Ui.TEXT, true);
++            n.setSingleLine(true);
++            n.setEllipsize(android.text.TextUtils.TruncateAt.END);
++            col.addView(n);
++            col.addView(Ui.text(a, Ui.t("Последняя игра: ", "Last played: ") + Ui.ago(new File(w, "level.dat").lastModified()), 12, Ui.MUTED, false));
++            r.addView(col, new LinearLayout.LayoutParams(0, -2, 1));
++            TextView more = Ui.chip(a, Ui.t("Действия", "Actions"), false);
++            r.addView(more);
++            View.OnClickListener act = new View.OnClickListener() {
++                public void onClick(View v) {
++                    actions(w);
++                }
++            };
++            r.setOnClickListener(act);
++            more.setOnClickListener(act);
++            list.addView(r);
++        }
++        File bk = new File(new File(a.dir, "backups"), "saves");
++        backupInfo.setText(bk.isDirectory()
++                ? Ui.t("Последний бэкап: ", "Last backup: ") + Ui.ago(bk.lastModified()) + Ui.t(". Хранится один, новый заменяет старый.", ". One is kept; a new one replaces it.")
++                : Ui.t("Бэкапа ещё нет. Он копирует все миры в папку backups рядом с игрой.", "No backup yet. It copies every world into the backups folder beside the game."));
++        restore.setEnabled(bk.isDirectory());
++        restore.setAlpha(bk.isDirectory() ? 1f : 0.4f);
++        showMySeeds();
++        if (!teamLoaded) loadCatalog();
++    }
++
++    private void actions(final File w) {
++        new AlertDialog.Builder(a)
++                .setTitle(w.getName())
++                .setItems(new String[] {Ui.t("Экспорт в zip…", "Export as zip…"), Ui.t("Удалить…", "Delete…")},
++                        new DialogInterface.OnClickListener() {
++                            public void onClick(DialogInterface d, int which) {
++                                if (which == 0) a.exportWorld(w.getName());
++                                else confirmDelete(w);
++                            }
++                        })
++                .show();
++    }
++
++    private void confirmDelete(final File w) {
++        new AlertDialog.Builder(a)
++                .setTitle(Ui.t("Удалить мир «", "Delete the world “") + w.getName() + Ui.t("»?", "”?"))
++                .setMessage(Ui.t("Мир будет удалён с телефона насовсем. Бэкап (если есть) останется.",
++                        "The world is deleted from the phone for good. A backup, if any, stays."))
++                .setPositiveButton(Ui.t("Удалить", "Delete"), new DialogInterface.OnClickListener() {
++                    public void onClick(DialogInterface d, int x) {
++                        ProfileActivity.deleteTree(w);
++                        a.say(Ui.t("Мир удалён: ", "World deleted: ") + w.getName(), Ui.GREEN);
++                        shown();
++                    }
++                })
++                .setNegativeButton(Ui.t("Отмена", "Cancel"), null)
++                .show();
++    }
++
++    interface Job {
++        String run() throws Exception;
++    }
++
++    private void run(final Job job) {
++        if (busy) return;
++        busy = true;
++        a.say(Ui.t("Работаем…", "Working…"), Ui.WARN);
++        new Thread(new Runnable() {
++            public void run() {
++                String msg;
++                int color = Ui.GREEN;
++                try {
++                    msg = job.run();
++                } catch (Exception e) {
++                    msg = Ui.t("Не получилось: ", "Failed: ") + e.getMessage();
++                    color = Ui.BAD;
++                }
++                final String m = msg;
++                final int c = color;
++                a.runOnUiThread(new Runnable() {
++                    public void run() {
++                        busy = false;
++                        a.say(m, c);
++                        shown();
++                    }
++                });
++            }
++        }).start();
++    }
++
++    private void backup() {
++        if (PlayStats.alive) {
++            a.say(Ui.t("Сначала выйдите из мира в игре: открытый мир ещё пишется на диск.",
++                    "Leave the world in the game first: an open world is still being written."), Ui.WARN);
++            return;
++        }
++        run(new Job() {
++            public String run() throws Exception {
++                File backups = new File(a.dir, "backups");
++                File tmp = new File(backups, "saves.tmp");
++                ProfileActivity.deleteTree(tmp);
++                tmp.mkdirs();
++                long bytes = copyTree(new File(a.dir, "saves"), tmp);
++                File dst = new File(backups, "saves");
++                ProfileActivity.deleteTree(dst);
++                if (!tmp.renameTo(dst)) throw new Exception("rename");
++                dst.setLastModified(System.currentTimeMillis());
++                return Ui.t("Бэкап готов: ", "Backup done: ") + Ui.size(bytes);
++            }
++        });
++    }
++
++    private void confirmRestore() {
++        if (PlayStats.alive) {
++            a.say(Ui.t("Сначала выйдите из игры (Выйти из игры в меню).", "Quit the game first (Quit Game in the menu)."), Ui.WARN);
++            return;
++        }
++        new AlertDialog.Builder(a)
++                .setTitle(Ui.t("Восстановить миры из бэкапа?", "Restore the worlds from the backup?"))
++                .setMessage(Ui.t("Миры станут такими, как в бэкапе. Нынешние отложатся в backups/saves-replaced (предыдущие отложенные удаляются).",
++                        "The worlds become as in the backup. The current ones are put aside in backups/saves-replaced (the ones put aside before are deleted)."))
++                .setPositiveButton(Ui.t("Восстановить", "Restore"), new DialogInterface.OnClickListener() {
++                    public void onClick(DialogInterface d, int x) {
++                        run(new Job() {
++                            public String run() throws Exception {
++                                File backups = new File(a.dir, "backups");
++                                File saves = new File(a.dir, "saves");
++                                File aside = new File(backups, "saves-replaced");
++                                ProfileActivity.deleteTree(aside);
++                                if (saves.exists() && !saves.renameTo(aside)) throw new Exception("move");
++                                File tmp = new File(a.dir, "saves.restoring");
++                                ProfileActivity.deleteTree(tmp);
++                                tmp.mkdirs();
++                                copyTree(new File(backups, "saves"), tmp);
++                                if (!tmp.renameTo(saves)) throw new Exception("rename");
++                                return Ui.t("Миры восстановлены из бэкапа.", "Worlds restored from the backup.");
++                            }
++                        });
++                    }
++                })
++                .setNegativeButton(Ui.t("Отмена", "Cancel"), null)
++                .show();
++    }
++
++    static long copyTree(File from, File to) throws Exception {
++        long n = 0;
++        File[] kids = from.listFiles();
++        if (kids == null) return 0;
++        to.mkdirs();
++        for (File k : kids) {
++            File d = new File(to, k.getName());
++            if (k.isDirectory()) {
++                n += copyTree(k, d);
++            } else if (!k.getName().equals("session.lock")) {
++                Files.copy(k.toPath(), d.toPath(), java.nio.file.StandardCopyOption.REPLACE_EXISTING);
++                n += k.length();
++            }
++        }
++        return n;
++    }
++
++    // ---- Seeds --------------------------------------------------------------------------------
++
++    private File seedFile() {
++        return new File(a.getFilesDir(), "my-seeds.txt");
++    }
++
++    private void showMySeeds() {
++        mySeeds.removeAllViews();
++        final List<String> lines = PackShare.lines(seedFile());
++        int shown = 0;
++        for (int i = 0; i < lines.size(); i++) {
++            String l = lines.get(i);
++            int tab = l.indexOf('\t');
++            if (tab <= 0) continue;
++            final int index = i;
++            View r = seedRow(l.substring(0, tab), l.substring(tab + 1), "");
++            r.setOnLongClickListener(new View.OnLongClickListener() {
++                public boolean onLongClick(View v) {
++                    lines.remove(index);
++                    saveSeeds(lines);
++                    showMySeeds();
++                    a.say(Ui.t("Сид удалён.", "Seed deleted."), Ui.GREEN);
++                    return true;
++                }
++            });
++            mySeeds.addView(r);
++            shown++;
++        }
++        if (shown == 0) note(mySeeds, Ui.t("Своих сидов пока нет.", "No seeds of your own yet."));
++    }
++
++    private void saveSeeds(List<String> lines) {
++        StringBuilder b = new StringBuilder();
++        for (String l : lines) if (!l.trim().isEmpty()) b.append(l).append('\n');
++        try {
++            Files.write(seedFile().toPath(), b.toString().getBytes(StandardCharsets.UTF_8));
++        } catch (Exception ignored) {
++        }
++    }
++
++    private View seedRow(String name, final String seed, String note) {
++        LinearLayout r = Ui.row(a);
++        r.setPadding(0, dp(6), 0, dp(6));
++        LinearLayout col = new LinearLayout(a);
++        col.setOrientation(LinearLayout.VERTICAL);
++        col.addView(Ui.text(a, name, 14, Ui.TEXT, true));
++        if (!note.isEmpty()) col.addView(Ui.text(a, note, 12, Ui.MUTED, false));
++        r.addView(col, new LinearLayout.LayoutParams(0, -2, 1));
++        TextView s = Ui.chip(a, seed, false);
++        s.setTypeface(android.graphics.Typeface.MONOSPACE);
++        s.setSingleLine(true);
++        s.setMaxWidth(dp(220));
++        s.setEllipsize(android.text.TextUtils.TruncateAt.END);
++        r.addView(s);
++        r.setOnClickListener(new View.OnClickListener() {
++            public void onClick(View v) {
++                ClipboardManager cm = (ClipboardManager) a.getSystemService(Context.CLIPBOARD_SERVICE);
++                if (cm != null) cm.setPrimaryClip(ClipData.newPlainText("seed", seed));
++                a.say(Ui.t("Сид скопирован: ", "Seed copied: ") + seed, Ui.GREEN);
++            }
++        });
++        return r;
++    }
++
++    private void addSeed() {
++        LinearLayout box = new LinearLayout(a);
++        box.setOrientation(LinearLayout.VERTICAL);
++        box.setPadding(dp(20), dp(8), dp(20), 0);
++        final EditText name = Ui.field(a, Ui.t("Название", "Name"));
++        final EditText seed = Ui.field(a, Ui.t("Сид", "Seed"));
++        box.addView(name);
++        box.addView(seed, Ui.gap(a, 8));
++        new AlertDialog.Builder(a)
++                .setTitle(Ui.t("Свой сид", "Your seed"))
++                .setView(box)
++                .setPositiveButton(Ui.t("Сохранить", "Save"), new DialogInterface.OnClickListener() {
++                    public void onClick(DialogInterface d, int x) {
++                        String n = name.getText().toString().replaceAll("[\\t\\r\\n]", " ").trim();
++                        String s = seed.getText().toString().replaceAll("\\s", "");
++                        if (s.isEmpty()) return;
++                        if (n.isEmpty()) n = Ui.t("Без названия", "Untitled");
++                        List<String> lines = PackShare.lines(seedFile());
++                        lines.add(n + "\t" + s);
++                        saveSeeds(lines);
++                        showMySeeds();
++                    }
++                })
++                .setNegativeButton(Ui.t("Отмена", "Cancel"), null)
++                .show();
++    }
++
++    // ---- The team's catalog: seeds.json and maps.json -----------------------------------------
++
++    private void loadCatalog() {
++        teamLoaded = true;
++        teamSeeds.removeAllViews();
++        maps.removeAllViews();
++        note(teamSeeds, Ui.t("Загружаем…", "Loading…"));
++        note(maps, Ui.t("Загружаем…", "Loading…"));
++        new Thread(new Runnable() {
++            public void run() {
++                JSONArray seeds = null, mapList = null;
++                String failSeeds = null, failMaps = null;
++                try {
++                    seeds = new JSONObject(Net.get(CATALOG + "seeds.json")).optJSONArray("seeds");
++                } catch (Exception e) {
++                    failSeeds = e.getMessage();
++                }
++                try {
++                    mapList = new JSONObject(Net.get(CATALOG + "maps.json")).optJSONArray("maps");
++                } catch (Exception e) {
++                    failMaps = e.getMessage();
++                }
++                final JSONArray s = seeds, m = mapList;
++                final String fs = failSeeds, fm = failMaps;
++                a.runOnUiThread(new Runnable() {
++                    public void run() {
++                        if (a.isFinishing()) return;
++                        showTeamSeeds(s, fs);
++                        showMaps(m, fm);
++                    }
++                });
++            }
++        }).start();
++    }
++
++    private String unavailable(String error) {
++        if (error != null && error.contains("404")) return Ui.t("Пока не опубликовано командой.", "Not published by the team yet.");
++        teamLoaded = false;
++        return Ui.t("Нет связи — попробуйте позже.", "No connection: try later.");
++    }
++
++    private void showTeamSeeds(JSONArray s, String error) {
++        teamSeeds.removeAllViews();
++        if (s == null || s.length() == 0) {
++            note(teamSeeds, s == null ? unavailable(error) : Ui.t("Список пуст.", "The list is empty."));
++            return;
++        }
++        for (int i = 0; i < s.length(); i++) {
++            JSONObject o = s.optJSONObject(i);
++            if (o == null) continue;
++            String seed = o.optString("seed", "");
++            if (seed.isEmpty()) continue;
++            teamSeeds.addView(seedRow(o.optString("name", seed), seed, o.optString("note", "")));
++        }
++    }
++
++    private void showMaps(JSONArray m, String error) {
++        maps.removeAllViews();
++        if (m == null || m.length() == 0) {
++            note(maps, m == null ? unavailable(error) : Ui.t("Список пуст.", "The list is empty."));
++            return;
++        }
++        for (int i = 0; i < m.length(); i++) {
++            JSONObject o = m.optJSONObject(i);
++            if (o == null) continue;
++            final String name = o.optString("name", "");
++            final String url = o.optString("url", "");
++            final String sha = o.optString("sha256", "").toLowerCase(java.util.Locale.ROOT);
++            // Only an https link with a checksum: the file is checked before it becomes a world.
++            if (name.isEmpty() || !url.startsWith("https://") || !sha.matches("[0-9a-f]{64}")) continue;
++            long size = o.optLong("size", 0);
++            LinearLayout r = Ui.row(a);
++            r.setPadding(0, dp(6), 0, dp(6));
++            LinearLayout col = new LinearLayout(a);
++            col.setOrientation(LinearLayout.VERTICAL);
++            col.addView(Ui.text(a, name, 14, Ui.TEXT, true));
++            String note = o.optString("note", "");
++            if (size > 0) note = (note.isEmpty() ? "" : note + " · ") + Ui.size(size);
++            if (!note.isEmpty()) col.addView(Ui.text(a, note, 12, Ui.MUTED, false));
++            r.addView(col, new LinearLayout.LayoutParams(0, -2, 1));
++            TextView get = Ui.chip(a, Ui.t("Скачать", "Download"), true);
++            get.setOnClickListener(new View.OnClickListener() {
++                public void onClick(View v) {
++                    download(name, url, sha);
++                }
++            });
++            r.addView(get);
++            maps.addView(r);
++        }
++        if (maps.getChildCount() == 0) note(maps, Ui.t("Список пуст.", "The list is empty."));
++    }
++
++    private void download(final String name, final String url, final String sha) {
++        run(new Job() {
++            public String run() throws Exception {
++                File tmp = new File(a.getCacheDir(), "map-download.zip");
++                MessageDigest md = MessageDigest.getInstance("SHA-256");
++                HttpURLConnection c = Net.open(url);
++                long got = 0, total = c.getContentLengthLong();
++                try (InputStream in = c.getInputStream(); FileOutputStream out = new FileOutputStream(tmp)) {
++                    byte[] buf = new byte[65536];
++                    int n;
++                    long shown = 0;
++                    while ((n = in.read(buf)) > 0) {
++                        out.write(buf, 0, n);
++                        md.update(buf, 0, n);
++                        got += n;
++                        if (got > (2L << 30)) throw new Exception(Ui.t("карта больше 2 ГБ", "the map is over 2 GB"));
++                        if (got - shown > (1 << 20)) {
++                            shown = got;
++                            final String p = Ui.t("Скачиваем «", "Downloading “") + name + Ui.t("»: ", "”: ") + Ui.size(got)
++                                    + (total > 0 ? " / " + Ui.size(total) : "");
++                            a.runOnUiThread(new Runnable() {
++                                public void run() {
++                                    a.say(p, Ui.WARN);
++                                }
++                            });
++                        }
++                    }
++                } finally {
++                    c.disconnect();
++                }
++                try {
++                    if (!Net.hex(md.digest()).equals(sha)) throw new Exception(Ui.t("файл не совпал с контрольной суммой", "the file does not match its checksum"));
++                    String world;
++                    try (InputStream in = new FileInputStream(tmp)) {
++                        world = a.importWorld(in);
++                    }
++                    if (world == null) throw new Exception(Ui.t("в архиве нет мира", "no world in the archive"));
++                    return Ui.t("Карта добавлена: ", "Map added: ") + world;
++                } finally {
++                    tmp.delete();
++                }
++            }
++        });
++    }
++}
