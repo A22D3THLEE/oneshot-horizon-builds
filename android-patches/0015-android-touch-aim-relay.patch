@@ -1,0 +1,44 @@
+--- a/crates/horizon-client/src/android_main.rs	2026-11-10 21:52:25.918165900 +0300
++++ b/crates/horizon-client/src/android_main.rs	2026-11-10 21:52:25.968818900 +0300
+@@ -66,6 +66,17 @@
+                 std::env::set_var("HORIZON_SERVER", code);
+             }
+         }
++        // Oneshot's relay, as the PC launcher sets it: a fallback when friends cannot reach each
++        // other directly (mobile internet, CGNAT). `relay.txt` in the game folder overrides it;
++        // an empty file turns the relay off.
++        if std::env::var_os("HORIZON_RELAY_URL").is_none() {
++            let relay = std::fs::read_to_string(home.join("relay.txt"))
++                .map(|t| t.trim().to_string())
++                .unwrap_or_else(|_| "166.1.36.218:7000".to_string());
++            if !relay.is_empty() {
++                std::env::set_var("HORIZON_RELAY_URL", relay);
++            }
++        }
+     }
+     let _ = std::fs::create_dir_all(home.join("..").join("cache"));
+     let _ = std::env::set_current_dir(&home);
+--- a/crates/horizon-client/src/game/touch.rs	2026-11-10 21:51:35.434566400 +0300
++++ b/crates/horizon-client/src/game/touch.rs	2026-11-10 21:51:35.470573300 +0300
+@@ -43,9 +43,9 @@
+ /// Held this long without moving, a look finger breaks blocks.
+ const HOLD_MS: u128 = 280;
+ /// Moved further than this (GUI pixels), a look finger is no tap or hold.
+-const SLOP: f64 = 4.0;
+-/// 0.4.3 starts on the D-pad layout: a new file, the old one stays untouched.
+-const LAYOUT_FILE: &str = "touch_layout_v2.json";
++const SLOP: f64 = 8.0;
++/// A new file whenever the defaults change (v3: Bedrock layout acts where the finger is).
++const LAYOUT_FILE: &str = "touch_layout_v3.json";
+ 
+ /// What a finger is doing, from where it went down.
+ #[derive(Clone, Copy, Debug)]
+@@ -254,7 +254,7 @@
+         controls.insert(Id::Pause, at(w / 2.0 + 26.0, 14.0, 12.0));
+         controls.insert(Id::Edit, at(w - 38.0, 14.0, 10.0));
+         let controls = layout.controls;
+-        Self { opacity: 0.85, controls, preset: Preset::Bedrock, pass_through: true, aim: Aim::Crosshair }
++        Self { opacity: 0.85, controls, preset: Preset::Bedrock, pass_through: true, aim: Aim::Touch }
+     }
+ 
+     /// Laid out on a 560 x 270 GUI (a 20:9 phone at GUI scale 4).
