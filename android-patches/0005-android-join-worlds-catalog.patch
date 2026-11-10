@@ -1,0 +1,1117 @@
+diff --git a/crates/horizon-client/src/android_main.rs b/crates/horizon-client/src/android_main.rs
+index 823aca0..c53b78a 100644
+--- a/crates/horizon-client/src/android_main.rs
++++ b/crates/horizon-client/src/android_main.rs
+@@ -56,6 +56,16 @@ fn android_main(app: AndroidApp) {
+         {
+             std::env::set_var("HORIZON_SPIKES", text.trim());
+         }
++        // `join.txt` (written by the launcher screen's PLAY button, one start only): friend:CODE,
++        // steam:CODE or HOST[:PORT] -> the game opens that session like `--server` does on a PC.
++        let join = home.join("join.txt");
++        if let Ok(text) = std::fs::read_to_string(&join) {
++            let _ = std::fs::remove_file(&join);
++            let code = text.trim();
++            if !code.is_empty() {
++                std::env::set_var("HORIZON_SERVER", code);
++            }
++        }
+     }
+     let _ = std::fs::create_dir_all(home.join("..").join("cache"));
+     let _ = std::env::set_current_dir(&home);
+diff --git a/crates/horizon-client/src/game.rs b/crates/horizon-client/src/game.rs
+index 2d14870..daa96e9 100644
+--- a/crates/horizon-client/src/game.rs
++++ b/crates/horizon-client/src/game.rs
+@@ -741,7 +741,7 @@ impl Options {
+             spikes: std::env::var("HORIZON_SPIKES")
+                 .ok()
+                 .and_then(|v| v.parse().ok()),
+-            server: None,
++            server: std::env::var("HORIZON_SERVER").ok().filter(|s| !s.is_empty()),
+             player_name: std::env::var("HORIZON_PLAYER_NAME")
+                 .ok()
+                 .filter(|n| !n.is_empty()),
+diff --git a/packaging/android/AndroidManifest.xml b/packaging/android/AndroidManifest.xml
+index 80c36eb..7f9863c 100644
+--- a/packaging/android/AndroidManifest.xml
++++ b/packaging/android/AndroidManifest.xml
+@@ -50,6 +50,13 @@
+             android:screenOrientation="sensorLandscape"
+             android:configChanges="orientation|screenSize|screenLayout|keyboardHidden|keyboard|navigation|uiMode|smallestScreenSize"
+             android:windowSoftInputMode="adjustPan|stateHidden" />
++        <activity
++            android:name=".CatalogActivity"
++            android:exported="false"
++            android:theme="@style/HorizonProfile"
++            android:screenOrientation="sensorLandscape"
++            android:configChanges="orientation|screenSize|screenLayout|keyboardHidden|keyboard|navigation|uiMode"
++            android:windowSoftInputMode="adjustPan|stateHidden" />
+         <activity
+             android:name=".MsaLoginActivity"
+             android:exported="false"
+diff --git a/packaging/android/java/dev/horizonlab/horizon/CatalogActivity.java b/packaging/android/java/dev/horizonlab/horizon/CatalogActivity.java
+new file mode 100644
+index 0000000..34bbb49
+--- /dev/null
++++ b/packaging/android/java/dev/horizonlab/horizon/CatalogActivity.java
+@@ -0,0 +1,669 @@
++package dev.horizonlab.horizon;
++
++import android.app.Activity;
++import android.graphics.Bitmap;
++import android.graphics.BitmapFactory;
++import android.graphics.Color;
++import android.graphics.drawable.BitmapDrawable;
++import android.os.Bundle;
++import android.os.Handler;
++import android.os.Looper;
++import android.view.Gravity;
++import android.view.View;
++import android.view.WindowManager;
++import android.widget.Button;
++import android.widget.EditText;
++import android.widget.HorizontalScrollView;
++import android.widget.ImageView;
++import android.widget.LinearLayout;
++import android.widget.ScrollView;
++import android.widget.TextView;
++import java.io.ByteArrayOutputStream;
++import java.io.File;
++import java.io.FileOutputStream;
++import java.io.InputStream;
++import java.net.HttpURLConnection;
++import java.net.URL;
++import java.net.URLEncoder;
++import java.nio.charset.StandardCharsets;
++import java.nio.file.Files;
++import java.security.MessageDigest;
++import java.util.ArrayList;
++import java.util.HashMap;
++import java.util.List;
++import java.util.Locale;
++import java.util.Map;
++import java.util.concurrent.ExecutorService;
++import java.util.concurrent.Executors;
++import org.json.JSONArray;
++import org.json.JSONObject;
++
++/**
++ * The OneShot launcher's catalogs on the phone (Catalog.cs): skins and capes from MineSkin and
++ * Mojang, resource packs from Modrinth and Horizon's own registry of mods and packs. A skin or a
++ * cape is worn at once (the same files the profile screen writes); a pack or a mod is downloaded,
++ * its checksum checked, and put in the game folder.
++ */
++public class CatalogActivity extends Activity {
++    private static final String GAME_VERSION = "26.3";
++    private static final String REGISTRY = "https://horizon-rust.github.io/horizon-mods/index.json";
++    private static final int PAGE = 24;
++    private static final int SKINS = 0, CAPES = 1, PACKS = 2, MODS = 3;
++
++    private final ExecutorService pool = Executors.newFixedThreadPool(4);
++    private final Handler ui = new Handler(Looper.getMainLooper());
++    private final Map<String, Bitmap> pictures = new HashMap<String, Bitmap>();
++    private File dir;
++    private int tab = SKINS;
++    private int generation;          // a search started later makes older answers stale
++    private String next;             // paging token of the current list; null at the end
++    private EditText query;
++    private LinearLayout list;
++    private TextView status;
++    private Button[] tabs = new Button[4];
++    private Button more;
++
++    /** One result. */
++    private static final class Item {
++        String id, title, sub, picture, file, fileName, hash, hashKind, signedUrl, kind;
++        boolean cape, slim, hasSlim;
++        long downloads;
++    }
++
++    @Override
++    protected void onCreate(Bundle state) {
++        super.onCreate(state);
++        dir = new File(SetupActivity.home(this));
++        getWindow().setSoftInputMode(WindowManager.LayoutParams.SOFT_INPUT_ADJUST_PAN
++                | WindowManager.LayoutParams.SOFT_INPUT_STATE_HIDDEN);
++        int p = Ui.dp(this, 12);
++
++        LinearLayout root = new LinearLayout(this);
++        root.setOrientation(LinearLayout.VERTICAL);
++        root.setBackgroundColor(Ui.BG);
++        root.setPadding(Ui.dp(this, 16), Ui.dp(this, 12), Ui.dp(this, 16), Ui.dp(this, 12));
++
++        LinearLayout head = new LinearLayout(this);
++        head.setOrientation(LinearLayout.HORIZONTAL);
++        head.setGravity(Gravity.CENTER_VERTICAL);
++        Button back = Ui.button(this, Ui.t("← Назад", "← Back"), false);
++        back.setOnClickListener(new View.OnClickListener() {
++            public void onClick(View v) {
++                finish();
++            }
++        });
++        head.addView(back);
++        TextView title = Ui.text(this, Ui.t("Каталог", "Catalog"), 22, Ui.TEXT, true);
++        LinearLayout.LayoutParams tl = new LinearLayout.LayoutParams(0, -2, 1);
++        tl.leftMargin = p;
++        head.addView(title, tl);
++        root.addView(head);
++
++        HorizontalScrollView tabScroll = new HorizontalScrollView(this);
++        tabScroll.setHorizontalScrollBarEnabled(false);
++        LinearLayout tabRow = new LinearLayout(this);
++        tabRow.setOrientation(LinearLayout.HORIZONTAL);
++        String[] names = {Ui.t("Скины", "Skins"), Ui.t("Плащи", "Capes"),
++            Ui.t("Ресурспаки", "Resource packs"), Ui.t("Моды Horizon", "Horizon mods")};
++        for (int i = 0; i < 4; i++) {
++            final int which = i;
++            tabs[i] = Ui.button(this, names[i], false);
++            tabs[i].setOnClickListener(new View.OnClickListener() {
++                public void onClick(View v) {
++                    selectTab(which);
++                }
++            });
++            LinearLayout.LayoutParams lp = new LinearLayout.LayoutParams(-2, -2);
++            if (i > 0) lp.leftMargin = Ui.dp(this, 8);
++            tabRow.addView(tabs[i], lp);
++        }
++        tabScroll.addView(tabRow);
++        root.addView(tabScroll, Ui.gap(this, 10));
++
++        LinearLayout search = new LinearLayout(this);
++        search.setOrientation(LinearLayout.HORIZONTAL);
++        query = new EditText(this);
++        query.setSingleLine(true);
++        query.setTextColor(Ui.TEXT);
++        query.setHintTextColor(Ui.MUTED);
++        query.setTextSize(15);
++        query.setPadding(p, Ui.dp(this, 8), p, Ui.dp(this, 8));
++        query.setBackground(Ui.rounded(this, Ui.HIGH, Ui.EDGE, 8));
++        query.setImeOptions(android.view.inputmethod.EditorInfo.IME_ACTION_SEARCH
++                | android.view.inputmethod.EditorInfo.IME_FLAG_NO_EXTRACT_UI);
++        query.setOnEditorActionListener(new android.widget.TextView.OnEditorActionListener() {
++            public boolean onEditorAction(TextView v, int action, android.view.KeyEvent e) {
++                runSearch();
++                return true;
++            }
++        });
++        search.addView(query, new LinearLayout.LayoutParams(0, -2, 1));
++        Button go = Ui.button(this, Ui.t("Найти", "Search"), true);
++        go.setMinHeight(Ui.dp(this, 44));
++        go.setTextSize(15);
++        go.setOnClickListener(new View.OnClickListener() {
++            public void onClick(View v) {
++                runSearch();
++            }
++        });
++        LinearLayout.LayoutParams gl = new LinearLayout.LayoutParams(-2, -2);
++        gl.leftMargin = Ui.dp(this, 8);
++        search.addView(go, gl);
++        root.addView(search, Ui.gap(this, 10));
++
++        status = Ui.text(this, "", 12, Ui.MUTED, false);
++        root.addView(status, Ui.gap(this, 4));
++
++        ScrollView scroll = new ScrollView(this);
++        scroll.setVerticalScrollBarEnabled(false);
++        list = new LinearLayout(this);
++        list.setOrientation(LinearLayout.VERTICAL);
++        scroll.addView(list);
++        root.addView(scroll, new LinearLayout.LayoutParams(-1, 0, 1));
++
++        more = Ui.button(this, Ui.t("Ещё", "More"), false);
++        more.setOnClickListener(new View.OnClickListener() {
++            public void onClick(View v) {
++                load(false);
++            }
++        });
++        setContentView(root);
++        selectTab(SKINS);
++    }
++
++    @Override
++    protected void onDestroy() {
++        generation++;
++        pool.shutdownNow();
++        super.onDestroy();
++    }
++
++    private void selectTab(int which) {
++        tab = which;
++        for (int i = 0; i < 4; i++) {
++            boolean on = i == which;
++            tabs[i].setBackground(on ? Ui.rounded(this, Ui.GREEN, 0, 10) : Ui.rounded(this, Ui.HIGH, Ui.EDGE, 10));
++            tabs[i].setTextColor(on ? Ui.ON_ACCENT : Ui.TEXT);
++        }
++        query.setText("");
++        query.setHint(which == SKINS ? Ui.t("Название или ник игрока", "Name or a player's name")
++                : which == CAPES ? Ui.t("Название плаща", "Cape name") : Ui.t("Поиск", "Search"));
++        runSearch();
++    }
++
++    private void runSearch() {
++        next = null;
++        load(true);
++    }
++
++    // ------------------------------------------------------------------ loading
++
++    private void load(final boolean fresh) {
++        final int gen = ++generation;
++        final int which = tab;
++        final String q = query.getText().toString().trim();
++        final String after = fresh ? null : next;
++        if (fresh) list.removeAllViews();
++        list.removeView(more);
++        status.setText(Ui.t("Загрузка…", "Loading…"));
++        pool.execute(new Runnable() {
++            public void run() {
++                final List<Item> items = new ArrayList<Item>();
++                String err = null;
++                String token = null;
++                try {
++                    if (which == SKINS) token = skins(q, after, items);
++                    else if (which == CAPES) capes(q, items);
++                    else if (which == PACKS) token = packs(q, after, items);
++                    else mods(q, items);
++                } catch (Exception e) {
++                    err = e.getMessage() == null ? e.toString() : e.getMessage();
++                }
++                final String error = err, nextToken = token;
++                ui.post(new Runnable() {
++                    public void run() {
++                        if (gen != generation) return;
++                        if (error != null) {
++                            status.setText(Ui.t("Не загрузилось: ", "Could not load: ") + error);
++                            return;
++                        }
++                        next = nextToken;
++                        status.setText(items.isEmpty() && list.getChildCount() == 0
++                                ? Ui.t("Ничего не найдено.", "Nothing found.") : "");
++                        for (Item it : items) list.addView(row(it), Ui.gap(CatalogActivity.this, 8));
++                        if (next != null) list.addView(more, Ui.gap(CatalogActivity.this, 10));
++                    }
++                });
++            }
++        });
++    }
++
++    private String skins(String q, String after, List<Item> out) throws Exception {
++        String url = "https://api.mineskin.org/v2/skins?size=" + PAGE
++                + (q.isEmpty() ? "" : "&filter=" + enc(q)) + (after == null ? "" : "&after=" + enc(after));
++        if (after == null && q.matches("[A-Za-z0-9_]{3,16}")) {
++            try {
++                player(q, out);
++            } catch (Exception ignored) {
++            }
++        }
++        JSONObject root = new JSONObject(getString(url));
++        JSONArray arr = root.optJSONArray("skins");
++        for (int i = 0; arr != null && i < arr.length(); i++) {
++            JSONObject s = arr.getJSONObject(i);
++            String tex = s.optString("texture", "");
++            if (!tex.matches("[0-9a-f]{20,80}")) continue;
++            Item it = new Item();
++            it.id = s.optString("uuid", "");
++            it.title = s.optString("name", "").isEmpty() ? Ui.t("Без названия", "Unnamed") : s.optString("name");
++            it.picture = "https://textures.minecraft.net/texture/" + tex;
++            it.signedUrl = "https://api.mineskin.org/v2/skins/" + enc(it.id);
++            out.add(it);
++        }
++        JSONObject nx = root.optJSONObject("pagination");
++        String token = null;
++        if (nx != null && nx.optJSONObject("next") != null) token = nx.getJSONObject("next").optString("after", null);
++        return arr == null || arr.length() == 0 ? null : token;
++    }
++
++    /** A player's skin and cape as Mojang has them. */
++    private void player(String name, List<Item> out) throws Exception {
++        String profile = getString("https://api.mojang.com/users/profiles/minecraft/" + enc(name));
++        if (profile.isEmpty()) return;
++        JSONObject p = new JSONObject(profile);
++        String id = p.optString("id", ""), real = p.optString("name", name);
++        if (id.isEmpty()) return;
++        JSONObject session = new JSONObject(getString("https://sessionserver.mojang.com/session/minecraft/profile/" + id));
++        JSONArray props = session.optJSONArray("properties");
++        for (int i = 0; props != null && i < props.length(); i++) {
++            JSONObject prop = props.getJSONObject(i);
++            if (!"textures".equals(prop.optString("name"))) continue;
++            JSONObject tex = new JSONObject(new String(android.util.Base64.decode(prop.getString("value"),
++                    android.util.Base64.DEFAULT), StandardCharsets.UTF_8)).optJSONObject("textures");
++            if (tex == null) continue;
++            JSONObject skin = tex.optJSONObject("SKIN");
++            if (skin != null) {
++                Item it = new Item();
++                it.id = real;
++                it.title = Ui.t("Скин игрока ", "Skin of ") + real;
++                it.picture = https(skin.optString("url"));
++                JSONObject meta = skin.optJSONObject("metadata");
++                it.hasSlim = true;
++                it.slim = meta != null && "slim".equals(meta.optString("model"));
++                it.signedUrl = "https://sessionserver.mojang.com/session/minecraft/profile/" + id + "?unsigned=false";
++                out.add(it);
++            }
++            JSONObject cape = tex.optJSONObject("CAPE");
++            if (cape != null) {
++                Item it = new Item();
++                it.id = real;
++                it.cape = true;
++                it.title = Ui.t("Плащ игрока ", "Cape of ") + real;
++                it.picture = https(cape.optString("url"));
++                out.add(it);
++            }
++        }
++    }
++
++    private void capes(String q, List<Item> out) throws Exception {
++        JSONObject root = new JSONObject(getString("https://api.mineskin.org/v2/capes"));
++        JSONArray arr = root.optJSONArray("capes");
++        for (int i = 0; arr != null && i < arr.length(); i++) {
++            JSONObject c = arr.getJSONObject(i);
++            String alias = c.optString("alias", ""), url = c.optString("url", "");
++            if (alias.isEmpty() || !url.contains("textures.minecraft.net/texture/")) continue;
++            if (!q.isEmpty() && !alias.toLowerCase(Locale.ROOT).contains(q.toLowerCase(Locale.ROOT))) continue;
++            Item it = new Item();
++            it.id = alias;
++            it.title = alias;
++            it.cape = true;
++            it.picture = https(url);
++            out.add(it);
++        }
++    }
++
++    private String packs(String q, String after, List<Item> out) throws Exception {
++        int offset = 0;
++        try {
++            if (after != null) offset = Integer.parseInt(after);
++        } catch (NumberFormatException ignored) {
++        }
++        String facets = "[[\"project_type:resourcepack\"],[\"versions:" + GAME_VERSION + "\"]]";
++        String url = "https://api.modrinth.com/v2/search?limit=" + PAGE + "&offset=" + offset
++                + "&index=" + (q.isEmpty() ? "downloads" : "relevance") + "&facets=" + enc(facets)
++                + (q.isEmpty() ? "" : "&query=" + enc(q));
++        JSONObject root = new JSONObject(getString(url));
++        JSONArray hits = root.optJSONArray("hits");
++        for (int i = 0; hits != null && i < hits.length(); i++) {
++            JSONObject h = hits.getJSONObject(i);
++            Item it = new Item();
++            it.kind = "pack";
++            it.id = h.optString("project_id");
++            it.title = h.optString("title");
++            it.sub = h.optString("author") + " · " + downloads(h.optLong("downloads")) + "\n" + h.optString("description");
++            it.picture = h.optString("icon_url", "");
++            out.add(it);
++        }
++        int reached = offset + (hits == null ? 0 : hits.length());
++        return hits != null && hits.length() == PAGE && reached < root.optInt("total_hits") ? String.valueOf(reached) : null;
++    }
++
++    private void mods(String q, List<Item> out) throws Exception {
++        JSONObject root = new JSONObject(getString(REGISTRY));
++        if (root.optInt("schema") > 1) throw new Exception(Ui.t("Каталог новее лаунчера", "The catalog is newer than this app"));
++        List<String> revoked = new ArrayList<String>();
++        JSONArray rev = root.optJSONArray("revoked");
++        for (int i = 0; rev != null && i < rev.length(); i++) revoked.add(rev.getJSONObject(i).optString("sha256").toLowerCase(Locale.ROOT));
++        JSONArray projects = root.optJSONArray("projects");
++        for (int i = 0; projects != null && i < projects.length(); i++) {
++            JSONObject pr = projects.getJSONObject(i);
++            String kind = pr.optString("kind");
++            if (!kind.equals("mod") && !kind.equals("resourcepack") && !kind.equals("shader")) continue;
++            JSONArray vs = pr.optJSONArray("versions");
++            JSONObject ver = null;
++            for (int j = 0; vs != null && j < vs.length(); j++) {
++                if (GAME_VERSION.equals(vs.getJSONObject(j).optString("game"))) {
++                    ver = vs.getJSONObject(j);
++                    break;
++                }
++            }
++            if (ver == null || ver.optJSONObject("file") == null) continue;
++            JSONObject f = ver.getJSONObject("file");
++            String sha = f.optString("sha256").toLowerCase(Locale.ROOT);
++            if (sha.length() != 64 || revoked.contains(sha)) continue;
++            Item it = new Item();
++            it.kind = kind;
++            it.id = pr.optString("id");
++            it.title = pr.optString("name") + " " + ver.optString("version");
++            StringBuilder authors = new StringBuilder();
++            JSONArray au = pr.optJSONArray("authors");
++            for (int k = 0; au != null && k < au.length(); k++) authors.append(k > 0 ? ", " : "").append(au.optString(k));
++            it.sub = authors + " · " + downloads(pr.optLong("downloads")) + "\n"
++                    + (kind.equals("mod") ? "" : (kind.equals("shader") ? Ui.t("шейдеры", "shader") : Ui.t("ресурспак", "pack")) + " · ")
++                    + pr.optString("summary");
++            if (!q.isEmpty() && !(it.title + " " + it.sub).toLowerCase(Locale.ROOT).contains(q.toLowerCase(Locale.ROOT))) continue;
++            it.picture = pr.optString("icon", "");
++            it.file = f.optString("url");
++            it.fileName = f.optString("name");
++            it.hash = sha;
++            it.hashKind = "SHA-256";
++            it.downloads = pr.optLong("downloads");
++            out.add(it);
++        }
++        java.util.Collections.sort(out, new java.util.Comparator<Item>() {
++            public int compare(Item a, Item b) {
++                return a.downloads == b.downloads ? 0 : a.downloads < b.downloads ? 1 : -1;
++            }
++        });
++    }
++
++    private static String downloads(long n) {
++        return n >= 1000000 ? String.format(Locale.ROOT, "%.1fM", n / 1e6) : n >= 1000 ? (n / 1000) + "k" : String.valueOf(n);
++    }
++
++    // ------------------------------------------------------------------ rows
++
++    private View row(final Item it) {
++        LinearLayout r = new LinearLayout(this);
++        r.setOrientation(LinearLayout.HORIZONTAL);
++        r.setGravity(Gravity.CENTER_VERTICAL);
++        int p = Ui.dp(this, 10);
++        r.setPadding(p, p, p, p);
++        r.setBackground(Ui.rounded(this, Ui.CARD, Ui.EDGE, 12));
++        final ImageView pic = new ImageView(this);
++        pic.setScaleType(ImageView.ScaleType.FIT_CENTER);
++        pic.setBackground(Ui.rounded(this, Ui.HIGH, 0, 8));
++        int sz = Ui.dp(this, 64);
++        r.addView(pic, new LinearLayout.LayoutParams(sz, sz));
++        LinearLayout text = new LinearLayout(this);
++        text.setOrientation(LinearLayout.VERTICAL);
++        LinearLayout.LayoutParams tl = new LinearLayout.LayoutParams(0, -2, 1);
++        tl.leftMargin = Ui.dp(this, 12);
++        tl.rightMargin = Ui.dp(this, 8);
++        TextView t = Ui.text(this, it.title == null ? "" : it.title, 16, Ui.TEXT, true);
++        t.setMaxLines(2);
++        text.addView(t);
++        if (it.sub != null && !it.sub.isEmpty()) {
++            TextView s = Ui.text(this, it.sub, 12, Ui.MUTED, false);
++            s.setMaxLines(3);
++            s.setEllipsize(android.text.TextUtils.TruncateAt.END);
++            text.addView(s);
++        }
++        r.addView(text, tl);
++        final Button act = Ui.button(this, it.kind != null ? Ui.t("Установить", "Install")
++                : it.cape ? Ui.t("Надеть плащ", "Wear cape") : Ui.t("Надеть", "Wear"), true);
++        act.setMinHeight(Ui.dp(this, 44));
++        act.setTextSize(15);
++        act.setOnClickListener(new View.OnClickListener() {
++            public void onClick(View v) {
++                act(it, act);
++            }
++        });
++        r.addView(act);
++        picture(it, pic);
++        return r;
++    }
++
++    private void picture(final Item it, final ImageView target) {
++        if (it.picture == null || it.picture.isEmpty()) return;
++        Bitmap have = pictures.get(it.picture);
++        if (have != null) {
++            target.setImageBitmap(have);
++            return;
++        }
++        final int gen = generation;
++        pool.execute(new Runnable() {
++            public void run() {
++                try {
++                    byte[] bytes = getBytes(it.picture, 4 << 20);
++                    BitmapFactory.Options o = new BitmapFactory.Options();
++                    o.inScaled = false;
++                    Bitmap b = BitmapFactory.decodeByteArray(bytes, 0, bytes.length, o);
++                    if (b == null) return;
++                    final Bitmap shown = it.kind == null && !it.cape ? face(b) : scaleUp(b);
++                    ui.post(new Runnable() {
++                        public void run() {
++                            pictures.put(it.picture, shown);
++                            target.setImageBitmap(shown);
++                        }
++                    });
++                } catch (Exception ignored) {
++                }
++            }
++        });
++    }
++
++    /** A skin's face with its hat layer, large and sharp. */
++    private static Bitmap face(Bitmap skin) {
++        if (skin.getWidth() < 64 || skin.getHeight() < 32) return scaleUp(skin);
++        Bitmap f = Bitmap.createBitmap(8, 8, Bitmap.Config.ARGB_8888);
++        android.graphics.Canvas c = new android.graphics.Canvas(f);
++        c.drawBitmap(Bitmap.createBitmap(skin, 8, 8, 8, 8), 0, 0, null);
++        c.drawBitmap(Bitmap.createBitmap(skin, 40, 8, 8, 8), 0, 0, null);
++        return Bitmap.createScaledBitmap(f, 128, 128, false);
++    }
++
++    private static Bitmap scaleUp(Bitmap b) {
++        if (b.getWidth() >= 128) return b;
++        int k = Math.max(1, 128 / b.getWidth());
++        return Bitmap.createScaledBitmap(b, b.getWidth() * k, b.getHeight() * k, false);
++    }
++
++    // ------------------------------------------------------------------ actions
++
++    private void act(final Item it, final Button button) {
++        button.setEnabled(false);
++        button.setText("…");
++        status.setText("");
++        pool.execute(new Runnable() {
++            public void run() {
++                String done = null, err = null;
++                try {
++                    if (it.kind != null) done = install(it);
++                    else if (it.cape) done = wearCape(it);
++                    else done = wearSkin(it);
++                } catch (Exception e) {
++                    err = e.getMessage() == null ? e.toString() : e.getMessage();
++                }
++                final String ok = done, bad = err;
++                ui.post(new Runnable() {
++                    public void run() {
++                        button.setEnabled(true);
++                        if (bad != null) {
++                            button.setText(Ui.t("Повторить", "Retry"));
++                            status.setTextColor(Ui.WARN);
++                            status.setText(Ui.t("Не получилось: ", "Failed: ") + bad);
++                        } else {
++                            button.setText(Ui.t("Готово ✓", "Done ✓"));
++                            status.setTextColor(Ui.TEXT);
++                            status.setText(ok);
++                        }
++                    }
++                });
++            }
++        });
++    }
++
++    private String wearSkin(Item it) throws Exception {
++        byte[] png = getBytes(it.picture, 1 << 20);
++        BitmapFactory.Options o = new BitmapFactory.Options();
++        o.inScaled = false;
++        Bitmap b = BitmapFactory.decodeByteArray(png, 0, png.length, o);
++        if (b == null || b.getWidth() != 64 || (b.getHeight() != 64 && b.getHeight() != 32)) {
++            throw new Exception(Ui.t("Нужен скин 64×64 или 64×32.", "A 64×64 or 64×32 skin is needed."));
++        }
++        boolean slim = it.hasSlim ? it.slim : looksSlim(b);
++        // The same files the profile screen writes (horizon-skin.png/.txt), then the share copy.
++        write(new File(dir, "horizon-skin.png"), png);
++        write(new File(dir, "horizon-skin.txt"), ("model:" + (slim ? "slim" : "classic") + "\n").getBytes(StandardCharsets.UTF_8));
++        File sd = new File(dir, "skin");
++        sd.mkdirs();
++        write(new File(sd, "skin.png"), png);
++        write(new File(sd, "model.txt"), (slim ? "slim\n" : "classic\n").getBytes(StandardCharsets.UTF_8));
++        File signed = new File(sd, "textures.signed");
++        signed.delete();
++        try {
++            if (it.signedUrl != null) {
++                JSONObject root = new JSONObject(getString(it.signedUrl));
++                String value = null, signature = null;
++                JSONArray props = root.optJSONArray("properties");
++                for (int i = 0; props != null && i < props.length(); i++) {
++                    JSONObject p = props.getJSONObject(i);
++                    if ("textures".equals(p.optString("name"))) {
++                        value = p.optString("value", null);
++                        signature = p.optString("signature", null);
++                    }
++                }
++                if (value == null) {
++                    JSONObject data = root.getJSONObject("skin").getJSONObject("texture").getJSONObject("data");
++                    value = data.optString("value", null);
++                    signature = data.optString("signature", null);
++                }
++                if (value != null && signature != null && !value.isEmpty() && !signature.isEmpty()) {
++                    write(signed, (value + "\n" + signature + "\n").getBytes(StandardCharsets.UTF_8));
++                }
++            }
++        } catch (Exception ignored) {
++            // worn without the signature: the player sees it, other players may not
++        }
++        return Ui.t("Скин надет: ", "Skin worn: ") + it.title + (signed.isFile() ? "" : Ui.t(" (без подписи Mojang)", " (unsigned)"));
++    }
++
++    private String wearCape(Item it) throws Exception {
++        byte[] png = ProfileActivity.normalizeCape(getBytes(it.picture, 1 << 20));
++        if (png == null) throw new Exception(Ui.t("Это не плащ 64×32.", "That is not a 64×32 cape."));
++        File sd = new File(dir, "skin");
++        sd.mkdirs();
++        write(new File(sd, "cape.png"), png);
++        new File(sd, "textures.signed").delete();
++        return Ui.t("Плащ надет: ", "Cape worn: ") + it.title;
++    }
++
++    private String install(Item it) throws Exception {
++        String url = it.file, name = it.fileName, hash = it.hash, algo = it.hashKind;
++        if ("pack".equals(it.kind)) {
++            JSONArray versions = new JSONArray(getString("https://api.modrinth.com/v2/project/" + enc(it.id)
++                    + "/version?game_versions=" + enc("[\"" + GAME_VERSION + "\"]")));
++            if (versions.length() == 0) throw new Exception(Ui.t("Нет версии для ", "No version for ") + GAME_VERSION);
++            JSONArray files = versions.getJSONObject(0).getJSONArray("files");
++            JSONObject f = files.getJSONObject(0);
++            for (int i = 0; i < files.length(); i++) if (files.getJSONObject(i).optBoolean("primary")) f = files.getJSONObject(i);
++            url = f.getString("url");
++            name = f.getString("filename");
++            hash = f.getJSONObject("hashes").getString("sha1");
++            algo = "SHA-1";
++            if (!url.startsWith("https://cdn.modrinth.com/")) throw new Exception("bad source");
++        }
++        if (url == null || url.isEmpty() || name == null || hash == null) throw new Exception(Ui.t("Нет файла.", "No file."));
++        byte[] data = getBytes(url, 256 << 20);
++        String got = hex(MessageDigest.getInstance(algo).digest(data));
++        if (!got.equalsIgnoreCase(hash)) throw new Exception(Ui.t("Контрольная сумма не совпала.", "Checksum mismatch."));
++        String safe = name.replaceAll("[^A-Za-z0-9._ +()\\[\\]-]", "_");
++        String folder = "shader".equals(it.kind) ? "shaderpacks" : "mod".equals(it.kind) ? "mods" : "resourcepacks";
++        File out = new File(dir, folder);
++        out.mkdirs();
++        write(new File(out, safe), data);
++        return Ui.t("Установлено: ", "Installed: ") + it.title + " → " + folder + "/" + safe;
++    }
++
++    // ------------------------------------------------------------------ helpers
++
++    /** Whether a skin's arms are 3 px wide: the right arm's last column is empty. */
++    private static boolean looksSlim(Bitmap b) {
++        if (b.getHeight() < 64) return false;
++        for (int y = 20; y < 32; y++) if (Color.alpha(b.getPixel(55, y)) != 0) return false;
++        return true;
++    }
++
++    private static void write(File f, byte[] data) throws Exception {
++        File tmp = new File(f.getParentFile(), f.getName() + ".tmp");
++        try (FileOutputStream o = new FileOutputStream(tmp)) {
++            o.write(data);
++        }
++        if (f.exists() && !f.delete()) throw new Exception("cannot replace " + f.getName());
++        if (!tmp.renameTo(f)) throw new Exception("cannot write " + f.getName());
++    }
++
++    private static String hex(byte[] b) {
++        StringBuilder s = new StringBuilder();
++        for (byte x : b) s.append(String.format(Locale.ROOT, "%02x", x));
++        return s.toString();
++    }
++
++    private static String enc(String s) throws Exception {
++        return URLEncoder.encode(s, "UTF-8");
++    }
++
++    private static String https(String url) {
++        return url.startsWith("http://textures.minecraft.net/") ? "https://" + url.substring(7) : url;
++    }
++
++    /** The text of an https URL; an empty string for 204/404 (no such player). */
++    private static String getString(String url) throws Exception {
++        return new String(getBytes(url, 8 << 20), StandardCharsets.UTF_8);
++    }
++
++    private static byte[] getBytes(String url, int limit) throws Exception {
++        if (!url.startsWith("https://")) throw new Exception("https only");
++        HttpURLConnection c = (HttpURLConnection) new URL(url).openConnection();
++        c.setConnectTimeout(15000);
++        c.setReadTimeout(30000);
++        c.setRequestProperty("User-Agent", "OneShot-Android/1.0");
++        c.setRequestProperty("Accept", "application/json, image/*, */*");
++        int code = c.getResponseCode();
++        if (code == 204 || code == 404) return new byte[0];
++        if (code / 100 != 2) throw new Exception("HTTP " + code);
++        try (InputStream in = c.getInputStream()) {
++            ByteArrayOutputStream out = new ByteArrayOutputStream();
++            byte[] buf = new byte[16384];
++            int n;
++            while ((n = in.read(buf)) > 0) {
++                out.write(buf, 0, n);
++                if (out.size() > limit) throw new Exception("too big");
++            }
++            return out.toByteArray();
++        } finally {
++            c.disconnect();
++        }
++    }
++}
+diff --git a/packaging/android/java/dev/horizonlab/horizon/ProfileActivity.java b/packaging/android/java/dev/horizonlab/horizon/ProfileActivity.java
+index e9d251d..b22e60a 100644
+--- a/packaging/android/java/dev/horizonlab/horizon/ProfileActivity.java
++++ b/packaging/android/java/dev/horizonlab/horizon/ProfileActivity.java
+@@ -38,10 +38,16 @@ public class ProfileActivity extends Activity implements View.OnClickListener {
+     private static final int PICK_DRIVER = 8;
+     private static final int MS_LOGIN = 9;
+     private static final int PICK_CAPE = 10;
++    private static final int WORLD_IN = 11;
++    private static final int WORLD_OUT = 12;
+     private File dir;
+     private EditText name;
+     private TextView message;
+     private SkinView preview;
++    private EditText join;
++    private String exportWorld;
++    private Button worldIn, worldOut;
++    private Button catalog;
+     private Button pick, cape, model, play, driver, systemDriver, microsoft, deviceCode, signOut;
+     private TextView driverStatus, accountStatus, accountChip;
+     private EditText clientId;
+@@ -51,8 +57,8 @@ public class ProfileActivity extends Activity implements View.OnClickListener {
+     private String verifyUri = "https://www.microsoft.com/link";
+     private boolean slim;
+ 
+-    private static final int PANEL = Color.rgb(26, 27, 33);
+-    private static final int FIELD = Color.rgb(20, 21, 26);
++    private static final int PANEL = Color.rgb(19, 19, 19);
++    private static final int FIELD = Color.rgb(28, 28, 28);
+ 
+     @Override
+     protected void onCreate(Bundle state) {
+@@ -65,7 +71,7 @@ public class ProfileActivity extends Activity implements View.OnClickListener {
+         LinearLayout root = new LinearLayout(this);
+         root.setOrientation(LinearLayout.HORIZONTAL);
+         root.setBackground(new GradientDrawable(GradientDrawable.Orientation.TL_BR,
+-                new int[] {Color.rgb(22, 30, 30), Ui.BG, Color.rgb(8, 8, 11)}));
++                new int[] {Ui.BG, Ui.BG}));
+         int pad = Ui.dp(this, 16);
+         root.setPadding(pad, pad, pad, pad);
+ 
+@@ -119,6 +125,19 @@ public class ProfileActivity extends Activity implements View.OnClickListener {
+         model = Ui.button(this, "", false);
+         model.setOnClickListener(this);
+         side.addView(model, Ui.gap(this, 6));
++        // Oneshot: join a friend's game from the PLAY button: friend:CODE, steam:CODE or HOST[:PORT].
++        join = new EditText(this);
++        join.setSingleLine(true);
++        join.setTextColor(Ui.TEXT);
++        join.setHintTextColor(Ui.MUTED);
++        join.setHint(Ui.t("Код друга (friend:…) — пусто: свой мир", "Friend code (friend:…) — empty: your own world"));
++        join.setTextSize(14);
++        join.setPadding(p, Ui.dp(this, 8), p, Ui.dp(this, 8));
++        join.setBackground(Ui.rounded(this, FIELD, Ui.EDGE, 8));
++        join.setImeOptions(android.view.inputmethod.EditorInfo.IME_ACTION_DONE
++                | android.view.inputmethod.EditorInfo.IME_FLAG_NO_EXTRACT_UI);
++        join.setText(readJoin());
++        side.addView(join, Ui.gap(this, 6));
+         accountChip = Ui.text(this, "", 12, Ui.MUTED, false);
+         side.addView(accountChip, Ui.gap(this, 6));
+         who.addView(side, sideLp);
+@@ -147,6 +166,16 @@ public class ProfileActivity extends Activity implements View.OnClickListener {
+         rightLp.leftMargin = Ui.dp(this, 14);
+         root.addView(scroll, rightLp);
+ 
++        // Oneshot: the launcher's catalogs (skins, capes, resource packs, Horizon mods).
++        Ui.section(card, Ui.t("Каталог", "Catalog"));
++        card.addView(Ui.text(this, Ui.t(
++                "Скины, плащи, ресурспаки и моды Horizon — как в лаунчере OneShot на ПК.",
++                "Skins, capes, resource packs and Horizon mods — as in the OneShot launcher on the PC."),
++                12, Ui.MUTED, false));
++        catalog = Ui.button(this, Ui.t("Открыть каталог", "Open the catalog"), true);
++        catalog.setOnClickListener(this);
++        card.addView(catalog, Ui.gap(this, 8));
++
+         Ui.section(card, Ui.t("Аккаунт Microsoft", "Microsoft account"));
+         accountStatus = Ui.text(this, accountLine(), 15, Ui.TEXT, true);
+         card.addView(accountStatus);
+@@ -279,6 +308,18 @@ public class ProfileActivity extends Activity implements View.OnClickListener {
+         mods.setOnClickListener(this);
+         card.addView(mods, Ui.gap(this, 8));
+ 
++        Ui.section(card, Ui.t("Миры", "Worlds"));
++        card.addView(Ui.text(this, Ui.t(
++                "Перенос миров между телефоном и ПК: zip одного мира (его делает и лаунчер на ПК).",
++                "Move worlds between the phone and the PC: a zip of one world (the PC launcher makes the same)."),
++                12, Ui.MUTED, false));
++        worldIn = Ui.button(this, Ui.t("Импорт мира (zip)…", "Import a world (zip)…"), false);
++        worldIn.setOnClickListener(this);
++        card.addView(worldIn, Ui.gap(this, 8));
++        worldOut = Ui.button(this, Ui.t("Экспорт мира (zip)…", "Export a world (zip)…"), false);
++        worldOut.setOnClickListener(this);
++        card.addView(worldOut, Ui.gap(this, 6));
++
+         setContentView(root);
+         hideBars();
+         refreshAccount();
+@@ -286,6 +327,17 @@ public class ProfileActivity extends Activity implements View.OnClickListener {
+         showPreview();
+     }
+ 
++    @Override
++    protected void onResume() {
++        super.onResume();
++        // The catalog may have changed the worn skin and its arm model.
++        if (preview != null) {
++            slim = readModel();
++            updateModel();
++            showPreview();
++        }
++    }
++
+     @Override
+     public void onWindowFocusChanged(boolean focus) {
+         super.onWindowFocusChanged(focus);
+@@ -394,6 +446,139 @@ public class ProfileActivity extends Activity implements View.OnClickListener {
+         }
+     }
+ 
++    private String readJoin() {
++        try {
++            File f = new File(dir, "join-last.txt");
++            return f.isFile() ? new String(Files.readAllBytes(f.toPath()), StandardCharsets.UTF_8).trim() : "";
++        } catch (Exception e) {
++            return "";
++        }
++    }
++
++    /** join.txt is read once by the game at start (android_main.rs) and deleted; join-last.txt keeps the field. */
++    private void saveJoin() {
++        String code = join.getText().toString().trim().replaceAll("\\s+", "");
++        try {
++            new File(dir, "join.txt").delete();
++            File last = new File(dir, "join-last.txt");
++            if (code.isEmpty()) {
++                last.delete();
++                return;
++            }
++            write(last, code.getBytes(StandardCharsets.UTF_8));
++            write(new File(dir, "join.txt"), code.getBytes(StandardCharsets.UTF_8));
++        } catch (Exception ignored) {
++        }
++    }
++
++    private void exportDialog() {
++        File[] all = new File(dir, "saves").listFiles();
++        final java.util.ArrayList<String> names = new java.util.ArrayList<>();
++        if (all != null) {
++            for (File w : all) if (w.isDirectory() && new File(w, "level.dat").isFile()) names.add(w.getName());
++        }
++        java.util.Collections.sort(names);
++        if (names.isEmpty()) {
++            message.setTextColor(Ui.WARN);
++            message.setText(Ui.t("Миров нет: сначала создайте мир в игре.", "No worlds yet: create one in the game first."));
++            return;
++        }
++        new android.app.AlertDialog.Builder(this)
++                .setTitle(Ui.t("Какой мир выгрузить?", "Which world to export?"))
++                .setItems(names.toArray(new String[0]), new android.content.DialogInterface.OnClickListener() {
++                    @Override
++                    public void onClick(android.content.DialogInterface d, int which) {
++                        exportWorld = names.get(which);
++                        Intent i = new Intent(Intent.ACTION_CREATE_DOCUMENT);
++                        i.addCategory(Intent.CATEGORY_OPENABLE);
++                        i.setType("application/zip");
++                        i.putExtra(Intent.EXTRA_TITLE, exportWorld + ".zip");
++                        startActivityForResult(i, WORLD_OUT);
++                    }
++                })
++                .show();
++    }
++
++    private void zipWorld(File root, File world, java.util.zip.ZipOutputStream zip) throws Exception {
++        File[] list = world.listFiles();
++        if (list == null) return;
++        for (File f : list) {
++            String rel = f.getAbsolutePath().substring(root.getAbsolutePath().length() + 1).replace('\\', '/');
++            if (f.isDirectory()) {
++                zipWorld(root, f, zip);
++            } else if (!f.getName().equals("session.lock")) {
++                zip.putNextEntry(new java.util.zip.ZipEntry(rel));
++                Files.copy(f.toPath(), zip);
++                zip.closeEntry();
++            }
++        }
++    }
++
++    /** Unpacks a zip with one world beside the saves under a free folder name; returns that name or null. */
++    private String importWorld(InputStream raw) throws Exception {
++        File saves = new File(dir, "saves");
++        saves.mkdirs();
++        File staging = new File(saves, "import-" + System.currentTimeMillis() + ".importing");
++        staging.mkdirs();
++        String prefix = null;
++        long total = 0;
++        try (java.util.zip.ZipInputStream zin = new java.util.zip.ZipInputStream(raw)) {
++            java.util.zip.ZipEntry e;
++            java.util.ArrayList<String> names = new java.util.ArrayList<>();
++            File all = new File(staging, "all");
++            all.mkdirs();
++            byte[] buf = new byte[65536];
++            while ((e = zin.getNextEntry()) != null) {
++                String n = e.getName().replace('\\', '/');
++                if (n.startsWith("/") || n.contains("../") || n.equals("..")) continue;
++                File out = new File(all, n);
++                if (e.isDirectory()) {
++                    out.mkdirs();
++                    continue;
++                }
++                out.getParentFile().mkdirs();
++                try (FileOutputStream fo = new FileOutputStream(out)) {
++                    int r;
++                    while ((r = zin.read(buf)) > 0) {
++                        fo.write(buf, 0, r);
++                        total += r;
++                        if (total > (4L << 30)) throw new Exception("too big");
++                    }
++                }
++                names.add(n);
++            }
++            // The world is the folder with level.dat nearest to the top.
++            for (String n : names) {
++                if (n.equals("level.dat") || n.endsWith("/level.dat")) {
++                    String pre = n.substring(0, n.length() - "level.dat".length());
++                    if (prefix == null || pre.length() < prefix.length()) prefix = pre;
++                }
++            }
++            if (prefix == null) {
++                deleteTree(staging);
++                return null;
++            }
++            String base = prefix.isEmpty() ? "Imported world" : prefix.substring(0, prefix.length() - 1);
++            base = base.substring(base.lastIndexOf('/') + 1);
++            if (base.isEmpty()) base = "Imported world";
++            String name = base;
++            for (int i = 1; new File(saves, name).exists(); i++) name = base + " (" + i + ")";
++            File src = prefix.isEmpty() ? all : new File(all, prefix);
++            if (!src.renameTo(new File(saves, name))) throw new Exception("move failed");
++            deleteTree(staging);
++            return name;
++        } catch (Exception ex) {
++            deleteTree(staging);
++            throw ex;
++        }
++    }
++
++    private static void deleteTree(File f) {
++        File[] kids = f.listFiles();
++        if (kids != null) for (File k : kids) deleteTree(k);
++        f.delete();
++    }
++
+     /** A cape as the 64x32 RGBA PNG the share sends (an HD cape is scaled down); null when it is no cape. */
+     static byte[] normalizeCape(byte[] bytes) {
+         BitmapFactory.Options o = new BitmapFactory.Options();
+@@ -439,8 +624,18 @@ public class ProfileActivity extends Activity implements View.OnClickListener {
+                 saveModel();
+             } catch (Exception ignored) {
+             }
++        } else if (v == catalog) {
++            startActivity(new Intent(this, CatalogActivity.class));
++        } else if (v == worldIn) {
++            Intent i = new Intent(Intent.ACTION_OPEN_DOCUMENT);
++            i.addCategory(Intent.CATEGORY_OPENABLE);
++            i.setType("*/*");
++            startActivityForResult(i, WORLD_IN);
++        } else if (v == worldOut) {
++            exportDialog();
+         } else if (v == play) {
+             if (!saveProfile()) return;
++            saveJoin();
+             Intent i = new Intent(this, HorizonActivity.class);
+             i.addFlags(Intent.FLAG_ACTIVITY_REORDER_TO_FRONT);
+             startActivity(i);
+@@ -604,6 +799,35 @@ public class ProfileActivity extends Activity implements View.OnClickListener {
+             }
+             return;
+         }
++        if (request == WORLD_IN || request == WORLD_OUT) {
++            if (result != RESULT_OK || data == null || data.getData() == null) return;
++            message.setTextColor(Ui.WARN);
++            try {
++                if (request == WORLD_IN) {
++                    String name;
++                    try (InputStream in = getContentResolver().openInputStream(data.getData())) {
++                        name = importWorld(in);
++                    }
++                    if (name == null) {
++                        message.setText(Ui.t("В архиве нет мира (нужен level.dat).", "No world in that zip (level.dat is missing)."));
++                    } else {
++                        message.setTextColor(Ui.GREEN);
++                        message.setText(Ui.t("Мир добавлен: ", "World added: ") + name);
++                    }
++                } else {
++                    File w = new File(new File(dir, "saves"), exportWorld);
++                    try (java.util.zip.ZipOutputStream zip = new java.util.zip.ZipOutputStream(
++                            getContentResolver().openOutputStream(data.getData()))) {
++                        zipWorld(w.getParentFile(), w, zip);
++                    }
++                    message.setTextColor(Ui.GREEN);
++                    message.setText(Ui.t("Мир выгружен: ", "World exported: ") + exportWorld);
++                }
++            } catch (Exception e) {
++                message.setText(Ui.t("Не получилось: ", "Failed: ") + e.getMessage());
++            }
++            return;
++        }
+         if (request == PICK_CAPE) {
+             message.setTextColor(Ui.WARN);
+             try (InputStream in = getContentResolver().openInputStream(data.getData())) {
+diff --git a/packaging/android/java/dev/horizonlab/horizon/Ui.java b/packaging/android/java/dev/horizonlab/horizon/Ui.java
+index 70c994c..a3afa7a 100644
+--- a/packaging/android/java/dev/horizonlab/horizon/Ui.java
++++ b/packaging/android/java/dev/horizonlab/horizon/Ui.java
+@@ -15,16 +15,18 @@ import android.widget.LinearLayout;
+ import android.widget.TextView;
+ import java.util.Locale;
+ 
+-/** Shared look of the setup and profile screens: dark, blocky, one centered card. */
++/** Shared look of the screens: the OneShot launcher's black-and-white style (Theme.cs). */
+ final class Ui {
+-    static final int BG = Color.rgb(18, 18, 22);
+-    static final int CARD = Color.rgb(36, 36, 44);
+-    static final int EDGE = Color.rgb(60, 60, 72);
+-    static final int GREEN = Color.rgb(60, 160, 70);
+-    static final int GREEN_DARK = Color.rgb(40, 110, 48);
+-    static final int TEXT = Color.rgb(236, 236, 240);
+-    static final int MUTED = Color.rgb(160, 160, 172);
+-    static final int WARN = Color.rgb(240, 190, 90);
++    static final int BG = Color.rgb(10, 10, 10);
++    static final int CARD = Color.rgb(19, 19, 19);
++    static final int EDGE = Color.rgb(42, 42, 42);
++    static final int GREEN = Color.rgb(232, 232, 232);       // the launcher's accent: white
++    static final int GREEN_DARK = Color.rgb(66, 66, 66);
++    static final int HIGH = Color.rgb(28, 28, 28);
++    static final int ON_ACCENT = Color.rgb(10, 10, 10);
++    static final int TEXT = Color.rgb(244, 244, 244);
++    static final int MUTED = Color.rgb(150, 150, 150);
++    static final int WARN = Color.rgb(196, 196, 196);
+ 
+     private Ui() {}
+ 
+@@ -52,7 +54,7 @@ final class Ui {
+     static LinearLayout card(android.app.Activity a) {
+         FrameLayout root = new FrameLayout(a);
+         root.setBackground(new GradientDrawable(GradientDrawable.Orientation.TOP_BOTTOM,
+-                new int[] {Color.rgb(28, 34, 40), BG, Color.rgb(10, 10, 13)}));
++                new int[] {BG, BG}));
+         android.widget.ScrollView scroll = new android.widget.ScrollView(a);
+         scroll.setFillViewport(true);
+         FrameLayout center = new FrameLayout(a);
+@@ -89,9 +91,9 @@ final class Ui {
+         b.setText(s);
+         b.setAllCaps(false);
+         b.setTextSize(primary ? 17 : 15);
+-        b.setTextColor(primary ? Color.WHITE : TEXT);
++        b.setTextColor(primary ? ON_ACCENT : TEXT);
+         b.setTypeface(Typeface.create("sans-serif-medium", Typeface.BOLD));
+-        b.setBackground(primary ? rounded(c, GREEN, GREEN_DARK, 10) : rounded(c, Color.rgb(52, 52, 62), EDGE, 10));
++        b.setBackground(primary ? rounded(c, GREEN, 0, 10) : rounded(c, HIGH, EDGE, 10));
+         b.setMinHeight(dp(c, primary ? 54 : 44));
+         b.setStateListAnimator(null);
+         return b;
+@@ -104,7 +106,7 @@ final class Ui {
+         return lp;
+     }
+ 
+-    /** A section header: a thin divider and a small green caption (empty title: divider only). */
++    /** A section header: a thin divider and a small grey caption (empty title: divider only). */
+     static void section(LinearLayout card, String title) {
+         Context c = card.getContext();
+         View line = new View(c);
+@@ -114,7 +116,7 @@ final class Ui {
+         lp.bottomMargin = dp(c, 8);
+         card.addView(line, lp);
+         if (title.isEmpty()) return;
+-        TextView t = text(c, title.toUpperCase(Locale.getDefault()), 12, GREEN, true);
++        TextView t = text(c, title.toUpperCase(Locale.getDefault()), 12, MUTED, true);
+         t.setLetterSpacing(0.08f);
+         card.addView(t);
+     }
+@@ -144,7 +146,7 @@ final class Ui {
+         protected void onDraw(Canvas canvas) {
+             float rad = getHeight() / 2f;
+             r.set(0, 0, getWidth(), getHeight());
+-            paint.setColor(Color.rgb(24, 24, 30));
++            paint.setColor(HIGH);
+             canvas.drawRoundRect(r, rad, rad, paint);
+             if (value > 0) {
+                 r.set(0, 0, Math.max(getHeight(), getWidth() * value / 1000f), getHeight());
