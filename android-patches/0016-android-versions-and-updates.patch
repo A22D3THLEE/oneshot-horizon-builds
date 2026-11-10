@@ -1,0 +1,555 @@
+diff --git a/packaging/android/AndroidManifest.xml b/packaging/android/AndroidManifest.xml
+index 914b565..b2e3063 100644
+--- a/packaging/android/AndroidManifest.xml
++++ b/packaging/android/AndroidManifest.xml
+@@ -11,6 +11,7 @@
+     <uses-permission android:name="android.permission.POST_NOTIFICATIONS" />
+     <uses-permission android:name="android.permission.WAKE_LOCK" />
+     <uses-permission android:name="android.permission.ACCESS_WIFI_STATE" />
++    <uses-permission android:name="android.permission.REQUEST_INSTALL_PACKAGES" />
+     <uses-feature android:glEsVersion="0x00030000" android:required="true" />
+     <uses-feature android:name="android.hardware.vulkan.version" android:version="0x400003" android:required="false" />
+     <application
+@@ -57,6 +58,13 @@
+             android:screenOrientation="sensorLandscape"
+             android:configChanges="orientation|screenSize|screenLayout|keyboardHidden|keyboard|navigation|uiMode"
+             android:windowSoftInputMode="adjustResize|stateHidden" />
++        <activity
++            android:name=".UpdateActivity"
++            android:exported="false"
++            android:theme="@style/HorizonProfile"
++            android:launchMode="singleTop"
++            android:screenOrientation="sensorLandscape"
++            android:configChanges="orientation|screenSize|screenLayout|keyboardHidden|keyboard|navigation|uiMode|smallestScreenSize" />
+         <activity
+             android:name=".MsaLoginActivity"
+             android:exported="false"
+diff --git a/packaging/android/java/dev/horizonlab/horizon/ProfileActivity.java b/packaging/android/java/dev/horizonlab/horizon/ProfileActivity.java
+index 6a6e912..313af82 100644
+--- a/packaging/android/java/dev/horizonlab/horizon/ProfileActivity.java
++++ b/packaging/android/java/dev/horizonlab/horizon/ProfileActivity.java
+@@ -47,7 +47,7 @@ public class ProfileActivity extends Activity implements View.OnClickListener {
+     private EditText join;
+     private String exportWorld;
+     private Button worldIn, worldOut;
+-    private Button catalog;
++    private Button catalog, versions;
+     private Button pick, cape, model, play, driver, systemDriver, microsoft, deviceCode, signOut;
+     private TextView driverStatus, accountStatus, accountChip;
+     private EditText clientId;
+@@ -202,6 +202,29 @@ public class ProfileActivity extends Activity implements View.OnClickListener {
+         catalog.setOnClickListener(this);
+         card.addView(catalog, Ui.gap(this, 8));
+ 
++        // Oneshot: versions and updates, as in the PC launcher (UpdateActivity).
++        Ui.section(card, Ui.t("Версия", "Version"));
++        versions = Ui.button(this, Ui.t("Версии и обновления", "Versions and updates"), false);
++        versions.setOnClickListener(new View.OnClickListener() {
++            public void onClick(View v) {
++                startActivity(new Intent(ProfileActivity.this, UpdateActivity.class));
++            }
++        });
++        card.addView(versions, Ui.gap(this, 8));
++        new Thread(new Runnable() {
++            public void run() {
++                final UpdateActivity.Release r = UpdateActivity.newer(ProfileActivity.this);
++                if (r == null) return;
++                runOnUiThread(new Runnable() {
++                    public void run() {
++                        versions.setText(Ui.t("Доступно обновление: ", "Update available: ") + r.name);
++                        versions.setBackground(Ui.rounded(ProfileActivity.this, Ui.GREEN, 0, 12));
++                        versions.setTextColor(Ui.ON_ACCENT);
++                    }
++                });
++            }
++        }).start();
++
+         LinearLayout msBox = new LinearLayout(this);
+         msBox.setOrientation(LinearLayout.VERTICAL);
+         Ui.section(msBox, Ui.t("Аккаунт Microsoft", "Microsoft account"));
+diff --git a/packaging/android/java/dev/horizonlab/horizon/UpdateActivity.java b/packaging/android/java/dev/horizonlab/horizon/UpdateActivity.java
+new file mode 100644
+index 0000000..ffe6eb6
+--- /dev/null
++++ b/packaging/android/java/dev/horizonlab/horizon/UpdateActivity.java
+@@ -0,0 +1,480 @@
++package dev.horizonlab.horizon;
++
++import android.app.Activity;
++import android.app.PendingIntent;
++import android.content.Context;
++import android.content.Intent;
++import android.content.pm.PackageInfo;
++import android.content.pm.PackageInstaller;
++import android.content.pm.PackageManager;
++import android.os.Bundle;
++import android.os.Handler;
++import android.view.Gravity;
++import android.view.View;
++import android.widget.Button;
++import android.widget.LinearLayout;
++import android.widget.ScrollView;
++import android.widget.TextView;
++import java.io.File;
++import java.io.FileInputStream;
++import java.io.FileOutputStream;
++import java.io.InputStream;
++import java.io.OutputStream;
++import java.net.HttpURLConnection;
++import java.net.URL;
++import java.nio.charset.StandardCharsets;
++import java.nio.file.Files;
++import java.security.MessageDigest;
++import java.util.ArrayList;
++import java.util.List;
++import java.util.Locale;
++import java.util.regex.Matcher;
++import java.util.regex.Pattern;
++import org.json.JSONArray;
++import org.json.JSONObject;
++
++/**
++ * Oneshot: the app's versions, as the PC launcher has them. The builds repository publishes every
++ * signed APK as a release tagged android-<versionCode> (android.yml); this screen lists them and
++ * installs a newer one over this one with the system installer, keeping the worlds and settings.
++ * Android does not install an older versionCode over a newer one, so older builds are listed
++ * but cannot be installed from here.
++ */
++public class UpdateActivity extends Activity {
++    static final String REPO = "A22D3THLEE/oneshot-horizon-builds";
++    private static final String API = "https://api.github.com/repos/" + REPO + "/releases?per_page=100";
++    private static final long CACHE_MS = 10 * 60 * 1000L;
++    private static final Pattern TAG = Pattern.compile("^android-(\\d+)$");
++    private static final String STATUS = "dev.horizonlab.horizon.INSTALL_STATUS";
++
++    static final class Release {
++        long code;
++        String name = "", date = "", apk = "", sha = "", notes = "";
++        long size;
++    }
++
++    private final Handler handler = new Handler();
++    private LinearLayout list;
++    private TextView status;
++    private Ui.Bar bar;
++    private volatile boolean busy;
++
++    @Override
++    protected void onCreate(Bundle state) {
++        super.onCreate(state);
++        LinearLayout root = new LinearLayout(this);
++        root.setOrientation(LinearLayout.VERTICAL);
++        root.setBackgroundColor(Ui.BG);
++        int pad = Ui.dp(this, 16);
++        root.setPadding(pad, pad, pad, pad);
++
++        LinearLayout head = new LinearLayout(this);
++        head.setOrientation(LinearLayout.HORIZONTAL);
++        head.setGravity(Gravity.CENTER_VERTICAL);
++        Button back = Ui.button(this, "←", false);
++        back.setOnClickListener(new View.OnClickListener() {
++            public void onClick(View v) {
++                finish();
++            }
++        });
++        head.addView(back, new LinearLayout.LayoutParams(Ui.dp(this, 52), -2));
++        LinearLayout titles = new LinearLayout(this);
++        titles.setOrientation(LinearLayout.VERTICAL);
++        titles.setPadding(Ui.dp(this, 14), 0, 0, 0);
++        TextView title = Ui.text(this, Ui.t("ВЕРСИИ", "VERSIONS"), 22, Ui.TEXT, true);
++        title.setLetterSpacing(0.18f);
++        titles.addView(title);
++        titles.addView(Ui.text(this, Ui.t("Установлена: ", "Installed: ") + versionName(this)
++                + "  ·  " + versionCode(this), 13, Ui.MUTED, false));
++        head.addView(titles, new LinearLayout.LayoutParams(0, -2, 1));
++        Button refresh = Ui.button(this, Ui.t("Обновить список", "Refresh"), false);
++        refresh.setOnClickListener(new View.OnClickListener() {
++            public void onClick(View v) {
++                load(true);
++            }
++        });
++        head.addView(refresh);
++        root.addView(head);
++
++        status = Ui.text(this, "", 13, Ui.WARN, false);
++        root.addView(status, Ui.gap(this, 8));
++        bar = new Ui.Bar(this);
++        bar.setVisibility(View.GONE);
++        root.addView(bar, Ui.gap(this, 4));
++
++        ScrollView scroll = new ScrollView(this);
++        scroll.setVerticalScrollBarEnabled(false);
++        list = new LinearLayout(this);
++        list.setOrientation(LinearLayout.VERTICAL);
++        scroll.addView(list);
++        root.addView(scroll, new LinearLayout.LayoutParams(-1, 0, 1));
++        setContentView(root);
++        Ui.fitInsets(root);
++        load(false);
++        onNewIntent(getIntent());
++    }
++
++    static long versionCode(Context c) {
++        try {
++            PackageInfo p = c.getPackageManager().getPackageInfo(c.getPackageName(), 0);
++            return android.os.Build.VERSION.SDK_INT >= 28 ? p.getLongVersionCode() : p.versionCode;
++        } catch (Exception e) {
++            return 0;
++        }
++    }
++
++    static String versionName(Context c) {
++        try {
++            return c.getPackageManager().getPackageInfo(c.getPackageName(), 0).versionName;
++        } catch (Exception e) {
++            return "?";
++        }
++    }
++
++    /** The published Android builds, newest first (cached for 10 minutes; GitHub allows 60 requests an hour). */
++    static List<Release> releases(Context c, boolean fresh) throws Exception {
++        File cache = new File(c.getCacheDir(), "android-releases.json");
++        String json = null;
++        if (!fresh && cache.isFile() && System.currentTimeMillis() - cache.lastModified() < CACHE_MS) {
++            json = new String(Files.readAllBytes(cache.toPath()), StandardCharsets.UTF_8);
++        }
++        if (json == null) {
++            try {
++                json = get(API);
++                Files.write(cache.toPath(), json.getBytes(StandardCharsets.UTF_8));
++            } catch (Exception e) {
++                if (!cache.isFile()) throw e;
++                json = new String(Files.readAllBytes(cache.toPath()), StandardCharsets.UTF_8);
++            }
++        }
++        List<Release> out = new ArrayList<Release>();
++        JSONArray arr = new JSONArray(json);
++        for (int i = 0; i < arr.length(); i++) {
++            JSONObject r = arr.getJSONObject(i);
++            if (r.optBoolean("draft") || r.optBoolean("prerelease")) continue;
++            Matcher m = TAG.matcher(r.optString("tag_name", ""));
++            if (!m.matches()) continue;
++            Release rel = new Release();
++            rel.code = Long.parseLong(m.group(1));
++            rel.notes = r.optString("body", "");
++            Matcher n = Pattern.compile("versionName: (\\S+)").matcher(rel.notes);
++            rel.name = n.find() ? n.group(1) : r.optString("tag_name");
++            Matcher s = Pattern.compile("sha256: ([0-9a-fA-F]{64})").matcher(rel.notes);
++            if (s.find()) rel.sha = s.group(1).toLowerCase(Locale.ROOT);
++            String d = r.optString("published_at", "");
++            rel.date = d.length() >= 10 ? d.substring(0, 10) : d;
++            JSONArray assets = r.optJSONArray("assets");
++            for (int j = 0; assets != null && j < assets.length(); j++) {
++                JSONObject a = assets.getJSONObject(j);
++                if (a.optString("name").endsWith(".apk")) {
++                    rel.apk = a.optString("browser_download_url");
++                    rel.size = a.optLong("size");
++                }
++            }
++            if (!rel.apk.isEmpty()) out.add(rel);
++        }
++        java.util.Collections.sort(out, new java.util.Comparator<Release>() {
++            public int compare(Release a, Release b) {
++                return Long.compare(b.code, a.code);
++            }
++        });
++        return out;
++    }
++
++    /** The newest published build when it is newer than this one, else null; for the profile's badge. */
++    static Release newer(Context c) {
++        try {
++            List<Release> all = releases(c, false);
++            if (!all.isEmpty() && all.get(0).code > versionCode(c)) return all.get(0);
++        } catch (Exception ignored) {
++        }
++        return null;
++    }
++
++    private void load(final boolean fresh) {
++        if (busy) return;
++        status.setText(Ui.t("Загружаю список версий…", "Loading the versions…"));
++        new Thread(new Runnable() {
++            public void run() {
++                List<Release> r = null;
++                String err = null;
++                try {
++                    r = releases(UpdateActivity.this, fresh);
++                } catch (Exception e) {
++                    err = String.valueOf(e.getMessage() != null ? e.getMessage() : e);
++                }
++                final List<Release> fr = r;
++                final String fe = err;
++                handler.post(new Runnable() {
++                    public void run() {
++                        if (isFinishing()) return;
++                        if (fr == null) {
++                            status.setText(Ui.t("Нет связи с GitHub: ", "Could not reach GitHub: ") + fe);
++                            return;
++                        }
++                        show(fr);
++                    }
++                });
++            }
++        }).start();
++    }
++
++    private void show(List<Release> all) {
++        list.removeAllViews();
++        long mine = versionCode(this);
++        if (all.isEmpty()) {
++            status.setText(Ui.t("Опубликованных версий пока нет.", "No versions are published yet."));
++            return;
++        }
++        status.setText(all.get(0).code > mine
++                ? Ui.t("Есть новая версия: ", "A new version is out: ") + all.get(0).name
++                : Ui.t("У вас последняя версия.", "You have the newest version."));
++        boolean first = true;
++        for (final Release r : all) {
++            LinearLayout row = new LinearLayout(this);
++            row.setOrientation(LinearLayout.HORIZONTAL);
++            row.setGravity(Gravity.CENTER_VERTICAL);
++            int p = Ui.dp(this, 14);
++            row.setPadding(p, Ui.dp(this, 10), p, Ui.dp(this, 10));
++            boolean current = r.code == mine;
++            row.setBackground(Ui.rounded(this, current ? Ui.HIGH : Ui.CARD, current ? Ui.GREEN : Ui.EDGE, 14));
++            LinearLayout info = new LinearLayout(this);
++            info.setOrientation(LinearLayout.VERTICAL);
++            String badge = first ? Ui.t("  ·  НОВЕЙШАЯ", "  ·  NEWEST") : "";
++            info.addView(Ui.text(this, r.name + badge, 16, Ui.TEXT, true));
++            info.addView(Ui.text(this, r.date + "  ·  " + (r.size >> 20) + Ui.t(" МБ", " MB")
++                    + "  ·  #" + r.code, 12, Ui.MUTED, false));
++            row.addView(info, new LinearLayout.LayoutParams(0, -2, 1));
++            final Button b;
++            if (current) {
++                b = Ui.button(this, Ui.t("Установлена", "Installed"), false);
++                b.setEnabled(false);
++            } else if (r.code > mine) {
++                b = Ui.button(this, Ui.t("Установить", "Install"), true);
++                b.setOnClickListener(new View.OnClickListener() {
++                    public void onClick(View v) {
++                        install(r);
++                    }
++                });
++            } else {
++                b = Ui.button(this, Ui.t("Старее", "Older"), false);
++                b.setAlpha(0.6f);
++                b.setOnClickListener(new View.OnClickListener() {
++                    public void onClick(View v) {
++                        status.setText(Ui.t(
++                                "Android не ставит старую версию поверх новой. Откат возможен только через удаление приложения, а оно стирает миры: сначала экспортируйте их.",
++                                "Android does not install an older version over a newer one. Going back needs the app removed, which erases the worlds: export them first."));
++                    }
++                });
++            }
++            b.setMinWidth(Ui.dp(this, 132));
++            row.addView(b);
++            list.addView(row, Ui.gap(this, first ? 4 : 8));
++            first = false;
++        }
++    }
++
++    private void install(final Release r) {
++        if (busy) return;
++        if (android.os.Build.VERSION.SDK_INT >= 26 && !getPackageManager().canRequestPackageInstalls()) {
++            status.setText(Ui.t("Разрешите OneShot устанавливать приложения и нажмите «Установить» ещё раз.",
++                    "Allow OneShot to install apps, then tap Install again."));
++            try {
++                startActivity(new Intent(android.provider.Settings.ACTION_MANAGE_UNKNOWN_APP_SOURCES,
++                        android.net.Uri.parse("package:" + getPackageName())));
++            } catch (Exception ignored) {
++            }
++            return;
++        }
++        busy = true;
++        bar.set(0);
++        bar.setVisibility(View.VISIBLE);
++        status.setText(Ui.t("Скачиваю ", "Downloading ") + r.name + "…");
++        new Thread(new Runnable() {
++            public void run() {
++                String err = null;
++                try {
++                    File apk = download(r);
++                    checkSigner(apk);
++                    commit(apk);
++                } catch (Exception e) {
++                    err = String.valueOf(e.getMessage() != null ? e.getMessage() : e);
++                }
++                final String fe = err;
++                handler.post(new Runnable() {
++                    public void run() {
++                        busy = false;
++                        if (fe != null) {
++                            bar.setVisibility(View.GONE);
++                            status.setText(Ui.t("Не удалось установить: ", "Could not install: ") + fe);
++                        } else {
++                            status.setText(Ui.t("Подтвердите установку в окне Android.", "Confirm the install in Android's window."));
++                        }
++                    }
++                });
++            }
++        }).start();
++    }
++
++    private File download(Release r) throws Exception {
++        File dir = getExternalCacheDir() != null ? getExternalCacheDir() : getCacheDir();
++        File part = new File(dir, "update.apk.part"), apk = new File(dir, "update.apk");
++        HttpURLConnection c = open(r.apk);
++        MessageDigest sha = MessageDigest.getInstance("SHA-256");
++        long total = c.getContentLengthLong() > 0 ? c.getContentLengthLong() : r.size, got = 0;
++        long lastPost = 0;
++        try (InputStream in = c.getInputStream(); OutputStream out = new FileOutputStream(part)) {
++            byte[] buf = new byte[1 << 16];
++            int n;
++            while ((n = in.read(buf)) != -1) {
++                out.write(buf, 0, n);
++                sha.update(buf, 0, n);
++                got += n;
++                long now = System.currentTimeMillis();
++                if (total > 0 && now - lastPost > 150) {
++                    lastPost = now;
++                    final int pm = (int) (1000 * got / total);
++                    final long g = got, t = total;
++                    handler.post(new Runnable() {
++                        public void run() {
++                            bar.set(pm);
++                            status.setText(Ui.t("Скачиваю: ", "Downloading: ") + (g >> 20) + " / " + (t >> 20) + Ui.t(" МБ", " MB"));
++                        }
++                    });
++                }
++            }
++        } finally {
++            c.disconnect();
++        }
++        if (!r.sha.isEmpty() && !r.sha.equals(hex(sha.digest()))) {
++            part.delete();
++            throw new java.io.IOException(Ui.t("файл скачался с ошибкой (SHA-256 не совпал), попробуйте ещё раз",
++                    "the file arrived damaged (SHA-256 mismatch), try again"));
++        }
++        apk.delete();
++        if (!part.renameTo(apk)) throw new java.io.IOException("rename failed");
++        return apk;
++    }
++
++    /** A clear message instead of the installer's "conflicts with an existing package". */
++    private void checkSigner(File apk) throws Exception {
++        if (android.os.Build.VERSION.SDK_INT < 28) return;
++        PackageManager pm = getPackageManager();
++        PackageInfo theirs = pm.getPackageArchiveInfo(apk.getPath(), PackageManager.GET_SIGNING_CERTIFICATES);
++        PackageInfo mine = pm.getPackageInfo(getPackageName(), PackageManager.GET_SIGNING_CERTIFICATES);
++        if (theirs == null) throw new java.io.IOException(Ui.t("скачанный файл не читается как APK", "the download is not a readable APK"));
++        if (theirs.signingInfo == null || mine.signingInfo == null) return;
++        android.content.pm.Signature[] a = theirs.signingInfo.getApkContentsSigners();
++        android.content.pm.Signature[] b = mine.signingInfo.getApkContentsSigners();
++        if (a.length == 0 || b.length == 0 || !a[0].equals(b[0])) {
++            throw new java.io.IOException(Ui.t(
++                    "эта версия подписана другим ключом, чем установленная. Один раз нужна переустановка: экспортируйте миры, удалите приложение и установите новый APK вручную. Дальше обновления пойдут отсюда.",
++                    "this version is signed with another key than the installed one. Reinstall once: export the worlds, remove the app and install the new APK by hand. Updates work from here after that."));
++        }
++    }
++
++    private void commit(File apk) throws Exception {
++        PackageInstaller pi = getPackageManager().getPackageInstaller();
++        PackageInstaller.SessionParams params = new PackageInstaller.SessionParams(PackageInstaller.SessionParams.MODE_FULL_INSTALL);
++        params.setAppPackageName(getPackageName());
++        params.setSize(apk.length());
++        int id = pi.createSession(params);
++        PackageInstaller.Session s = pi.openSession(id);
++        try {
++            try (InputStream in = new FileInputStream(apk); OutputStream out = s.openWrite("base.apk", 0, apk.length())) {
++                byte[] buf = new byte[1 << 16];
++                int n;
++                while ((n = in.read(buf)) != -1) out.write(buf, 0, n);
++                s.fsync(out);
++            }
++            Intent back = new Intent(this, UpdateActivity.class).setAction(STATUS);
++            int flags = PendingIntent.FLAG_UPDATE_CURRENT;
++            // The system writes the status into the intent's extras: it must stay mutable.
++            if (android.os.Build.VERSION.SDK_INT >= 31) flags |= PendingIntent.FLAG_MUTABLE;
++            PendingIntent pending = PendingIntent.getActivity(this, id, back, flags);
++            s.commit(pending.getIntentSender());
++        } catch (Exception e) {
++            s.abandon();
++            throw e;
++        } finally {
++            s.close();
++        }
++    }
++
++    @Override
++    protected void onNewIntent(Intent intent) {
++        super.onNewIntent(intent);
++        if (intent == null || !STATUS.equals(intent.getAction())) return;
++        int st = intent.getIntExtra(PackageInstaller.EXTRA_STATUS, PackageInstaller.STATUS_FAILURE);
++        if (st == PackageInstaller.STATUS_PENDING_USER_ACTION) {
++            Intent confirm = intent.getParcelableExtra(Intent.EXTRA_INTENT);
++            if (confirm != null) {
++                confirm.addFlags(Intent.FLAG_ACTIVITY_NEW_TASK);
++                try {
++                    startActivity(confirm);
++                } catch (Exception e) {
++                    status.setText(Ui.t("Не открылось окно установки: ", "The install window did not open: ") + e);
++                }
++            }
++            return;
++        }
++        if (bar != null) bar.setVisibility(View.GONE);
++        if (st == PackageInstaller.STATUS_SUCCESS) {
++            status.setText(Ui.t("Установлено. Откройте OneShot снова.", "Installed. Open OneShot again."));
++            return;
++        }
++        String msg = intent.getStringExtra(PackageInstaller.EXTRA_STATUS_MESSAGE);
++        String why;
++        if (st == PackageInstaller.STATUS_FAILURE_ABORTED) why = Ui.t("установка отменена", "the install was cancelled");
++        else if (st == PackageInstaller.STATUS_FAILURE_STORAGE) why = Ui.t("мало места", "not enough space");
++        else if (st == PackageInstaller.STATUS_FAILURE_CONFLICT) why = Ui.t("другая подпись или версия старее установленной", "another signature, or an older version than the installed one");
++        else if (st == PackageInstaller.STATUS_FAILURE_INCOMPATIBLE) why = Ui.t("версия не подходит этому устройству", "the version does not fit this device");
++        else why = msg != null ? msg : ("status " + st);
++        status.setText(Ui.t("Не установлено: ", "Not installed: ") + why);
++    }
++
++    private static HttpURLConnection open(String url) throws Exception {
++        // GitHub sends the asset from another host: follow up to 5 https redirects by hand.
++        for (int i = 0; i < 5; i++) {
++            if (!url.startsWith("https://")) throw new java.io.IOException("not https: " + url);
++            HttpURLConnection c = (HttpURLConnection) new URL(url).openConnection();
++            c.setInstanceFollowRedirects(false);
++            c.setConnectTimeout(15000);
++            c.setReadTimeout(30000);
++            c.setRequestProperty("User-Agent", "OneShot-Android/1.0");
++            int code = c.getResponseCode();
++            if (code / 100 == 3) {
++                String loc = c.getHeaderField("Location");
++                c.disconnect();
++                if (loc == null) throw new java.io.IOException("redirect without Location");
++                url = new URL(new URL(url), loc).toString();
++                continue;
++            }
++            if (code != 200) {
++                c.disconnect();
++                throw new java.io.IOException("HTTP " + code);
++            }
++            return c;
++        }
++        throw new java.io.IOException("too many redirects");
++    }
++
++    private static String get(String url) throws Exception {
++        HttpURLConnection c = open(url);
++        try (InputStream in = c.getInputStream()) {
++            java.io.ByteArrayOutputStream b = new java.io.ByteArrayOutputStream();
++            byte[] buf = new byte[1 << 14];
++            int n;
++            while ((n = in.read(buf)) != -1) b.write(buf, 0, n);
++            return new String(b.toByteArray(), StandardCharsets.UTF_8);
++        } finally {
++            c.disconnect();
++        }
++    }
++
++    private static String hex(byte[] b) {
++        StringBuilder s = new StringBuilder();
++        for (byte x : b) s.append(String.format(Locale.ROOT, "%02x", x));
++        return s.toString();
++    }
++}

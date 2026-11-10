@@ -1,8 +1,11 @@
 name: Build Oneshot Horizon for Android
 # Builds an Android APK (arm64) of Horizon by hand. The source is the unofficial Android port of Rayan-XOO
 # (MIT; a fork of horizon-rust/horizon with the Android layer: NativeActivity, touch controls, setup screen),
-# pinned to a commit, with Oneshot's patches on top when `patches` is on. The APK is a workflow artifact, not a
-# release: nothing is published from here.
+# pinned to a commit, with Oneshot's patches on top when `patches` is on. The APK is a workflow artifact; with
+# `publish` on (and the signing secrets set) it is also a release tagged android-<versionCode>, which the app's
+# Versions screen offers as an update. Only the newest 5 android-* releases are kept: the PC launcher reads the
+# first page of the same release list (launcher-v*, oneshot-*).
+# versionCode = 1000 + the run number (the port's own is 36), so every build installs over the previous one.
 # Signing: the secrets ANDROID_KEYSTORE_BASE64, ANDROID_KEYSTORE_PASSWORD and ANDROID_KEY_ALIAS sign the APK when
 # they exist. Without them the APK gets a throwaway debug key, and an install of the next build over it fails
 # (uninstall first, and save the worlds: Android erases the app's data with it).
@@ -22,8 +25,12 @@ on:
         type: choice
         options: [fast, release]
         default: fast
+      publish:
+        description: Publish the APK as a release for the app's update screen (needs the signing secrets)
+        type: boolean
+        default: false
 permissions:
-  contents: read
+  contents: write
 concurrency:
   group: oneshot-android
   cancel-in-progress: true
@@ -78,6 +85,18 @@ jobs:
           echo "### Patches" >> "$GITHUB_STEP_SUMMARY"
           echo "applied:${applied:- none}" >> "$GITHUB_STEP_SUMMARY"
           echo "skipped:${skipped:- none}" >> "$GITHUB_STEP_SUMMARY"
+      - name: Version
+        run: |
+          set -euo pipefail
+          code=$((1000 + GITHUB_RUN_NUMBER))
+          m=src/packaging/android/AndroidManifest.xml
+          base=$(grep -o 'android:versionName="[^"]*"' "$m" | head -n1 | cut -d'"' -f2)
+          name="$base-os$code"
+          sed -i -E "s/android:versionCode=\"[0-9]+\"/android:versionCode=\"$code\"/; s/android:versionName=\"[^\"]*\"/android:versionName=\"$name\"/" "$m"
+          grep -q "versionCode=\"$code\"" "$m" || { echo "::error::versionCode was not set"; exit 1; }
+          echo "VERSION_CODE=$code" >> "$GITHUB_ENV"
+          echo "VERSION_NAME=$name" >> "$GITHUB_ENV"
+          echo "version: $name ($code)"
       - uses: actions/setup-java@v4
         with:
           distribution: temurin
@@ -117,6 +136,7 @@ jobs:
             echo "$KS" | base64 -d > "$RUNNER_TEMP/release.keystore"
             echo "HORIZON_KEYSTORE=$RUNNER_TEMP/release.keystore" >> "$GITHUB_ENV"
             echo "HORIZON_KEYSTORE_PASS=$PASS" >> "$GITHUB_ENV"
+            echo "SIGNED=1" >> "$GITHUB_ENV"
             [[ -n "$ALIAS" ]] && echo "HORIZON_KEY_ALIAS=$ALIAS" >> "$GITHUB_ENV"
             echo "Signing with the project key"
           else
@@ -135,7 +155,8 @@ jobs:
           {
             echo "### APK"
             echo "port commit: $(git -C ../.. rev-parse HEAD 2>/dev/null || echo "$PORT_PINNED")"
-            echo "profile: $PROFILE, patches: ${{ inputs.patches }}"
+            echo "version: $VERSION_NAME ($VERSION_CODE)"
+            echo "profile: $PROFILE, patches: ${{ inputs.patches }}, signed: ${SIGNED:-no (debug key)}"
             echo "sha256: $(cut -d' ' -f1 horizon.apk.sha256)"
             echo "size: $(stat -c %s horizon.apk) bytes"
           } >> "$GITHUB_STEP_SUMMARY"
@@ -146,3 +167,24 @@ jobs:
             src/target/android/horizon.apk
             src/target/android/horizon.apk.sha256
           retention-days: 14
+      - name: Publish the release
+        if: inputs.publish
+        env:
+          GH_TOKEN: ${{ github.token }}
+          PATCHES: ${{ inputs.patches }}
+        run: |
+          set -euo pipefail
+          if [[ -z "${SIGNED:-}" ]]; then
+            echo "::error::publish needs the signing secrets: an APK with a throwaway key updates nobody"; exit 1
+          fi
+          tag="android-$VERSION_CODE"
+          sha=$(cut -d' ' -f1 src/target/android/horizon.apk.sha256)
+          notes=$(printf 'OneShot for Android %s\n\nversionCode: %s\nversionName: %s\nsha256: %s\nport commit: %s\npatches: %s\n' \
+            "$VERSION_NAME" "$VERSION_CODE" "$VERSION_NAME" "$sha" "$(git -C src rev-parse HEAD)" "$PATCHES")
+          gh release create "$tag" -R "$GITHUB_REPOSITORY" --target "$GITHUB_SHA" --title "OneShot Android $VERSION_NAME" \
+            --notes "$notes" src/target/android/horizon.apk src/target/android/horizon.apk.sha256
+          echo "release: $tag" >> "$GITHUB_STEP_SUMMARY"
+          # Keep the newest 5 android-* releases.
+          gh release list -R "$GITHUB_REPOSITORY" --limit 100 --json tagName -q '.[].tagName' \
+            | { grep -E '^android-[0-9]+$' || true; } | sort -t- -k2 -n -r | tail -n +6 \
+            | while read -r old; do gh release delete "$old" -R "$GITHUB_REPOSITORY" -y --cleanup-tag; done
