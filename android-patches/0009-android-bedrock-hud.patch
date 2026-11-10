@@ -1,0 +1,93 @@
+diff --git a/crates/horizon-client/src/game/touch.rs b/crates/horizon-client/src/game/touch.rs
+index 017ab1e..f406718 100644
+--- a/crates/horizon-client/src/game/touch.rs
++++ b/crates/horizon-client/src/game/touch.rs
+@@ -237,7 +237,7 @@ impl TouchLayout {
+         let mut layout = Self::dpad();
+         let controls = &mut layout.controls;
+         controls.insert(Id::Dpad, off(64.0, h - 64.0, 13.0));
+-        controls.insert(Id::Stick, at(60.0, h - 62.0, 34.0));
++        controls.insert(Id::Stick, at(54.0, h - 56.0, 30.0));
+         controls.insert(Id::Jump, at(w - 42.0, h - 54.0, 18.0));
+         controls.insert(Id::Sneak, at(w - 88.0, h - 28.0, 12.0));
+         controls.insert(Id::Attack, off(w - 82.0, h - 70.0, 13.0));
+@@ -245,6 +245,13 @@ impl TouchLayout {
+         controls.insert(Id::Mount, at(w - 42.0, h - 100.0, 10.0));
+         controls.insert(Id::AimToggle, at(w - 14.0, 40.0, 9.0));
+         controls.insert(Id::Inventory, at(bar + 14.0, h - 12.0, 12.0));
++        controls.insert(Id::Drop, off(w / 2.0 - 24.0, 12.0, 9.0));
++        controls.insert(Id::F1, off(w / 2.0 + 24.0, 12.0, 9.0));
++        controls.insert(Id::F8, off(w / 2.0 + 48.0, 12.0, 9.0));
++        controls.insert(Id::Chat, at(w / 2.0 - 15.0, 14.0, 11.0));
++        controls.insert(Id::Pause, at(w / 2.0 + 15.0, 14.0, 11.0));
++        controls.insert(Id::F5, at(w - 14.0, 14.0, 10.0));
++        controls.insert(Id::Edit, at(w - 38.0, 14.0, 10.0));
+         let controls = layout.controls;
+         Self { opacity: 0.85, controls, preset: Preset::Bedrock, pass_through: true, aim: Aim::Crosshair }
+     }
+@@ -501,7 +508,11 @@ struct Gui {
+ impl Gui {
+     fn place(&self, layout: &TouchLayout, id: Id) -> ([f32; 2], f32) {
+         let s = layout.spec(id);
+-        ([s.x * self.w, s.y * self.h], s.size)
++        let mut x = s.x * self.w;
++        if id == Id::Inventory && x > self.w / 2.0 {
++            x = x.max(self.hotbar_x() + 182.0 + s.size + 4.0);
++        }
++        ([x, s.y * self.h], s.size)
+     }
+     fn custom(&self, b: &CustomButton) -> ([f32; 2], f32) {
+         ([b.x * self.w, b.y * self.h], b.size)
+@@ -616,6 +627,35 @@ fn outline(batch: &mut HudBatch, atlas: &HudAtlas, c: [f32; 2], r: f32, t: f32,
+     batch.fill(atlas, x + w - t, y + t, t, w - 2.0 * t, color);
+ }
+ 
++/// A filled circle of radius `r` at `c`, as whole-pixel rows so it stays crisp.
++fn round(batch: &mut HudBatch, atlas: &HudAtlas, c: [f32; 2], r: f32, color: u32) {
++    ring(batch, atlas, c, r, r, color);
++}
++
++/// A circle outline `t` thick, out to radius `r` about `c`.
++fn ring(batch: &mut HudBatch, atlas: &HudAtlas, c: [f32; 2], r: f32, t: f32, color: u32) {
++    let k = batch.scale.max(1.0);
++    let n = (r * k).round().max(1.0);
++    let inner = (n - (t * k).round().max(1.0)).max(0.0);
++    let (cx, cy) = ((c[0] * k).round(), (c[1] * k).round());
++    let mut i = -(n as i32);
++    while i < n as i32 {
++        let dy = i as f32 + 0.5;
++        let out = (n * n - dy * dy).max(0.0).sqrt().round();
++        let inn = if dy.abs() < inner { (inner * inner - dy * dy).max(0.0).sqrt().round() } else { 0.0 };
++        let y = (cy + i as f32) / k;
++        if out >= 1.0 {
++            if inn >= 1.0 {
++                batch.fill(atlas, (cx - out) / k, y, (out - inn) / k, 1.0 / k, color);
++                batch.fill(atlas, (cx + inn) / k, y, (out - inn) / k, 1.0 / k, color);
++            } else {
++                batch.fill(atlas, (cx - out) / k, y, out * 2.0 / k, 1.0 / k, color);
++            }
++        }
++        i += 1;
++    }
++}
++
+ /// `color` with its alpha scaled by `a`.
+ fn fade(color: u32, a: f32) -> u32 {
+     let alpha = ((color >> 24) as f32 * a.clamp(0.0, 1.0)) as u32;
+@@ -970,6 +1010,16 @@ impl Game<'_> {
+                         _ => pixels(batch, atlas, "arrow_up_left", 1, at, r * 1.2, ink),
+                     }
+                 }
++            } else if id == Id::Stick && layout.preset == Preset::Bedrock {
++                // Bedrock's round stick: a faint disc with a lighter round knob.
++                round(batch, atlas, c, r, fade(rgba(120, 120, 120, 70), a));
++                ring(batch, atlas, c, r, 1.0, fade(rgba(230, 230, 230, 150), a));
++                let k = t.knob;
++                let knob = [c[0] + k[0] * r * 0.45, c[1] - k[1] * r * 0.45];
++                let held = t.fingers.values().any(|f| matches!(f, Finger::Stick));
++                let v = if held { 235u8 } else { 190u8 };
++                round(batch, atlas, knob, r * 0.42, fade(rgba(v, v, v, 170), a));
++                ring(batch, atlas, knob, r * 0.42, 1.0, fade(rgba(30, 30, 30, 170), a));
+             } else if id == Id::Stick && squared {
+                 // A square base with a square knob.
+                 square(batch, atlas, c, r, false, a * 0.8);
