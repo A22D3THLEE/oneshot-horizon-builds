@@ -1,0 +1,71 @@
+diff --git a/packaging/android/java/dev/horizonlab/horizon/HorizonActivity.java b/packaging/android/java/dev/horizonlab/horizon/HorizonActivity.java
+index d41e41e..59a9ff5 100644
+--- a/packaging/android/java/dev/horizonlab/horizon/HorizonActivity.java
++++ b/packaging/android/java/dev/horizonlab/horizon/HorizonActivity.java
+@@ -45,6 +45,66 @@ public class HorizonActivity extends NativeActivity {
+         renewAccount();
+         hideSystemBars();
+         watchKeyboard();
++        showLoading();
++    }
++
++    /**
++     * The game takes over this window, so views added to it are never drawn. A separate
++     * untouchable window covers the black start-up gap with a progress bar and fades away
++     * once the engine has had time to draw its first frames.
++     */
++    private void showLoading() {
++        try {
++            final android.app.Dialog d = new android.app.Dialog(this, android.R.style.Theme_Black_NoTitleBar_Fullscreen);
++            android.widget.LinearLayout box = new android.widget.LinearLayout(this);
++            box.setOrientation(android.widget.LinearLayout.VERTICAL);
++            box.setGravity(android.view.Gravity.CENTER);
++            box.setBackgroundColor(Ui.BG);
++            android.widget.TextView title = Ui.text(this, "HORIZON", 30, Ui.TEXT, true);
++            title.setLetterSpacing(0.22f);
++            box.addView(title);
++            android.widget.TextView sub = Ui.text(this, "ONESHOT", 12, Ui.MUTED, true);
++            sub.setLetterSpacing(0.3f);
++            box.addView(sub);
++            android.widget.ProgressBar bar = new android.widget.ProgressBar(this, null, android.R.attr.progressBarStyleHorizontal);
++            bar.setIndeterminate(true);
++            bar.setIndeterminateTintList(android.content.res.ColorStateList.valueOf(Ui.TEXT));
++            bar.setBackgroundColor(android.graphics.Color.rgb(38, 38, 38));
++            android.widget.LinearLayout.LayoutParams barLp = new android.widget.LinearLayout.LayoutParams(Ui.dp(this, 280), Ui.dp(this, 4));
++            barLp.topMargin = Ui.dp(this, 28);
++            box.addView(bar, barLp);
++            android.widget.TextView status = Ui.text(this, Ui.t("Загрузка игры…", "Loading the game…"), 13, Ui.MUTED, false);
++            status.setPadding(0, Ui.dp(this, 12), 0, 0);
++            box.addView(status);
++            d.setContentView(box);
++            android.view.Window w = d.getWindow();
++            if (w != null) {
++                w.addFlags(WindowManager.LayoutParams.FLAG_NOT_FOCUSABLE
++                    | WindowManager.LayoutParams.FLAG_NOT_TOUCHABLE
++                    | WindowManager.LayoutParams.FLAG_LAYOUT_NO_LIMITS);
++                if (android.os.Build.VERSION.SDK_INT >= 28) {
++                    WindowManager.LayoutParams lp = w.getAttributes();
++                    lp.layoutInDisplayCutoutMode = WindowManager.LayoutParams.LAYOUT_IN_DISPLAY_CUTOUT_MODE_SHORT_EDGES;
++                    w.setAttributes(lp);
++                }
++            }
++            d.show();
++            final View root = box;
++            root.postDelayed(new Runnable() {
++                public void run() {
++                    root.animate().alpha(0f).setDuration(350).withEndAction(new Runnable() {
++                        public void run() {
++                            try {
++                                d.dismiss();
++                            } catch (Exception ignored) {
++                            }
++                        }
++                    }).start();
++                }
++            }, 4500);
++        } catch (Exception ignored) {
++            // No cover: the game just starts as before.
++        }
+     }
+ 
+     /** Tells the game how tall the soft keyboard is, so the chat can sit above it. */
