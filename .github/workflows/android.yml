@@ -78,6 +78,8 @@ jobs:
           for n in $names; do
             p="../oneshot/patches/$n"
             [ -f "../oneshot/android-patches/$n" ] && p="../oneshot/android-patches/$n"
+            # An empty Android copy: the patch is PC-only (its Android shape is another android-patches file).
+            [ -s "$p" ] || { echo "PC only: $n"; continue; }
             if git apply --whitespace=nowarn "$p"; then applied="$applied $(basename "$p")"; else skipped="$skipped $(basename "$p")"; fi
           done
           echo "applied:$applied"

@@ -28,6 +28,16 @@ jobs:
           git remote add origin https://github.com/horizon-rust/horizon
           git fetch -q --depth 1 origin "${{ inputs.ref }}"
           git checkout -q FETCH_HEAD
+      - name: Oneshot patches
+        # relay/patches: the lasting short code (claims) on top of the chosen commit.
+        run: |
+          set -euo pipefail
+          cd src
+          for p in ../oneshot/relay/patches/*.patch; do
+            [ -e "$p" ] || continue
+            echo "applying $p"
+            git apply --whitespace=nowarn "$p"
+          done
       - uses: dtolnay/rust-toolchain@stable
         with:
           targets: x86_64-unknown-linux-musl
@@ -47,4 +57,4 @@ jobs:
           gh release delete relay --cleanup-tag --yes --repo "$GITHUB_REPOSITORY" || true
           gh release create relay horizon-relay-linux-x86_64 horizon-relay-linux-x86_64.sha256 install.sh \
             --repo "$GITHUB_REPOSITORY" --title "Relay (play with friends)" \
-            --notes "horizon-relay from Horizon commit ${{ inputs.ref }}. Install on Ubuntu: curl -fsSL https://github.com/$GITHUB_REPOSITORY/releases/download/relay/install.sh | sudo bash"
+            --notes "horizon-relay from Horizon commit ${{ inputs.ref }} with relay/patches. Install on Ubuntu: curl -fsSL https://github.com/$GITHUB_REPOSITORY/releases/download/relay/install.sh | sudo bash"

@@ -1,0 +1,785 @@
+diff --git a/crates/horizon-client/src/game/touch.rs b/crates/horizon-client/src/game/touch.rs
+index e3a32788..092e2991 100644
+--- a/crates/horizon-client/src/game/touch.rs
++++ b/crates/horizon-client/src/game/touch.rs
+@@ -104,9 +104,16 @@ pub(super) enum Id {
+     F3,
+     F5,
+     Edit,
++    /// Ascend while flying (Bedrock's fly up button).
++    FlyUp,
++    /// Descend while flying (Bedrock's fly down button).
++    FlyDown,
++    /// The contextual action button: use or interact with what the crosshair is on
++    /// (Bedrock's `button.build_or_interact`, which replaces the mount button).
++    Action,
+ }
+ 
+-const IDS: [Id; 20] = [
++const IDS: [Id; 23] = [
+     Id::Stick,
+     Id::Dpad,
+     Id::AimToggle,
+@@ -127,6 +134,9 @@ const IDS: [Id; 20] = [
+     Id::F3,
+     Id::F5,
+     Id::Edit,
++    Id::FlyUp,
++    Id::FlyDown,
++    Id::Action,
+ ];
+ 
+ /// One control's place: centre as a fraction of the GUI, radius in GUI px.
+@@ -172,6 +182,14 @@ fn yes() -> bool {
+     true
+ }
+ 
++fn one() -> f32 {
++    1.0
++}
++
++fn hold_ms() -> u32 {
++    HOLD_MS as u32
++}
++
+ #[derive(Clone, Debug, Serialize, Deserialize)]
+ pub(super) struct TouchLayout {
+     /// Multiplies every control's opacity.
+@@ -185,6 +203,27 @@ pub(super) struct TouchLayout {
+     pass_through: bool,
+     #[serde(default)]
+     aim: Aim,
++    /// Bedrock's left-handed layout: the joystick on the right, the buttons on the left.
++    #[serde(default)]
++    left_handed: bool,
++    /// Scale of the top row of buttons (Bedrock's "top button scale").
++    #[serde(default = "one")]
++    top_scale: f32,
++    /// The joystick appears under the finger, as Bedrock's floating one does.
++    #[serde(default)]
++    stick_floating: bool,
++    /// Draw the floating joystick even while no finger holds it.
++    #[serde(default)]
++    stick_always: bool,
++    /// Multiplies how far a dragging finger turns the view (Bedrock's sensitivity).
++    #[serde(default = "one")]
++    look_scale: f32,
++    /// Held this long without moving, a finger breaks blocks (Bedrock's dwell before drag).
++    #[serde(default = "hold_ms")]
++    hold_ms: u32,
++    /// Sprint by pushing the joystick all the way forward (Bedrock's "sprint on movement").
++    #[serde(default = "yes")]
++    sprint_on_movement: bool,
+ }
+ 
+ impl Default for TouchLayout {
+@@ -194,6 +233,27 @@ impl Default for TouchLayout {
+ }
+ 
+ impl TouchLayout {
++    /// A preset's controls with the defaults every preset shares.
++    fn with(controls: HashMap<Id, Spec>, preset: Preset, aim: Aim) -> Self {
++        Self {
++            opacity: 0.85,
++            controls,
++            preset,
++            pass_through: true,
++            aim,
++            left_handed: false,
++            top_scale: 1.0,
++            // Bedrock's joystick layouts float under the finger; the D-pad and the
++            // button layout keep their stick where it is drawn.
++            stick_floating: preset == Preset::Bedrock,
++            stick_always: false,
++            look_scale: 1.0,
++            hold_ms: HOLD_MS as u32,
++            // Bedrock's joystick sprints when pushed all the way; the other layouts don't.
++            sprint_on_movement: preset == Preset::Bedrock,
++        }
++    }
++
+     /// Bedrock's D-pad layout on a 560 x 270 GUI: the pad bottom left (`size` is half a
+     /// cell), jump bottom right, pause and chat top centre, "..." by the hotbar.
+     fn dpad() -> Self {
+@@ -210,6 +270,9 @@ impl TouchLayout {
+             (Id::Attack, at(w - 82.0, h - 70.0, 13.0)),
+             (Id::Use, off(w - 80.0, h - 80.0, 14.0)),
+             (Id::Mount, at(w - 78.0, h - 104.0, 10.0)),
++            (Id::FlyUp, off(w - 44.0, h - 120.0, 14.0)),
++            (Id::FlyDown, off(w - 84.0, h - 44.0, 14.0)),
++            (Id::Action, off(w - 80.0, h - 80.0, 14.0)),
+             (Id::AimToggle, off(w - 14.0, 40.0, 9.0)),
+             (Id::Chat, at(w / 2.0 - 48.0, 12.0, 9.0)),
+             (Id::Drop, at(w / 2.0 - 24.0, 12.0, 9.0)),
+@@ -223,7 +286,7 @@ impl TouchLayout {
+             (Id::F5, at(w - 14.0, 12.0, 9.0)),
+             (Id::Edit, at(w - 36.0, 12.0, 8.0)),
+         ]);
+-        Self { opacity: 0.85, controls, preset: Preset::Dpad, pass_through: true, aim: Aim::Crosshair }
++        Self::with(controls, Preset::Dpad, Aim::Crosshair)
+     }
+ 
+     /// Bedrock Edition's touch layout: no attack or use buttons (tap to use or hit,
+@@ -242,7 +305,12 @@ impl TouchLayout {
+         controls.insert(Id::Sneak, at(w - 36.0, h - 36.0, 18.0));
+         controls.insert(Id::Attack, off(w - 82.0, h - 70.0, 13.0));
+         controls.insert(Id::Sprint, off(w - 44.0, h - 92.0, 11.0));
+-        controls.insert(Id::Mount, at(w - 82.0, h - 62.0, 14.0));
++        controls.insert(Id::Mount, off(w - 82.0, h - 62.0, 14.0));
++        // Bedrock's contextual action button (use / interact) in the mount button's place.
++        controls.insert(Id::Action, at(w - 84.0, h - 62.0, 14.0));
++        // Fly up and fly down, above jump and beside sneak (shown only in flight).
++        controls.insert(Id::FlyUp, at(w - 36.0, h - 138.0, 15.0));
++        controls.insert(Id::FlyDown, at(w - 84.0, h - 20.0, 13.0));
+         controls.insert(Id::AimToggle, at(w - 14.0, 40.0, 9.0));
+         controls.insert(Id::Inventory, at(bar + 11.0, h - 11.0, 10.0));
+         controls.insert(Id::Drop, off(w / 2.0 - 24.0, 12.0, 9.0));
+@@ -254,7 +322,7 @@ impl TouchLayout {
+         controls.insert(Id::Pause, at(w / 2.0 + 26.0, 14.0, 12.0));
+         controls.insert(Id::Edit, at(w - 38.0, 14.0, 10.0));
+         let controls = layout.controls;
+-        Self { opacity: 0.85, controls, preset: Preset::Bedrock, pass_through: true, aim: Aim::Touch }
++        Self::with(controls, Preset::Bedrock, Aim::Touch)
+     }
+ 
+     /// Laid out on a 560 x 270 GUI (a 20:9 phone at GUI scale 4).
+@@ -267,6 +335,9 @@ impl TouchLayout {
+             (Id::Dpad, Spec { visible: false, ..at(62.0, h - 62.0, 13.0) }),
+             (Id::AimToggle, Spec { visible: false, ..at(w - 14.0, 40.0, 9.0) }),
+             (Id::Mount, Spec { visible: false, ..at(w - 78.0, h - 104.0, 10.0) }),
++            (Id::FlyUp, Spec { visible: false, ..at(w - 44.0, h - 120.0, 14.0) }),
++            (Id::FlyDown, Spec { visible: false, ..at(w - 84.0, h - 44.0, 14.0) }),
++            (Id::Action, Spec { visible: false, ..at(w - 80.0, h - 80.0, 14.0) }),
+             (Id::F8, Spec { visible: false, ..at(109.0, 12.0, 8.0) }),
+             (Id::Jump, at(w - 30.0, h - 42.0, 18.0)),
+             (Id::Sneak, at(w - 72.0, h - 22.0, 13.0)),
+@@ -285,7 +356,7 @@ impl TouchLayout {
+             (Id::F5, at(69.0, 12.0, 8.0)),
+             (Id::Edit, at(90.0, 12.0, 8.0)),
+         ]);
+-        Self { opacity: 0.85, controls, preset: Preset::Standard, pass_through: true, aim: Aim::Crosshair }
++        Self::with(controls, Preset::Standard, Aim::Crosshair)
+     }
+ 
+     fn of(preset: Preset) -> Self {
+@@ -312,9 +383,38 @@ impl TouchLayout {
+             layout.opacity = saved.opacity.clamp(0.1, 1.0);
+             layout.pass_through = saved.pass_through;
+             layout.aim = saved.aim;
++            layout.left_handed = saved.left_handed;
++            layout.top_scale = saved.top_scale.clamp(0.6, 2.0);
++            // A layout file from before the floating joystick gets the preset's own
++            // answer (Bedrock's joystick floats, the D-pad does not).
++            layout.stick_floating =
++                if text.contains("\"stick_floating\"") { saved.stick_floating } else { preset == Preset::Bedrock };
++            layout.stick_always = saved.stick_always;
++            layout.look_scale = saved.look_scale.clamp(0.2, 3.0);
++            layout.hold_ms = saved.hold_ms.clamp(80, 2000);
++            layout.sprint_on_movement = if text.contains("\"sprint_on_movement\"") {
++                saved.sprint_on_movement
++            } else {
++                preset == Preset::Bedrock
++            };
+         }
+         layout
+     }
++    /// The player's own choices, which a preset or a reset leaves as they were
++    /// (the joystick's floating and its sprint follow the preset).
++    fn keep_choices(&mut self, old: &TouchLayout) {
++        self.opacity = old.opacity;
++        self.pass_through = old.pass_through;
++        self.aim = old.aim;
++        self.left_handed = old.left_handed;
++        self.top_scale = old.top_scale;
++        self.stick_always = old.stick_always;
++        self.look_scale = old.look_scale;
++        self.hold_ms = old.hold_ms;
++        if old.preset == self.preset {
++            self.sprint_on_movement = old.sprint_on_movement;
++        }
++    }
+     fn save(&self) {
+         match serde_json::to_string_pretty(self) {
+             Ok(text) => {
+@@ -397,6 +497,12 @@ enum EditAction {
+     Dpad,
+     AddButton,
+     RemoveButton,
++    /// Bedrock's left-handed layout (the joystick on the right).
++    LeftHand,
++    /// Bedrock's top button scale, cycling 80/100/120/140%.
++    TopScale,
++    /// The floating joystick (it appears under the finger).
++    StickFloat,
+ }
+ 
+ /// The second row: the layout and how buttons share fingers with the camera.
+@@ -411,7 +517,7 @@ const PRESET_ACTIONS: [(EditAction, &str); 5] = [
+ /// The third row: the player's own buttons.
+ const BUTTON_ACTIONS: [(EditAction, &str); 2] = [(EditAction::AddButton, "+ Button"), (EditAction::RemoveButton, "- Button")];
+ 
+-const EDIT_ACTIONS: [(EditAction, &str); 9] = [
++const EDIT_ACTIONS: [(EditAction, &str); 12] = [
+     (EditAction::SizeDown, "Size-"),
+     (EditAction::SizeUp, "Size+"),
+     (EditAction::FadeDown, "Alpha-"),
+@@ -419,6 +525,9 @@ const EDIT_ACTIONS: [(EditAction, &str); 9] = [
+     (EditAction::AllFadeDown, "All-"),
+     (EditAction::AllFadeUp, "All+"),
+     (EditAction::Toggle, "Hide"),
++    (EditAction::LeftHand, "Left hand"),
++    (EditAction::TopScale, "Top size"),
++    (EditAction::StickFloat, "Stick"),
+     (EditAction::Reset, "Reset"),
+     (EditAction::Save, "Save"),
+ ];
+@@ -457,6 +566,12 @@ pub(super) struct Touches {
+     dirty: bool,
+     /// Where the finger now going down on a button is (for pass-through).
+     press_at: [f64; 2],
++    /// Where a floating joystick was started (GUI px); `None` while nothing holds it.
++    stick_origin: Option<[f32; 2]>,
++    /// Fingers on a fly button: they let go when the flight ends under them.
++    fly_fingers: Vec<u64>,
++    /// When the joystick was last pressed: a second press soon after sprints (Bedrock).
++    last_stick_start: Option<Instant>,
+     /// The soft keyboard was asked for.
+     ime_shown: bool,
+     /// A menu tap since the last frame: ask for the keyboard again if a field wants it.
+@@ -494,6 +609,9 @@ impl Default for Touches {
+             selected: None,
+             dirty: false,
+             press_at: [0.0; 2],
++            stick_origin: None,
++            fly_fingers: Vec::new(),
++            last_stick_start: None,
+             ime_shown: false,
+             ime_retap: false,
+             hardware: false,
+@@ -526,10 +644,15 @@ struct Gui {
+ impl Gui {
+     fn place(&self, layout: &TouchLayout, id: Id) -> ([f32; 2], f32) {
+         let s = layout.spec(id);
+-        // Short screens get smaller controls.
+-        let k = (self.h / REF_H).clamp(0.8, 1.0);
++        // Short screens get smaller controls; the top row follows Bedrock's top button scale.
++        let top = s.y < 0.2;
++        let k = (self.h / REF_H).clamp(0.8, 1.0) * if top { layout.top_scale.clamp(0.6, 2.0) } else { 1.0 };
+         let size = s.size * k;
+         let (mut x, y) = self.anchor(s.x, s.y);
++        // Bedrock's left-handed layout mirrors every control but the hotbar's own button.
++        if layout.left_handed && id != Id::Inventory {
++            x = self.w - x;
++        }
+         if id == Id::Inventory && x > self.w / 2.0 {
+             x = x.max(self.hotbar_x() + 182.0 + size + 1.0);
+         }
+@@ -551,7 +674,8 @@ impl Gui {
+         (x, y)
+     }
+     /// The reverse of `anchor`: the spec fractions of a spot on this GUI.
+-    fn unanchor(&self, x: f32, y: f32) -> [f32; 2] {
++    fn unanchor(&self, x: f32, y: f32, left_handed: bool) -> [f32; 2] {
++        let x = if left_handed { self.w - x } else { x };
+         let rx = if (x - self.w / 2.0).abs() <= 110.0 {
+             REF_W / 2.0 + x - self.w / 2.0
+         } else if x < self.w / 2.0 {
+@@ -597,9 +721,11 @@ impl Gui {
+         (p[0] - c[0]).hypot(p[1] - c[1]) <= r + 10.0
+     }
+     /// The control under `p`; hidden ones only in the editor.
+-    fn hit(&self, layout: &TouchLayout, p: [f32; 2], editing: bool) -> Option<Id> {
++    fn hit(&self, layout: &TouchLayout, p: [f32; 2], editing: bool, flying: bool) -> Option<Id> {
+         IDS.into_iter()
+-            .filter(|&id| editing || layout.spec(id).visible)
++            .filter(|&id| editing || (layout.spec(id).visible && (flying || !matches!(id, Id::FlyUp | Id::FlyDown))))
++            // A floating joystick has no fixed circle: the left half of the screen starts it.
++            .filter(|&id| !(layout.stick_floating && id == Id::Stick && !editing))
+             .filter_map(|id| {
+                 let (c, r) = self.place(layout, id);
+                 if id == Id::Dpad {
+@@ -617,23 +743,28 @@ impl Gui {
+     }
+     /// The editor's panel: a row of buttons a third of the way down.
+     fn panel(&self) -> impl Iterator<Item = (EditAction, &'static str, [f32; 4])> {
+-        let bw = 44.0f32;
+-        let gap = 3.0;
+-        let total = EDIT_ACTIONS.len() as f32 * (bw + gap) - gap;
+-        let x0 = ((self.w - total) / 2.0).floor();
++        let bw = 40.0f32;
++        let gap = 2.0;
++        // Two rows of six: twelve in one row are wider than a phone's GUI.
++        let per_row = EDIT_ACTIONS.len().div_ceil(2);
++        let total = per_row as f32 * (bw + gap) - gap;
++        let x0 = ((self.w - total) / 2.0).floor().max(4.0);
+         let y = (self.h * 0.32).floor();
+         let pw = 56.0f32;
+         let ptotal = PRESET_ACTIONS.len() as f32 * (pw + gap) - gap;
+-        let px0 = ((self.w - ptotal) / 2.0).floor();
++        let px0 = ((self.w - ptotal) / 2.0).floor().max(4.0);
+         EDIT_ACTIONS
+             .into_iter()
+             .enumerate()
+-            .map(move |(i, (a, l))| (a, l, [x0 + i as f32 * (bw + gap), y, bw, 16.0]))
++            .map(move |(i, (a, l))| {
++                let (col, row) = (i % per_row, i / per_row);
++                (a, l, [x0 + col as f32 * (bw + gap), y + row as f32 * 19.0, bw, 16.0])
++            })
+             .chain(
+                 PRESET_ACTIONS
+                     .into_iter()
+                     .enumerate()
+-                    .map(move |(i, (a, l))| (a, l, [px0 + i as f32 * (pw + gap), y + 19.0, pw, 16.0])),
++                    .map(move |(i, (a, l))| (a, l, [px0 + i as f32 * (pw + gap), y + 38.0, pw, 16.0])),
+             )
+             .chain({
+                 let btotal = BUTTON_ACTIONS.len() as f32 * (pw + gap) - gap;
+@@ -641,7 +772,7 @@ impl Gui {
+                 BUTTON_ACTIONS
+                     .into_iter()
+                     .enumerate()
+-                    .map(move |(i, (a, l))| (a, l, [bx0 + i as f32 * (pw + gap), y + 38.0, pw, 16.0]))
++                    .map(move |(i, (a, l))| (a, l, [bx0 + i as f32 * (pw + gap), y + 57.0, pw, 16.0]))
+             })
+     }
+     /// The D-pad cell under `p` (x right, y forward), `None` off the pad.
+@@ -813,10 +944,17 @@ fn square_icon(id: Id) -> Option<&'static str> {
+         Id::AimToggle => "crosshair",
+         Id::Mount => "mount",
+         Id::Drop => "drop",
++        // Bedrock's fly up and fly down arrows (the down one is the up arrow turned round).
++        Id::FlyUp | Id::FlyDown => "arrow_up",
+         _ => return None,
+     })
+ }
+ 
++/// Quarter turns of a square button's pixel icon (the fly down arrow points down).
++fn square_icon_turns(id: Id) -> u8 {
++    if id == Id::FlyDown { 2 } else { 0 }
++}
++
+ /// A line `t` wide from `a` to `b`.
+ fn line(batch: &mut HudBatch, atlas: &HudAtlas, a: [f32; 2], b: [f32; 2], t: f32, color: u32) {
+     let (dx, dy) = (b[0] - a[0], b[1] - a[1]);
+@@ -839,6 +977,8 @@ fn icon(batch: &mut HudBatch, atlas: &HudAtlas, id: Id, c: [f32; 2], r: f32, col
+     };
+     match id {
+         Id::Stick | Id::Dpad => {}
++        // Drawn from the pixel icons on their square tiles.
++        Id::FlyUp | Id::FlyDown => {}
+         Id::AimToggle => {
+             line(batch, atlas, [x, y - s], [x, y + s], 1.0, color);
+             line(batch, atlas, [x - s, y], [x + s, y], 1.0, color);
+@@ -865,7 +1005,7 @@ fn icon(batch: &mut HudBatch, atlas: &HudAtlas, id: Id, c: [f32; 2], r: f32, col
+             line(batch, atlas, [x - s * 0.9, y + s * 0.1], [x - s * 0.1, y + s * 0.9], (s * 0.3).max(1.2), color);
+             line(batch, atlas, [x - s * 0.6, y + s * 0.6], [x - s, y + s], (s * 0.3).max(1.2), color);
+         }
+-        Id::Use => {
++        Id::Use | Id::Action => {
+             // A hand: palm and fingers.
+             batch.fill(atlas, x - s * 0.6, y - s * 0.1, s * 1.2, s * 0.9, color);
+             for i in 0..4 {
+@@ -992,7 +1132,11 @@ impl Game<'_> {
+         for i in held {
+             self.touch_custom(i, false);
+         }
++        let fly_down = std::mem::take(&mut self.touch.fly_fingers)
++            .iter()
++            .any(|f| matches!(self.touch.fingers.get(f), Some(Finger::Press(Button::RightStick, ..))));
+         self.touch.fingers.clear();
++        self.touch.stick_origin = None;
+         self.touch.knob = [0.0, 0.0];
+         self.touch.dpad = None;
+         self.touch.aim_at = None;
+@@ -1001,6 +1145,10 @@ impl Game<'_> {
+         let sneaking = self.touch.sneaking;
+         self.pad.injected = Default::default();
+         self.pad.injected.set(Button::RightStick, sneaking);
++        if fly_down {
++            // A sneak toggle fly down turned on goes off again.
++            self.touch_fly_release(Button::RightStick);
++        }
+     }
+ 
+     /// The controls over the HUD, while playing.
+@@ -1058,7 +1206,15 @@ impl Game<'_> {
+             if !spec.visible {
+                 a *= 0.35;
+             }
+-            let (c, r) = gui.place(layout, id);
++            if matches!(id, Id::FlyUp | Id::FlyDown) && !self.touch_flying() && !editing {
++                continue;
++            }
++            let (c, r) = match (id, layout.stick_floating, t.stick_origin) {
++                // A floating joystick is drawn where the finger holds it.
++                (Id::Stick, true, Some(origin)) => (origin, gui.place(layout, id).1),
++                (Id::Stick, true, None) if !layout.stick_always && !editing => continue,
++                _ => gui.place(layout, id),
++            };
+             let squared = layout.preset != Preset::Standard;
+             if id == Id::Dpad {
+                 let cell = dpad_cell(r);
+@@ -1132,7 +1288,7 @@ impl Game<'_> {
+                 square(batch, atlas, c, r, down, a);
+                 let ink = fade(INK, a);
+                 match square_icon(id) {
+-                    Some(rows) => pixels(batch, atlas, rows, 0, c, r * 1.2, ink),
++                    Some(rows) => pixels(batch, atlas, rows, square_icon_turns(id), c, r * 1.2, ink),
+                     None => icon(batch, atlas, id, c, r, ink),
+                 }
+             } else if id == Id::Stick {
+@@ -1218,6 +1374,19 @@ impl Game<'_> {
+                 }
+             }
+         }
++        if !self.touch.fly_fingers.is_empty() && !self.touch_flying() {
++            // The flight ended under a held fly button: the button is gone, so it lets go.
++            for id in std::mem::take(&mut self.touch.fly_fingers) {
++                if let Some(Finger::Press(button, ..)) = self.touch.fingers.remove(&id) {
++                    self.touch_fly_release(button);
++                }
++            }
++        }
++        let rising = self.touch.fly_fingers.iter().any(|f| matches!(self.touch.fingers.get(f), Some(Finger::Press(Button::South, ..))));
++        if rising && let Some(p) = self.player.as_mut() {
++            // Fly up only rises: a jump tap right after it must not end the flight.
++            p.jump_trigger_time = 0;
++        }
+         if self.touch.unsneak_frames > 0 {
+             self.touch.unsneak_frames -= 1;
+             if self.touch.unsneak_frames == 0 {
+@@ -1225,6 +1394,8 @@ impl Game<'_> {
+             }
+         }
+         let touch_aim = self.touch.layout.aim == Aim::Touch;
++        // Bedrock's "dwell before drag": how long a still finger takes to break.
++        let hold = u128::from(self.touch.layout.hold_ms);
+         let mut attack = false;
+         let mut held = [false; 2];
+         let mut aim_start = None;
+@@ -1232,7 +1403,7 @@ impl Game<'_> {
+             if let Finger::Look { since, moved, attacking, start, .. } = finger
+                 && !*moved
+                 && !*attacking
+-                && since.elapsed().as_millis() >= HOLD_MS
++                && since.elapsed().as_millis() >= hold
+             {
+                 *attacking = true;
+                 aim_start = Some(*start);
+@@ -1339,20 +1510,22 @@ impl Game<'_> {
+             EditAction::AllFadeDown => t.layout.opacity = (t.layout.opacity - 0.1).max(0.1),
+             EditAction::AllFadeUp => t.layout.opacity = (t.layout.opacity + 0.1).min(1.0),
+             EditAction::Reset => {
+-                let keep = (t.layout.opacity, t.layout.pass_through);
+-                t.layout = TouchLayout::of(t.layout.preset);
+-                (t.layout.opacity, t.layout.pass_through) = keep;
++                let preset = t.layout.preset;
++                let old = std::mem::replace(&mut t.layout, TouchLayout::of(preset));
++                t.layout.keep_choices(&old);
+                 t.selected = None;
+                 t.dirty = false;
+             }
+             EditAction::Standard | EditAction::Bedrock | EditAction::Dpad => {
+-                let keep = (t.layout.opacity, t.layout.pass_through, t.layout.aim);
+-                t.layout = TouchLayout::of(match action {
+-                    EditAction::Bedrock => Preset::Bedrock,
+-                    EditAction::Standard => Preset::Standard,
+-                    _ => Preset::Dpad,
+-                });
+-                (t.layout.opacity, t.layout.pass_through, t.layout.aim) = keep;
++                let old = std::mem::replace(
++                    &mut t.layout,
++                    TouchLayout::of(match action {
++                        EditAction::Bedrock => Preset::Bedrock,
++                        EditAction::Standard => Preset::Standard,
++                        _ => Preset::Dpad,
++                    }),
++                );
++                t.layout.keep_choices(&old);
+                 t.selected = None;
+                 t.dirty = false;
+             }
+@@ -1386,6 +1559,20 @@ impl Game<'_> {
+                 t.editing = false;
+                 t.selected = None;
+             }
++            // Bedrock's layout switches: left-handed, top button scale, floating stick.
++            EditAction::LeftHand => {
++                t.layout.left_handed = !t.layout.left_handed;
++                t.dirty = true;
++            }
++            EditAction::TopScale => {
++                let next = t.layout.top_scale + 0.2;
++                t.layout.top_scale = if next > 1.41 { 0.8 } else { next.clamp(0.6, 2.0) };
++                t.dirty = true;
++            }
++            EditAction::StickFloat => {
++                t.layout.stick_floating = !t.layout.stick_floating;
++                t.dirty = true;
++            }
+             _ => {}
+         }
+     }
+@@ -1441,6 +1628,27 @@ impl Game<'_> {
+                 Finger::Done
+             }
+             Id::Attack | Id::Use => unreachable!("touch_event starts trigger fingers"),
++            // Ascend and descend while flying, as Bedrock's fly buttons do (jump and
++            // sneak are what the game itself uses to fly).
++            Id::FlyUp => {
++                // Jump's double tap toggles creative flight: the fly button only rises.
++                if let Some(p) = self.player.as_mut() {
++                    p.jump_trigger_time = 0;
++                }
++                pad(self, Button::South)
++            }
++            Id::FlyDown => {
++                if self.settings.controller.toggle_sneak || self.settings.toggle_crouch {
++                    if self.touch.sneaking {
++                        // Sneak is already toggled on, so the flight already descends.
++                        return Finger::Done;
++                    }
++                    // Toggle mode: a tap turns sneak on now, another when the finger lifts.
++                    self.pad.taps.push(Button::RightStick);
++                }
++                pad(self, Button::RightStick)
++            }
++            Id::Action => unreachable!("touch_event starts trigger fingers"),
+             Id::Pause => pad(self, Button::Start),
+             // Straight to the chat screen: the pad's chat binding (DPadUp by
+             // default, DPadRight in some layouts) is not a fixed button.
+@@ -1540,7 +1748,7 @@ impl Game<'_> {
+                         self.touch.selected_button = Some(i);
+                         let (c, _) = gui.custom(&self.touch.buttons[i]);
+                         Finger::DragCustom(i, [c[0] - p[0], c[1] - p[1]])
+-                    } else if let Some(control) = gui.hit(&self.touch.layout, p, true) {
++                    } else if let Some(control) = gui.hit(&self.touch.layout, p, true, self.touch_flying()) {
+                         self.touch.selected_button = None;
+                         self.touch.selected = Some(control);
+                         let (c, _) = gui.place(&self.touch.layout, control);
+@@ -1553,22 +1761,34 @@ impl Game<'_> {
+                 } else if let Some(i) = gui.custom_hit(&self.touch.buttons, p) {
+                     self.touch_custom(i, true);
+                     Finger::Custom(i)
+-                } else if let Some(control) = gui.hit(&self.touch.layout, p, false)
+-                    && matches!(control, Id::Attack | Id::Use)
++                } else if let Some(control) = gui.hit(&self.touch.layout, p, false, self.touch_flying())
++                    && matches!(control, Id::Attack | Id::Use | Id::Action)
+                 {
+                     let i = if control == Id::Attack { 1 } else { 0 };
+                     let look = self.touch.layout.looks(Some(control));
+                     Finger::Trigger { i, last: pos, since: Instant::now(), look }
+-                } else if let Some(control) = gui.hit(&self.touch.layout, p, false) {
++                } else if let Some(control) = gui.hit(&self.touch.layout, p, false, self.touch_flying()) {
+                     self.touch.press_at = pos;
+                     self.touch.pressing = Some(control);
+                     if control == Id::Dpad && gui.dpad_at(&self.touch.layout, p) == Some([0, 0]) {
+                         // The centre: sneak, toggled (Bedrock).
+                         self.touch_press(Id::Sneak)
+                     } else {
+-                        let finger = self.touch_press(control);
++                        let finger = match self.touch_press(control) {
++                            // One joystick: a second finger on it turns the view instead.
++                            Finger::Stick if self.touch.fingers.values().any(|f| matches!(f, Finger::Stick)) => {
++                                Finger::Look { last: pos, start: pos, since: Instant::now(), moved: false, attacking: false }
++                            }
++                            f => f,
++                        };
++                        if matches!(control, Id::FlyUp | Id::FlyDown) && matches!(finger, Finger::Press(..)) {
++                            self.touch.fly_fingers.push(id);
++                        }
+                         match finger {
+-                            Finger::Stick => self.touch_stick(&gui, p),
++                            Finger::Stick => {
++                                self.touch_stick_start();
++                                self.touch_stick(&gui, p)
++                            }
+                             Finger::Dpad => self.touch_dpad(&gui, p, true),
+                             _ => {}
+                         }
+@@ -1577,6 +1797,20 @@ impl Game<'_> {
+                 } else if let Some(slot) = gui.hotbar_slot(p) {
+                     self.selected = slot;
+                     Finger::Done
++                } else if self.touch.layout.stick_floating
++                    && self.touch.layout.spec(Id::Stick).visible
++                    && !self.touch.fingers.values().any(|f| matches!(f, Finger::Stick))
++                    // The left-handed layout floats it on the right.
++                    && (if self.touch.layout.left_handed { gui.w - p[0] } else { p[0] }) < gui.w * 0.45
++                    && p[1] > gui.h * 0.25
++                {
++                    // Bedrock's floating joystick: it appears where the finger went down,
++                    // so the thumb never has to find a fixed pad.
++                    self.touch.stick_origin = Some(p);
++                    self.touch.knob = [0.0, 0.0];
++                    self.touch_stick_start();
++                    self.touch_stick(&gui, p);
++                    Finger::Stick
+                 } else {
+                     Finger::Look { last: pos, start: pos, since: Instant::now(), moved: false, attacking: false }
+                 };
+@@ -1615,7 +1849,8 @@ impl Game<'_> {
+                 Some(Finger::Drag(control, off)) => {
+                     self.touch.dirty = true;
+                     if let Some(spec) = self.touch.layout.controls.get_mut(&control) {
+-                        let at = gui.unanchor(p[0] + off[0], p[1] + off[1]);
++                        let mirrored = self.touch.layout.left_handed && control != Id::Inventory;
++                        let at = gui.unanchor(p[0] + off[0], p[1] + off[1], mirrored);
+                         spec.x = at[0];
+                         spec.y = at[1];
+                     }
+@@ -1634,8 +1869,7 @@ impl Game<'_> {
+                     self.touch
+                         .fingers
+                         .insert(id, Finger::Look { last: pos, start, since, moved: moved || far, attacking });
+-                    self.mouse.on_move(0.0, 0.0, dx, dy, true, true);
+-                    self.last_input = Instant::now();
++                    self.touch_look(dx, dy);
+                 }
+                 Some(Finger::Trigger { i, last, since, look }) => {
+                     // The attack (or use) button's finger turns the view too, unless
+@@ -1644,21 +1878,21 @@ impl Game<'_> {
+                     let (dx, dy) = (pos[0] - last[0], pos[1] - last[1]);
+                     self.touch.fingers.insert(id, Finger::Trigger { i, last: pos, since, look });
+                     if look && !self.touch_looking(id) {
+-                        self.mouse.on_move(0.0, 0.0, dx, dy, true, true);
+-                        self.last_input = Instant::now();
++                        self.touch_look(dx, dy);
+                     }
+                 }
+                 Some(Finger::Press(button, last, true)) => {
+                     let (dx, dy) = (pos[0] - last[0], pos[1] - last[1]);
+                     self.touch.fingers.insert(id, Finger::Press(button, pos, true));
+                     if !self.touch_looking(id) {
+-                        self.mouse.on_move(0.0, 0.0, dx, dy, true, true);
+-                        self.last_input = Instant::now();
++                        self.touch_look(dx, dy);
+                     }
+                 }
+                 _ => {}
+             },
+-            TouchPhase::Ended | TouchPhase::Cancelled => match self.touch.fingers.remove(&id) {
++            TouchPhase::Ended | TouchPhase::Cancelled => {
++                let hold = u128::from(self.touch.layout.hold_ms);
++                match self.touch.fingers.remove(&id) {
+                 Some(Finger::Pointer) => {
+                     // A cancelled touch (a system gesture took it) lets go off screen: no click.
+                     // A swipe that scrolled lets go off screen too: it clicks nothing.
+@@ -1673,6 +1907,7 @@ impl Game<'_> {
+                 }
+                 Some(Finger::Stick) => {
+                     self.touch.knob = [0.0, 0.0];
++                    self.touch.stick_origin = None;
+                     self.pad.injected.left = [0.0, 0.0];
+                 }
+                 Some(Finger::Dpad) => {
+@@ -1686,10 +1921,17 @@ impl Game<'_> {
+                     // The aim point stays until the attack trigger is let go.
+                     self.touch.aim_frames = 2;
+                 }
+-                Some(Finger::Press(button, _, _)) => self.pad.injected.set(button, false),
++                Some(Finger::Press(button, _, _)) => {
++                    if let Some(k) = self.touch.fly_fingers.iter().position(|&f| f == id) {
++                        self.touch.fly_fingers.swap_remove(k);
++                        self.touch_fly_release(button);
++                    } else {
++                        self.pad.injected.set(button, false);
++                    }
++                }
+                 Some(Finger::Custom(i)) => self.touch_custom(i, false),
+                 Some(Finger::DragCustom(..)) => save_buttons(&self.touch.buttons),
+-                Some(Finger::Trigger { i, since, .. }) if since.elapsed().as_millis() < HOLD_MS => {
++                Some(Finger::Trigger { i, since, .. }) if since.elapsed().as_millis() < hold => {
+                     // A short tap: keep it down a few frames so a tick sees
+                     // one hit (or one use).
+                     self.pad.injected.triggers[i] = 1.0;
+@@ -1707,7 +1949,8 @@ impl Game<'_> {
+                     self.touch.trigger_release[i] = 3;
+                 }
+                 _ => {}
+-            },
++                }
++            }
+         }
+     }
+ 
+@@ -1846,17 +2089,76 @@ impl Game<'_> {
+         };
+     }
+ 
++    /// Whether the local player is flying: the fly buttons show only then, as on Bedrock.
++    fn touch_flying(&self) -> bool {
++        self.player.as_ref().is_some_and(|p| p.flying)
++    }
++
++    /// A fly button let go: fly up stops rising; fly down gives the sneak back to the
++    /// sneak button (in toggle mode one more tap turns its own sneak off).
++    fn touch_fly_release(&mut self, button: Button) {
++        if button != Button::RightStick {
++            self.pad.injected.set(button, false);
++        } else if self.settings.controller.toggle_sneak || self.settings.toggle_crouch {
++            if let Some(k) = self.pad.taps.iter().position(|&b| b == Button::RightStick) {
++                // The press's tap has not reached the game yet: the two cancel out.
++                self.pad.taps.swap_remove(k);
++                self.pad.injected.set(Button::RightStick, self.touch.sneaking);
++            } else {
++                self.pad.injected.set(Button::RightStick, true);
++                self.pad.taps.push(Button::RightStick);
++            }
++        } else {
++            self.pad.injected.set(Button::RightStick, self.touch.sneaking);
++        }
++        if button == Button::South {
++            // Fly up lifted: its press does not count as the first tap of a double jump.
++            if let Some(p) = self.player.as_mut() {
++                p.jump_trigger_time = 0;
++            }
++        }
++    }
++
++    /// A joystick press: a second one within 300 ms sprints (Bedrock's double tap
++    /// on the joystick).
++    fn touch_stick_start(&mut self) {
++        if self.touch.last_stick_start.is_some_and(|t| t.elapsed().as_millis() < 300) {
++            self.touch.sprinting = true;
++            self.pad.injected.set(Button::LeftStick, true);
++        }
++        self.touch.last_stick_start = Some(Instant::now());
++    }
++
++    /// Turns the view from a finger's drag, scaled by the layout's touch sensitivity.
++    fn touch_look(&mut self, dx: f64, dy: f64) {
++        let k = f64::from(self.touch.layout.look_scale.clamp(0.2, 3.0));
++        self.mouse.on_move(0.0, 0.0, dx * k, dy * k, true, true);
++        self.last_input = Instant::now();
++    }
++
+     fn touch_stick(&mut self, gui: &Gui, p: [f32; 2]) {
+-        let (c, r) = gui.place(&self.touch.layout, Id::Stick);
++        // A floating joystick travels with the finger that started it; a fixed one
++        // stays where the layout puts it.
++        let (c, r) = match self.touch.stick_origin.filter(|_| self.touch.layout.stick_floating) {
++            Some(origin) => (origin, gui.place(&self.touch.layout, Id::Stick).1),
++            None => gui.place(&self.touch.layout, Id::Stick),
++        };
+         let mut v = [(p[0] - c[0]) / (r * 0.6), (c[1] - p[1]) / (r * 0.6)];
+         let len = v[0].hypot(v[1]);
+         if len > 1.0 {
+             v = [v[0] / len, v[1] / len];
++        } else if len < 0.12 {
++            // Bedrock's dead zone: a resting thumb does not creep.
++            v = [0.0, 0.0];
+         }
+         self.touch.knob = v;
+         self.pad.injected.left = v;
+-        // Bedrock: the stick pushed all the way forward sprints.
+-        if self.touch.layout.preset == Preset::Bedrock && v[1] > 0.93 && v[0].abs() < 0.4 && !self.touch.sprinting {
++        // Bedrock's "sprint on movement": the stick pushed all the way forward sprints.
++        if self.touch.layout.sprint_on_movement
++            && v[1] > 0.93
++            && v[0].abs() < 0.4
++            && !self.touch.sprinting
++        {
+             self.touch.sprinting = true;
+             self.pad.injected.set(Button::LeftStick, true);
+         }

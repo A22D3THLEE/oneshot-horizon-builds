@@ -1,0 +1,1110 @@
+diff --git a/crates/horizon-client/assets/horizon/lang/en_us.json b/crates/horizon-client/assets/horizon/lang/en_us.json
+index fba28371..d5ee53a4 100644
+--- a/crates/horizon-client/assets/horizon/lang/en_us.json
++++ b/crates/horizon-client/assets/horizon/lang/en_us.json
+@@ -386,9 +386,10 @@
+   "horizon.friends.troubleshooting": "Troubleshooting...",
+   "horizon.friends.stopped": "Stopped sharing the invite code.",
+   "horizon.friends.short_code_changed": "Someone kept trying a wrong short code, so it changed.",
++  "horizon.friends.short_code_renamed": "The Oneshot server gave you another short code: send your friends the new one.",
+   "horizon.friends.code_changed": "The invite code changed: send your friends the new one.",
+   "horizon.friends.wrong_code": "Someone tried a wrong code.",
+-  "horizon.friends.relay_stopped": "Too many wrong short codes, so the relay is off until you share again. Friends can still join with the full code.",
++  "horizon.friends.relay_stopped": "Too many wrong short codes, so the relay is off until you share again; your short code will change then. Friends can still join with the full code.",
+   "horizon.friends.code_ready": "Your invite code is ready: Game Menu, Play with Friends. Copy it and send it to your friends.",
+   "horizon.friends.share_failed": "Couldn't share the world: %s",
+   "horizon.friends.finding_route": "Finding how friends can reach you…",
+diff --git a/crates/horizon-client/assets/horizon/lang/ru_ru.json b/crates/horizon-client/assets/horizon/lang/ru_ru.json
+index 42f1e923..c374a43e 100644
+--- a/crates/horizon-client/assets/horizon/lang/ru_ru.json
++++ b/crates/horizon-client/assets/horizon/lang/ru_ru.json
+@@ -258,9 +258,10 @@
+   "horizon.friends.troubleshooting": "Если не подключается...",
+   "horizon.friends.stopped": "Доступ по коду приглашения закрыт.",
+   "horizon.friends.short_code_changed": "Кто-то подбирал короткий код, поэтому он сменился.",
++  "horizon.friends.short_code_renamed": "Сервер Oneshot выдал другой короткий код: отправьте друзьям новый.",
+   "horizon.friends.code_changed": "Код приглашения сменился: отправьте друзьям новый.",
+   "horizon.friends.wrong_code": "Кто-то ввёл неверный код.",
+-  "horizon.friends.relay_stopped": "Слишком много неверных коротких кодов: сервер Oneshot выключен до следующего открытия. Полный код по-прежнему работает.",
++  "horizon.friends.relay_stopped": "Слишком много неверных коротких кодов: сервер Oneshot выключен до следующего открытия, и тогда короткий код сменится. Полный код по-прежнему работает.",
+   "horizon.friends.code_ready": "Код приглашения готов: меню игры → «Игра с друзьями» → «Отправить код».",
+   "horizon.friends.share_failed": "Не удалось открыть мир: %s",
+   "horizon.friends.finding_route": "Ищу, как друзья смогут к вам подключиться…",
+diff --git a/crates/horizon-client/src/android_main.rs b/crates/horizon-client/src/android_main.rs
+index 4048d795..3fc5e112 100644
+--- a/crates/horizon-client/src/android_main.rs
++++ b/crates/horizon-client/src/android_main.rs
+@@ -35,6 +35,10 @@ fn android_main(app: AndroidApp) {
+         if std::env::var_os("HORIZON_ONESHOT_INVITE").is_none() {
+             std::env::set_var("HORIZON_ONESHOT_INVITE", home.join("invite-code.txt"));
+         }
++        // Oneshot: the kept short code (horizon-friends identity.rs), which the launcher shows and reissues.
++        if std::env::var_os("HORIZON_FRIENDS_IDENTITY").is_none() {
++            std::env::set_var("HORIZON_FRIENDS_IDENTITY", home.join("friends-identity.txt"));
++        }
+         if let Some(internal) = app.internal_data_path() {
+             std::env::set_var("HORIZON_CACHE", internal.join("horizon-cache"));
+         }
+diff --git a/crates/horizon-client/src/game/friends.rs b/crates/horizon-client/src/game/friends.rs
+index 23a21c3a..f54662a0 100644
+--- a/crates/horizon-client/src/game/friends.rs
++++ b/crates/horizon-client/src/game/friends.rs
+@@ -23,6 +23,8 @@ pub(super) struct Sharing {
+     /// Sharing opened the world to LAN, so stopping closes it again.
+     opened_lan: bool,
+     code: Option<String>,
++    /// The relay's short code in it.
++    short: Option<String>,
+     /// Wrong codes tried so far.
+     wrong: u32,
+     notice: Option<String>,
+@@ -37,6 +39,14 @@ pub const HELP: &[&str] = &[
+     "friends status                 the code, how friends reach this host, the guests",
+ ];
+ 
++/// The relay's short code in an invite code, if it has one.
++fn short_code(code: &str) -> Option<String> {
++    match horizon_friends::invite::parse(code)? {
++        horizon_friends::invite::Parsed::Long(i) => i.relay.map(|r| r.code.to_string()),
++        _ => None,
++    }
++}
++
+ /// `HORIZON_STUN_SERVERS`, else `friendsStun` in horizon.txt, else the defaults.
+ fn stun_servers() -> Vec<String> {
+     if std::env::var_os("HORIZON_STUN_SERVERS").is_some() {
+@@ -135,6 +145,7 @@ impl Game<'_> {
+             host,
+             opened_lan,
+             code: None,
++            short: None,
+             wrong: 0,
+             notice: None,
+             copied: None,
+@@ -196,15 +207,29 @@ impl Game<'_> {
+                             "The invite code changed: send your friends the new one.",
+                         ));
+                     }
+-                    if sharing.code.is_some() && sharing.wrong >= horizon_friends::host::MAX_WRONG {
++                    // The short code is kept from one sharing to the next: news only when
++                    // the guessing made it change.
++                    let short = short_code(&code);
++                    let changed = short.is_some() && sharing.short.is_some() && short != sharing.short;
++                    if changed && sharing.wrong >= horizon_friends::host::MAX_WRONG {
+                         sharing.notice = Some(lang::get_or(
+                             "horizon.friends.short_code_changed",
+                             "Someone kept trying a wrong short code, so it changed.",
+                         ));
++                    } else if changed {
++                        sharing.notice = Some(lang::get_or(
++                            "horizon.friends.short_code_renamed",
++                            "The Oneshot server gave you another short code: send your friends the new one.",
++                        ));
++                    }
++                    if short.is_some() {
+                         sharing.wrong = 0;
+                     }
+                     announce = sharing.code.is_none();
+                     oneshot_invite(Some(&code));
++                    if short.is_some() {
++                        sharing.short = short;
++                    }
+                     sharing.code = Some(code);
+                 }
+                 HostEvent::WrongCode { count } => {
+@@ -220,7 +245,7 @@ impl Game<'_> {
+                 HostEvent::RelayStopped => {
+                     let text = lang::get_or(
+                         "horizon.friends.relay_stopped",
+-                        "Too many wrong short codes, so the relay is off until you share again. Friends can still join with the full code.",
++                        "Too many wrong short codes, so the relay is off until you share again; your short code will change then. Friends can still join with the full code.",
+                     );
+                     sharing.notice = Some(text.clone());
+                     stopped = Some(text);
+diff --git a/crates/horizon-friends/src/guest.rs b/crates/horizon-friends/src/guest.rs
+index 492f4d48..3060ec10 100644
+--- a/crates/horizon-friends/src/guest.rs
++++ b/crates/horizon-friends/src/guest.rs
+@@ -226,7 +226,9 @@ fn join_relay(config: &GuestConfig, relay_url: &str, code: &Code) -> Result<Tunn
+                 ErrorCode::HostUnreachable => JoinError::HostUnreachable,
+                 ErrorCode::Full => JoinError::Full,
+                 ErrorCode::RateLimited => JoinError::RateLimited,
+-                ErrorCode::BadRequest => JoinError::Failed("the relay refused the request".into()),
++                ErrorCode::BadRequest | ErrorCode::Taken => {
++                    JoinError::Failed("the relay refused the request".into())
++                }
+             });
+         }
+         other => return Err(JoinError::Failed(format!("unexpected answer {other:?}"))),
+diff --git a/crates/horizon-friends/src/host.rs b/crates/horizon-friends/src/host.rs
+index 12380e06..fbdb3c25 100644
+--- a/crates/horizon-friends/src/host.rs
++++ b/crates/horizon-friends/src/host.rs
+@@ -10,15 +10,17 @@ use crate::{
+     Code, PathMode,
+     crypto::{self, Role},
+     direct,
++    identity::{self, Identity},
+     invite::{Invite, RelayRef},
+     reach::{self, Reach, Verdict},
+     resolve_relay, session,
+-    wire::{self, FromRelay, ToRelay},
++    wire::{self, ErrorCode, FromRelay, ToRelay},
+ };
+ use std::{
+     collections::HashMap,
+     io::{self, BufReader},
+     net::{Shutdown, SocketAddr, TcpListener, TcpStream},
++    path::PathBuf,
+     sync::{
+         Arc, Mutex,
+         atomic::{AtomicBool, AtomicU32, AtomicUsize, Ordering},
+@@ -33,7 +35,9 @@ pub const MAX_WRONG: u32 = 5;
+ /// Wrong short codes over one sharing session before the host leaves the
+ /// relay for good (the full code keeps working directly). Each short code
+ /// has a fresh 20-bit secret, so this caps a relay's chance of guessing one
+-/// at 50 / 2^20 per session.
++/// at 50 / 2^20 per session. A code kept from one session to the next
++/// ([`identity`]) keeps its count in its file and gets a fresh secret once
++/// the count reaches this, so the cap holds for its whole life.
+ pub const MAX_WRONG_TOTAL: u32 = 50;
+ /// The longest wait before registering again after a retired short code.
+ const MAX_RETIRE_DELAY: Duration = Duration::from_secs(300);
+@@ -193,6 +197,11 @@ struct Shared {
+     wrong: AtomicU32,
+     guesses: Mutex<Guesses>,
+     reach: Mutex<Option<Reach>>,
++    /// The player's own short code and its file (`HORIZON_FRIENDS_IDENTITY`).
++    identity: Mutex<Option<(PathBuf, Identity)>>,
++    /// False once the relay answered a claim with `bad_request`: it predates
++    /// kept codes, so the host registers for a new one each time.
++    claims: AtomicBool,
+ }
+ impl Shared {
+     fn emit(&self, e: HostEvent) {
+@@ -237,6 +246,21 @@ impl Host {
+     /// Start sharing in the background: the code arrives as an event once
+     /// the host knows its addresses (a few seconds).
+     pub fn start(config: HostConfig) -> io::Result<Self> {
++        let identity = config.relay.as_ref().and(identity::path()).and_then(|path| {
++            let id = Identity::load_or_create(&path).ok()?;
++            if id.wrong < MAX_WRONG_TOTAL {
++                return Some((path, id));
++            }
++            // Spent in an earlier session: a fresh secret before it's shown.
++            let fresh = id.resecreted().ok()?;
++            id.replace(&path, &fresh).ok()?;
++            let now = Identity::read(&path).unwrap_or(fresh);
++            Some((path, now))
++        });
++        let guesses = Guesses {
++            total: identity.as_ref().map_or(0, |(_, id)| id.wrong),
++            ..Guesses::default()
++        };
+         let (tx, events) = channel();
+         let (listeners, port) = direct::listen(config.port).or_else(|_| direct::listen(0))?;
+         let shared = Arc::new(Shared {
+@@ -253,8 +277,10 @@ impl Host {
+             sessions: AtomicUsize::new(0),
+             handshakes: AtomicUsize::new(0),
+             wrong: AtomicU32::new(0),
+-            guesses: Mutex::new(Guesses::default()),
++            guesses: Mutex::new(guesses),
+             reach: Mutex::new(None),
++            identity: Mutex::new(identity),
++            claims: AtomicBool::new(true),
+         });
+         let mut threads = Vec::new();
+         let s = shared.clone();
+@@ -527,6 +553,14 @@ fn run_relay(shared: Arc<Shared>, relay: String) {
+                         }
+                     }
+                     Next::Stop => {
++                        // The kept code's secret had its guesses: the next
++                        // session shows a new one.
++                        if let Some((path, id)) = shared.identity.lock().unwrap().as_mut()
++                            && let Ok(fresh) = id.resecreted()
++                            && id.replace(path, &fresh).is_ok()
++                        {
++                            *id = fresh;
++                        }
+                         shared.publish(None);
+                         shared.emit(HostEvent::RelayStopped);
+                         break;
+@@ -557,25 +591,81 @@ fn register(shared: &Arc<Shared>, relay_url: &str) -> io::Result<()> {
+     // the attach connections, whose observed address is the one that counts.
+     let (mut control, relay) = connect_relay(relay_url, None)?;
+     control.set_read_timeout(Some(Duration::from_secs(70)))?;
+-    wire::send(
+-        &mut control,
+-        &ToRelay::Host {
++    // The player's own short code, when there is one and the relay keeps them.
++    let kept = if shared.claims.load(Ordering::Relaxed) {
++        shared
++            .identity
++            .lock()
++            .unwrap()
++            .as_ref()
++            .map(|(_, id)| id.clone())
++    } else {
++        None
++    };
++    let hello = match &kept {
++        Some(id) => ToRelay::Claim {
++            v: wire::VERSION,
++            protocol: config.protocol,
++            game: config.game.clone(),
++            nameplate: id.code.nameplate.clone(),
++            claim: id.claim.clone(),
++        },
++        None => ToRelay::Host {
+             v: wire::VERSION,
+             protocol: config.protocol,
+             game: config.game.clone(),
+         },
+-    )?;
++    };
++    wire::send(&mut control, &hello)?;
+     let mut reader = BufReader::new(control.try_clone()?);
+     let (nameplate, token) = match wire::recv_buffered::<_, FromRelay>(&mut reader)? {
+         FromRelay::Registered {
+             nameplate, token, ..
+         } => (nameplate, token),
++        FromRelay::Error {
++            code: ErrorCode::BadRequest,
++            ..
++        } if kept.is_some() => {
++            // A relay from before kept codes: a new one each time, as it was.
++            let _ = control.shutdown(Shutdown::Both);
++            shared.claims.store(false, Ordering::Relaxed);
++            return register(shared, relay_url);
++        }
++        FromRelay::Error {
++            code: ErrorCode::Full,
++            ..
++        } if kept.is_some() => {
++            // No room for one more kept code there: a fresh one this time.
++            let _ = control.shutdown(Shutdown::Both);
++            shared.claims.store(false, Ordering::Relaxed);
++            let result = register(shared, relay_url);
++            shared.claims.store(true, Ordering::Relaxed);
++            return result;
++        }
++        FromRelay::Error {
++            code: ErrorCode::Taken,
++            ..
++        } if kept.is_some() => {
++            // Someone else holds the nameplate there: take another one.
++            if let Some((path, id)) = shared.identity.lock().unwrap().as_mut()
++                && let Ok(renamed) = id.renamed()
++                && id.replace(path, &renamed).is_ok()
++            {
++                *id = Identity::read(path).unwrap_or(renamed);
++            }
++            return Err(io::Error::other(
++                "its short code was taken there, so it changed",
++            ));
++        }
+         FromRelay::Error { code, .. } => {
+             return Err(io::Error::other(format!("it refused ({})", code.as_str())));
+         }
+         other => return Err(io::Error::other(format!("unexpected answer {other:?}"))),
+     };
+-    let code = Code::new(&nameplate)?;
++    let code = match kept {
++        Some(id) if id.code.nameplate == nameplate => id.code,
++        _ => Code::new(&nameplate)?,
++    };
+     *shared.control.lock().unwrap() = Some(control.try_clone()?);
+     if shared.stopped() {
+         let _ = control.shutdown(Shutdown::Both);
+@@ -673,8 +763,18 @@ fn serve_relayed(
+         // reads the guest's, so a peer that checks it against its guess and
+         // hangs up has had its guess as well.
+         Err(_) => {
+-            let (count, retire) = shared.guesses.lock().unwrap().wrong();
++            let (count, retire, total) = {
++                let mut g = shared.guesses.lock().unwrap();
++                let (count, retire) = g.wrong();
++                (count, retire, g.total)
++            };
+             drop(reserved);
++            // A guess on the kept code counts in its file, for every session.
++            if let Some((path, id)) = shared.identity.lock().unwrap().as_ref()
++                && id.code == *code
++            {
++                let _ = id.store_wrong(path, total);
++            }
+             shared.emit(HostEvent::WrongCode { count });
+             if retire {
+                 // Retire the short code: dropping the control connection
+diff --git a/crates/horizon-friends/src/identity.rs b/crates/horizon-friends/src/identity.rs
+new file mode 100644
+index 00000000..f33681b6
+--- /dev/null
++++ b/crates/horizon-friends/src/identity.rs
+@@ -0,0 +1,249 @@
++//! A short code that stays the same from one sharing session to the next
++//! (`HORIZON_FRIENDS_IDENTITY`, a file the launcher shows and can reissue).
++//! The file holds the nameplate and secret of the code, the claim that proves
++//! to the relay the nameplate is this player's, and the wrong guesses made on
++//! the secret so far, so the guess limit holds across sessions too:
++//!
++//! ```text
++//! nameplate=K7QM
++//! secret=3XPD
++//! claim=<64 hex digits>
++//! wrong=0
++//! ```
++use crate::code::{self, Code};
++use std::{
++    io,
++    path::{Path, PathBuf},
++};
++
++/// Bytes of the claim (written as hex).
++const CLAIM: usize = 32;
++
++#[derive(Clone, PartialEq, Eq)]
++pub struct Identity {
++    pub code: Code,
++    pub claim: String,
++    /// Wrong secrets tried through the relay since the secret was made.
++    pub wrong: u32,
++}
++impl std::fmt::Debug for Identity {
++    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
++        write!(f, "Identity({:?}, wrong {})", self.code, self.wrong)
++    }
++}
++
++/// The identity file the launcher set, if any.
++pub fn path() -> Option<PathBuf> {
++    std::env::var_os("HORIZON_FRIENDS_IDENTITY")
++        .filter(|p| !p.is_empty())
++        .map(PathBuf::from)
++}
++
++fn random_bits() -> io::Result<u32> {
++    let mut b = [0u8; 4];
++    crate::fill_random(&mut b)?;
++    Ok(u32::from_le_bytes(b))
++}
++
++/// A claim as the relay accepts it: hex, 32 to 128 digits.
++pub fn valid_claim(claim: &str) -> bool {
++    (32..=128).contains(&claim.len()) && claim.bytes().all(|b| b.is_ascii_hexdigit())
++}
++
++impl Identity {
++    /// A fresh code and claim from the OS random generator.
++    pub fn generate() -> io::Result<Self> {
++        let nameplate = code::nameplate(random_bits()?);
++        Ok(Self {
++            code: Code::new(&nameplate)?,
++            claim: new_claim()?,
++            wrong: 0,
++        })
++    }
++
++    /// The file's identity; None when it is missing or not one.
++    pub fn read(path: &Path) -> Option<Self> {
++        let text = std::fs::read_to_string(path).ok()?;
++        let (mut nameplate, mut secret, mut claim, mut wrong) = (None, None, None, 0);
++        for line in text.lines() {
++            let Some((key, value)) = line.split_once('=') else {
++                continue;
++            };
++            let value = value.trim();
++            match key.trim() {
++                "nameplate" => nameplate = Some(value.to_owned()),
++                "secret" => secret = Some(value.to_owned()),
++                "claim" => claim = Some(value.to_ascii_lowercase()),
++                "wrong" => wrong = value.parse().unwrap_or(0),
++                _ => {}
++            }
++        }
++        // Each half on its own: a broken half must not borrow symbols from the other.
++        let code = Code {
++            nameplate: code::parse_nameplate(&nameplate?)?,
++            secret: code::parse_nameplate(&secret?)?,
++        };
++        let claim = claim.filter(|c| valid_claim(c))?;
++        Some(Self { code, claim, wrong })
++    }
++
++    /// The file's identity, made and saved when it is missing or broken.
++    pub fn load_or_create(path: &Path) -> io::Result<Self> {
++        if let Some(id) = Self::read(path) {
++            return Ok(id);
++        }
++        let id = Self::generate()?;
++        id.save(path)?;
++        Ok(id)
++    }
++
++    /// Write the file whole: a temporary file renamed over it.
++    pub fn save(&self, path: &Path) -> io::Result<()> {
++        let text = format!(
++            "nameplate={}\nsecret={}\nclaim={}\nwrong={}\n",
++            self.code.nameplate, self.code.secret, self.claim, self.wrong
++        );
++        if let Some(dir) = path.parent()
++            && !dir.as_os_str().is_empty()
++        {
++            std::fs::create_dir_all(dir)?;
++        }
++        let mut tmp = path.as_os_str().to_owned();
++        tmp.push(".tmp");
++        let tmp = PathBuf::from(tmp);
++        std::fs::write(&tmp, text)?;
++        std::fs::rename(&tmp, path)
++    }
++
++    /// Another nameplate (and claim) when the relay gave this one to
++    /// someone else; the secret stays.
++    pub fn renamed(&self) -> io::Result<Self> {
++        let mut nameplate = code::nameplate(random_bits()?);
++        while nameplate == self.code.nameplate {
++            nameplate = code::nameplate(random_bits()?);
++        }
++        Ok(Self {
++            code: Code {
++                nameplate,
++                secret: self.code.secret.clone(),
++            },
++            claim: new_claim()?,
++            wrong: self.wrong,
++        })
++    }
++
++    /// A fresh secret on the same nameplate, the count back at zero: too
++    /// many wrong guesses were made on the old one.
++    pub fn resecreted(&self) -> io::Result<Self> {
++        let fresh = Code::new(&self.code.nameplate)?;
++        Ok(Self {
++            code: fresh,
++            claim: self.claim.clone(),
++            wrong: 0,
++        })
++    }
++
++    /// Store `wrong` in the file, unless the launcher reissued the code
++    /// there meanwhile (that one starts with its own count).
++    pub fn store_wrong(&self, path: &Path, wrong: u32) -> io::Result<()> {
++        match Self::read(path) {
++            Some(mut now) if now.code == self.code => {
++                if now.wrong >= wrong {
++                    return Ok(());
++                }
++                now.wrong = wrong;
++                now.save(path)
++            }
++            _ => Ok(()),
++        }
++    }
++
++    /// Save `next` in place of this identity, unless the launcher reissued
++    /// the code meanwhile: then the launcher's stays.
++    pub fn replace(&self, path: &Path, next: &Self) -> io::Result<()> {
++        match Self::read(path) {
++            Some(now) if now.code != self.code => Ok(()),
++            _ => next.save(path),
++        }
++    }
++}
++
++fn new_claim() -> io::Result<String> {
++    let mut b = [0u8; CLAIM];
++    crate::fill_random(&mut b)?;
++    Ok(b.iter().map(|x| format!("{x:02x}")).collect())
++}
++
++#[cfg(test)]
++mod tests {
++    use super::*;
++
++    fn temp(name: &str) -> PathBuf {
++        let dir = std::env::temp_dir().join(format!(
++            "horizon-identity-{}-{name}",
++            std::process::id()
++        ));
++        let _ = std::fs::remove_dir_all(&dir);
++        dir.join("friends-identity.txt")
++    }
++
++    #[test]
++    fn made_once_then_kept() {
++        let path = temp("kept");
++        assert!(Identity::read(&path).is_none());
++        let a = Identity::load_or_create(&path).unwrap();
++        assert!(valid_claim(&a.claim));
++        assert_eq!(a.claim.len(), 2 * CLAIM);
++        let b = Identity::load_or_create(&path).unwrap();
++        assert_eq!(a, b);
++        assert_eq!(Code::parse(&a.code.to_string()).unwrap(), a.code);
++    }
++
++    #[test]
++    fn reads_what_launchers_write() {
++        let path = temp("launcher");
++        std::fs::create_dir_all(path.parent().unwrap()).unwrap();
++        let claim = "AB".repeat(32);
++        std::fs::write(
++            &path,
++            format!("nameplate=k7qm\r\nsecret=3xpd\r\nclaim={claim}\r\nwrong=7\r\n"),
++        )
++        .unwrap();
++        let id = Identity::read(&path).unwrap();
++        assert_eq!(id.code.to_string(), "K7QM-3XPD");
++        assert_eq!(id.claim, claim.to_ascii_lowercase());
++        assert_eq!(id.wrong, 7);
++        std::fs::write(&path, "nameplate=K7QM\nsecret=3XPD\nclaim=zz\n").unwrap();
++        assert!(Identity::read(&path).is_none(), "a claim that isn't hex");
++        std::fs::write(&path, "nameplate=K7Q\nsecret=3XPD\n").unwrap();
++        assert!(Identity::read(&path).is_none());
++    }
++
++    #[test]
++    fn a_reissue_in_the_launcher_wins() {
++        let path = temp("reissue");
++        let old = Identity::load_or_create(&path).unwrap();
++        old.store_wrong(&path, 3).unwrap();
++        assert_eq!(Identity::read(&path).unwrap().wrong, 3);
++        let reissued = Identity::generate().unwrap();
++        reissued.save(&path).unwrap();
++        old.store_wrong(&path, 4).unwrap();
++        old.replace(&path, &old.resecreted().unwrap()).unwrap();
++        assert_eq!(Identity::read(&path).unwrap(), reissued);
++    }
++
++    #[test]
++    fn renamed_and_resecreted() {
++        let id = Identity::generate().unwrap();
++        let r = id.renamed().unwrap();
++        assert_ne!(r.code.nameplate, id.code.nameplate);
++        assert_eq!(r.code.secret, id.code.secret);
++        assert_ne!(r.claim, id.claim);
++        let mut tried = id.clone();
++        tried.wrong = 50;
++        let s = tried.resecreted().unwrap();
++        assert_eq!(s.code.nameplate, id.code.nameplate);
++        assert_eq!(s.claim, id.claim);
++        assert_eq!(s.wrong, 0);
++    }
++}
+diff --git a/crates/horizon-friends/src/lib.rs b/crates/horizon-friends/src/lib.rs
+index 1d13b6dc..d8ec7dc8 100644
+--- a/crates/horizon-friends/src/lib.rs
++++ b/crates/horizon-friends/src/lib.rs
+@@ -13,6 +13,7 @@ pub mod crypto;
+ pub mod direct;
+ pub mod guest;
+ pub mod host;
++pub mod identity;
+ pub mod invite;
+ pub mod portmap;
+ pub mod reach;
+diff --git a/crates/horizon-friends/src/wire.rs b/crates/horizon-friends/src/wire.rs
+index 5991bdf2..9504ed82 100644
+--- a/crates/horizon-friends/src/wire.rs
++++ b/crates/horizon-friends/src/wire.rs
+@@ -19,6 +19,18 @@ pub enum ToRelay {
+         protocol: i32,
+         game: String,
+     },
++    /// Register a world under the player's own nameplate (a short code that
++    /// stays the same from one session to the next). `claim` proves it is
++    /// theirs: the relay keeps the first claim it saw for a nameplate and
++    /// answers `nameplate_taken` to any other. A relay that predates this
++    /// answers `bad_request`; the host then registers with `Host`.
++    Claim {
++        v: u32,
++        protocol: i32,
++        game: String,
++        nameplate: String,
++        claim: String,
++    },
+     /// Join the world behind a nameplate.
+     Join {
+         v: u32,
+@@ -73,6 +85,9 @@ pub enum ErrorCode {
+     Full,
+     RateLimited,
+     BadRequest,
++    /// The nameplate a `Claim` asked for is someone else's.
++    #[serde(rename = "nameplate_taken")]
++    Taken,
+ }
+ impl ErrorCode {
+     pub fn as_str(self) -> &'static str {
+@@ -84,6 +99,7 @@ impl ErrorCode {
+             Self::Full => "full",
+             Self::RateLimited => "rate_limited",
+             Self::BadRequest => "bad_request",
++            Self::Taken => "nameplate_taken",
+         }
+     }
+ }
+@@ -184,6 +200,40 @@ mod tests {
+         assert_eq!(r, b"raw");
+     }
+ 
++    #[test]
++    fn claims_and_taken_round_trip() {
++        let mut buf = Vec::new();
++        let claim = ToRelay::Claim {
++            v: VERSION,
++            protocol: 777,
++            game: "26.3".into(),
++            nameplate: "K7QM".into(),
++            claim: "ab".repeat(32),
++        };
++        send(&mut buf, &claim).unwrap();
++        assert!(buf.starts_with(b"{\"op\":\"claim\","));
++        send(
++            &mut buf,
++            &FromRelay::Error {
++                code: ErrorCode::Taken,
++                game: None,
++            },
++        )
++        .unwrap();
++        let mut r = &buf[..];
++        assert_eq!(recv::<_, ToRelay>(&mut r).unwrap(), claim);
++        let line = String::from_utf8(buf.clone()).unwrap();
++        assert!(line.contains("\"code\":\"nameplate_taken\""));
++        assert_eq!(
++            recv::<_, FromRelay>(&mut r).unwrap(),
++            FromRelay::Error {
++                code: ErrorCode::Taken,
++                game: None
++            }
++        );
++        assert_eq!(ErrorCode::Taken.as_str(), "nameplate_taken");
++    }
++
+     #[test]
+     fn long_lines_and_garbage_are_refused() {
+         let long = vec![b'a'; MAX_LINE + 1];
+diff --git a/crates/horizon-relay/src/lib.rs b/crates/horizon-relay/src/lib.rs
+index 025351c0..fdde944b 100644
+--- a/crates/horizon-relay/src/lib.rs
++++ b/crates/horizon-relay/src/lib.rs
+@@ -7,7 +7,7 @@
+ pub mod limits;
+ 
+ use horizon_friends::{
+-    code,
++    code, identity,
+     wire::{self, ErrorCode, FromRelay, ToRelay},
+ };
+ use limits::{Bucket, Limiter, Rates};
+@@ -54,6 +54,11 @@ pub struct Config {
+     pub first_line: Duration,
+     pub attach_wait: Duration,
+     pub ended_kept: Duration,
++    /// How long a nameplate a host claimed for its kept short code stays its
++    /// own while it doesn't come back (in memory: a restart forgets them).
++    pub claim_kept: Duration,
++    /// Claimed nameplates kept at once.
++    pub max_claims: usize,
+ }
+ impl Default for Config {
+     fn default() -> Self {
+@@ -76,6 +81,8 @@ impl Default for Config {
+             first_line: Duration::from_secs(10),
+             attach_wait: Duration::from_secs(10),
+             ended_kept: Duration::from_secs(15 * 60),
++            claim_kept: Duration::from_secs(30 * 24 * 60 * 60),
++            max_claims: 100_000,
+         }
+     }
+ }
+@@ -93,6 +100,12 @@ impl Config {
+         if let Some(v) = var("RELAY_MAX_HOSTS_PER_ADDRESS") {
+             c.rates.hosts_per_address = v;
+         }
++        if let Some(v) = var("RELAY_MAX_CLAIMS") {
++            c.max_claims = v;
++        }
++        if let Some(v) = var::<u64>("RELAY_CLAIM_DAYS") {
++            c.claim_kept = Duration::from_secs(v.saturating_mul(24 * 60 * 60));
++        }
+         if let Some(v) = var("RELAY_MAX_BRIDGES") {
+             c.max_bridges = v;
+         }
+@@ -242,11 +255,19 @@ struct Pending {
+     nameplate: String,
+     attach: SyncSender<(TcpStream, SocketAddr)>,
+ }
++/// A nameplate a host claimed: the next registration under it needs the
++/// same claim.
++struct Claim {
++    claim: String,
++    /// Its host's last registration or end.
++    seen: Instant,
++}
+ #[derive(Default)]
+ struct Inner {
+     hosts: HashMap<String, HostEntry>,
+     ended: HashMap<String, Instant>,
+     pending: HashMap<u64, Pending>,
++    claims: HashMap<String, Claim>,
+ }
+ 
+ struct State {
+@@ -438,7 +459,26 @@ fn handle(state: &Arc<State>, mut stream: TcpStream, peer: SocketAddr) -> io::Re
+     };
+     match hello {
+         ToRelay::Host { v, protocol, game } if v == wire::VERSION => {
+-            host(state, stream, peer, protocol, game)
++            host(state, stream, peer, protocol, game, None)
++        }
++        ToRelay::Claim {
++            v,
++            protocol,
++            game,
++            nameplate,
++            claim,
++        } if v == wire::VERSION => {
++            match code::parse_nameplate(&nameplate).filter(|_| identity::valid_claim(&claim)) {
++                Some(nameplate) => host(
++                    state,
++                    stream,
++                    peer,
++                    protocol,
++                    game,
++                    Some((nameplate, claim.to_ascii_lowercase())),
++                ),
++                None => refuse(&mut stream, ErrorCode::BadRequest),
++            }
+         }
+         ToRelay::Join {
+             v,
+@@ -495,6 +535,8 @@ fn host(
+     peer: SocketAddr,
+     protocol: i32,
+     game: String,
++    // The nameplate and claim of a host's kept short code.
++    wanted: Option<(String, String)>,
+ ) -> io::Result<()> {
+     let now = Instant::now();
+     if !locked(&state.limiter).allow_register(peer.ip(), now) {
+@@ -514,18 +556,57 @@ fn host(
+         inner
+             .ended
+             .retain(|_, t| now.saturating_duration_since(*t) < kept);
+-        let mut found = None;
+-        if inner.hosts.len() < state.config.max_hosts {
+-            for _ in 0..64 {
+-                let n = code::nameplate(random_u64() as u32);
+-                if !inner.hosts.contains_key(&n) && !inner.ended.contains_key(&n) {
+-                    found = Some(n);
+-                    break;
++        let claim_kept = state.config.claim_kept;
++        // A claim whose host is still up stays, however long it has been sharing.
++        let Inner { hosts, claims, .. } = &mut *inner;
++        claims.retain(|n, c| {
++            hosts.contains_key(n) || now.saturating_duration_since(c.seen) < claim_kept
++        });
++        let room = inner.hosts.len() < state.config.max_hosts;
++        let found = match &wanted {
++            Some((n, claim)) => match inner.claims.get(n) {
++                Some(c) if c.claim != *claim => Err(ErrorCode::Taken),
++                // Its own host again (the old connection may not have ended yet).
++                Some(_) if room || inner.hosts.contains_key(n) => Ok(n.clone()),
++                Some(_) => Err(ErrorCode::Full),
++                // A host with a code from the relay has it, or had it a moment ago.
++                None if inner.hosts.contains_key(n) || inner.ended.contains_key(n) => {
++                    Err(ErrorCode::Taken)
++                }
++                None if !room || inner.claims.len() >= state.config.max_claims => {
++                    Err(ErrorCode::Full)
+                 }
++                None => Ok(n.clone()),
++            },
++            None => {
++                let mut found = Err(ErrorCode::Full);
++                if room {
++                    for _ in 0..64 {
++                        let n = code::nameplate(random_u64() as u32);
++                        if !inner.hosts.contains_key(&n)
++                            && !inner.ended.contains_key(&n)
++                            && !inner.claims.contains_key(&n)
++                        {
++                            found = Ok(n);
++                            break;
++                        }
++                    }
++                }
++                found
+             }
+-        }
+-        if let Some(n) = &found {
+-            inner.hosts.insert(
++        };
++        if let Ok(n) = &found {
++            if let Some((_, claim)) = &wanted {
++                inner.claims.insert(
++                    n.clone(),
++                    Claim {
++                        claim: claim.clone(),
++                        seen: now,
++                    },
++                );
++                inner.ended.remove(n);
++            }
++            let old = inner.hosts.insert(
+                 n.clone(),
+                 HostEntry {
+                     token: token.clone(),
+@@ -535,11 +616,16 @@ fn host(
+                     pending: 0,
+                 },
+             );
++            // The same host's earlier control connection: it is over.
++            if let Some(old) = old {
++                let _ = old.to_host.send(Out::Closed);
++            }
+         }
+         found
+     };
+-    let Some(nameplate) = nameplate else {
+-        return refuse(&mut stream, ErrorCode::Full);
++    let nameplate = match nameplate {
++        Ok(n) => n,
++        Err(code) => return refuse(&mut stream, code),
+     };
+     state.registrations.fetch_add(1, Ordering::Relaxed);
+     let result = serve_host(state, &mut stream, peer, &nameplate, &token, tx, rx);
+@@ -551,6 +637,9 @@ fn host(
+             .is_some_and(|h| h.token == token)
+         {
+             inner.hosts.remove(&nameplate);
++            if let Some(c) = inner.claims.get_mut(&nameplate) {
++                c.seen = Instant::now();
++            }
+             inner.ended.insert(nameplate, Instant::now());
+         }
+     }
+@@ -650,7 +739,9 @@ fn join(
+         let ended = inner
+             .ended
+             .get(&nameplate)
+-            .is_some_and(|t| now.saturating_duration_since(*t) < state.config.ended_kept);
++            .is_some_and(|t| now.saturating_duration_since(*t) < state.config.ended_kept)
++            // A kept code whose host isn't sharing right now.
++            || inner.claims.contains_key(&nameplate);
+         let lookup = match inner.hosts.get_mut(&nameplate) {
+             None if ended => Lookup::Ended,
+             None => Lookup::Unknown,
+diff --git a/packaging/android/java/dev/horizonlab/horizon/FriendsIdentity.java b/packaging/android/java/dev/horizonlab/horizon/FriendsIdentity.java
+new file mode 100644
+index 00000000..492b7d17
+--- /dev/null
++++ b/packaging/android/java/dev/horizonlab/horizon/FriendsIdentity.java
+@@ -0,0 +1,94 @@
++package dev.horizonlab.horizon;
++
++import android.app.Activity;
++
++import java.io.File;
++import java.nio.charset.StandardCharsets;
++import java.nio.file.Files;
++import java.nio.file.StandardCopyOption;
++import java.security.SecureRandom;
++import java.util.Locale;
++
++/**
++ * Oneshot: the lasting short code (friends-identity.txt in the game folder, horizon-friends identity.rs): the
++ * nameplate and secret of the code, the claim that keeps the nameplate this player's on the relay, and the wrong
++ * guesses made on the secret. The launcher shows it and reissues it; the game makes it if it is missing too.
++ */
++final class FriendsIdentity {
++    private static final String ALPHABET = "0123456789ABCDEFGHJKMNPQRSTVWXYZ";
++    private static final SecureRandom RANDOM = new SecureRandom();
++
++    private FriendsIdentity() {}
++
++    static File file(Activity a) {
++        return new File(SetupActivity.home(a), "friends-identity.txt");
++    }
++
++    /** The code as NAME-SECR, made when the file is missing or broken; null when it can't be written. */
++    static synchronized String code(Activity a) {
++        File f = file(a);
++        String c = read(f);
++        if (c != null) return c;
++        try {
++            return write(f);
++        } catch (Exception e) {
++            return null;
++        }
++    }
++
++    /** A new code and claim in place of the old one. */
++    static synchronized String reissue(Activity a) throws Exception {
++        File f = file(a);
++        String old = read(f);
++        String c = write(f);
++        // Another nameplate than the old one, so its friends can't get in.
++        while (old != null && c.substring(0, 4).equals(old.substring(0, 4))) c = write(f);
++        return c;
++    }
++
++    private static String read(File f) {
++        try {
++            if (!f.isFile()) return null;
++            String name = null, secret = null, claim = null;
++            for (String line : new String(Files.readAllBytes(f.toPath()), StandardCharsets.UTF_8).split("\n")) {
++                int eq = line.indexOf('=');
++                if (eq < 0) continue;
++                String k = line.substring(0, eq).trim(), v = line.substring(eq + 1).trim();
++                if (k.equals("nameplate")) name = half(v);
++                else if (k.equals("secret")) secret = half(v);
++                else if (k.equals("claim")) claim = v;
++            }
++            if (name == null || secret == null || claim == null || !claim.matches("[0-9A-Fa-f]{32,128}")) return null;
++            return name + "-" + secret;
++        } catch (Exception e) {
++            return null;
++        }
++    }
++
++    /** Four symbols as the game reads them (any case, O for 0, I and L for 1), else null. */
++    private static String half(String v) {
++        String s = v.toUpperCase(Locale.ROOT).replace('O', '0').replace('I', '1').replace('L', '1');
++        return s.matches("[0-9A-HJKMNP-TV-Z]{4}") ? s : null;
++    }
++
++    private static String symbols() {
++        StringBuilder b = new StringBuilder(4);
++        for (int i = 0; i < 4; i++) b.append(ALPHABET.charAt(RANDOM.nextInt(32)));
++        return b.toString();
++    }
++
++    private static String write(File f) throws Exception {
++        String name = symbols(), secret = symbols();
++        byte[] raw = new byte[32];
++        RANDOM.nextBytes(raw);
++        StringBuilder claim = new StringBuilder(64);
++        for (byte x : raw) claim.append(String.format(Locale.ROOT, "%02x", x & 0xff));
++        String text = "nameplate=" + name + "\nsecret=" + secret + "\nclaim=" + claim + "\nwrong=0\n";
++        File dir = f.getParentFile();
++        if (dir != null) dir.mkdirs();
++        File tmp = new File(f.getPath() + ".launcher.tmp");
++        Files.write(tmp.toPath(), text.getBytes(StandardCharsets.UTF_8));
++        Files.move(tmp.toPath(), f.toPath(), StandardCopyOption.REPLACE_EXISTING, StandardCopyOption.ATOMIC_MOVE);
++        return name + "-" + secret;
++    }
++}
+diff --git a/packaging/android/java/dev/horizonlab/horizon/FriendsPage.java b/packaging/android/java/dev/horizonlab/horizon/FriendsPage.java
+index 26675281..80c5d1a8 100644
+--- a/packaging/android/java/dev/horizonlab/horizon/FriendsPage.java
++++ b/packaging/android/java/dev/horizonlab/horizon/FriendsPage.java
+@@ -24,6 +24,8 @@ final class FriendsPage extends Page {
+     private final Button copyCode, shareCode;
+     private final Button restore;
+     private String code;
++    private final TextView keptCode, keptNote;
++    private String kept;
+     /** friends-path.txt in the game folder, read by the game at start (android_main.rs). */
+     static final String[] PATH_IDS = {"auto", "relay", "direct"};
+     private final TextView[] pathChips = new TextView[PATH_IDS.length];
+@@ -132,6 +134,29 @@ final class FriendsPage extends Page {
+         });
+         buttons(host, copyCode, shareCode);
+ 
++        LinearLayout mine = block(Ui.t("Ваш постоянный код", "Your lasting code"));
++        keptCode = Ui.text(a, "", 22, Ui.TEXT, true);
++        keptCode.setTypeface(android.graphics.Typeface.MONOSPACE, android.graphics.Typeface.BOLD);
++        keptCode.setTextIsSelectable(true);
++        mine.addView(keptCode);
++        keptNote = note(mine, "");
++        Button copyKept = Ui.button(a, Ui.t("Скопировать", "Copy"), false);
++        copyKept.setOnClickListener(new View.OnClickListener() {
++            public void onClick(View v) {
++                if (kept == null) return;
++                ClipboardManager cm = (ClipboardManager) a.getSystemService(Context.CLIPBOARD_SERVICE);
++                if (cm != null) cm.setPrimaryClip(ClipData.newPlainText("invite", "friend:" + kept));
++                a.say(Ui.t("Код скопирован.", "Code copied."), Ui.GREEN);
++            }
++        });
++        Button reissue = Ui.button(a, Ui.t("Перевыпустить", "Reissue"), false);
++        reissue.setOnClickListener(new View.OnClickListener() {
++            public void onClick(View v) {
++                confirmReissue();
++            }
++        });
++        buttons(mine, copyKept, reissue);
++
+         LinearLayout way = block(Ui.t("Как раздавать мир", "How to share the world"));
+         LinearLayout ways = Ui.row(a);
+         way.addView(ways, Ui.gap(a, 4));
+@@ -207,6 +232,38 @@ final class FriendsPage extends Page {
+         copyCode.setAlpha(has ? 1f : 0.4f);
+         shareCode.setAlpha(has ? 1f : 0.4f);
+         restore.setVisibility(PackShare.lastBackup(a.dir) == null ? View.GONE : View.VISIBLE);
++        kept = FriendsIdentity.code(a);
++        keptCode.setText(kept == null ? "—" : "friend:" + kept);
++        boolean server = !Net.relay(a).isEmpty() && !path(a).equals("direct");
++        keptNote.setText(!server
++                ? Ui.t("Работает через сервер Oneshot, а он сейчас выключен (relay.txt или «Только напрямую»). Пока друзьям нужен полный код выше.",
++                        "Works through the Oneshot server, which is off now (relay.txt or Direct only). Until then friends need the full code above.")
++                : Ui.t("Один и тот же при каждом открытии мира для друзей: отправьте его один раз. Друг подключится, пока вы раздаёте мир. "
++                        + "Если код попал не к тем людям — перевыпустите его.",
++                        "The same every time you share the world: send it once. A friend gets in while you are sharing. "
++                        + "If the code reached the wrong people, reissue it."));
++    }
++
++    private void confirmReissue() {
++        new android.app.AlertDialog.Builder(a)
++                .setTitle(Ui.t("Перевыпустить код?", "Reissue the code?"))
++                .setMessage(Ui.t("Старый код перестанет работать, друзьям нужно будет отправить новый. "
++                        + "Если мир сейчас открыт для друзей, новый код заработает со следующего открытия.",
++                        "The old code stops working and friends need the new one. "
++                        + "If the world is shared right now, the new code works from the next time you share it."))
++                .setPositiveButton(Ui.t("Перевыпустить", "Reissue"), new android.content.DialogInterface.OnClickListener() {
++                    public void onClick(android.content.DialogInterface d, int w) {
++                        try {
++                            String c = FriendsIdentity.reissue(a);
++                            a.say(Ui.t("Новый код: friend:", "New code: friend:") + c, Ui.GREEN);
++                        } catch (Exception e) {
++                            a.say(Ui.t("Не удалось: ", "Failed: ") + e.getMessage(), Ui.BAD);
++                        }
++                        shown();
++                    }
++                })
++                .setNegativeButton(Ui.t("Отмена", "Cancel"), null)
++                .show();
+     }
+ 
+     private void confirmRestore() {
+diff --git a/packaging/android/java/dev/horizonlab/horizon/Net.java b/packaging/android/java/dev/horizonlab/horizon/Net.java
+index 336bb233..8b9f3835 100644
+--- a/packaging/android/java/dev/horizonlab/horizon/Net.java
++++ b/packaging/android/java/dev/horizonlab/horizon/Net.java
+@@ -36,13 +36,19 @@ final class Net {
+         }
+     }
+ 
+-    /** An invite code as the game prints it, or null: Crockford base32, 20+ characters, friend: optional. */
++    /**
++     * An invite code as the game prints it, or null: Crockford base32, friend: optional; 20+ characters, or
++     * the relay's eight-symbol short code (only with friend:, or with its dash, so a bare word stays an address).
++     */
+     static String normalize(String raw) {
+         if (raw == null) return null;
+-        String code = Uri.decode(raw).toUpperCase(Locale.ROOT).replaceAll("[\\s\\-/]", "");
++        String text = Uri.decode(raw).trim().toUpperCase(Locale.ROOT);
++        boolean marked = text.startsWith("FRIEND:") || text.matches("[0-9A-Z]{4}-[0-9A-Z]{4}");
++        String code = text.replaceAll("[\\s\\-/]", "");
+         if (code.startsWith("FRIEND:")) code = code.substring(7);
+         code = code.replace('O', '0').replace('I', '1').replace('L', '1');
+-        return code.matches("[0-9A-HJKMNP-TV-Z]{20,}") ? code : null;
++        if (code.matches("[0-9A-HJKMNP-TV-Z]{20,}")) return code;
++        return marked && code.matches("[0-9A-HJKMNP-TV-Z]{8}") ? code : null;
+     }
+ 
+     /** The code the running game shares now (invite-code.txt), or null. */

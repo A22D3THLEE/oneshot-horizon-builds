@@ -1,0 +1,24 @@
+diff --git a/.github/workflows/android.yml b/.github/workflows/android.yml
+--- a/.github/workflows/android.yml
++++ b/.github/workflows/android.yml
+@@ -145,8 +145,20 @@ jobs:
+       - name: Build the APK
+         env:
+           PROFILE: ${{ inputs.profile }}
++          # The data pack only the Java exporters can make (facts, collision, gameplay facts, entity
++          # models: ~4 MB zipped). crates/horizon-client/src/android_setup.rs bakes it into the app:
++          # nativeDefaultUrl() returns option_env!("HORIZON_DERIVED_URL"), so without this the first-run
++          # screen can only take files/horizon-derived.zip by hand and stops with
++          # "No derived pack: put horizon-derived.zip in the app folder".
++          # Set it in the repository: Settings > Secrets and variables > Actions > Variables.
++          HORIZON_DERIVED_URL: ${{ vars.HORIZON_DERIVED_URL }}
+         run: |
+           set -euo pipefail
++          if [ -z "${HORIZON_DERIVED_URL:-}" ]; then
++            echo "::warning::HORIZON_DERIVED_URL is empty: on a fresh install the setup screen will ask for horizon-derived.zip by hand"
++          else
++            echo "derived pack URL: $HORIZON_DERIVED_URL"
++          fi
+           cd src
+           export JAVAC="$JAVA_HOME/bin/javac"
+           ./packaging/android/build_apk.sh
