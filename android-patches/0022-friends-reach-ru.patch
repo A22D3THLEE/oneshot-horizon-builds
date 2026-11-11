@@ -1,0 +1,137 @@
+diff --git a/crates/horizon-client/assets/horizon/lang/ru_ru.json b/crates/horizon-client/assets/horizon/lang/ru_ru.json
+index 7183488..eb5e71c 100644
+--- a/crates/horizon-client/assets/horizon/lang/ru_ru.json
++++ b/crates/horizon-client/assets/horizon/lang/ru_ru.json
+@@ -262,5 +262,13 @@
+   "horizon.friends.relay_stopped": "Слишком много неверных коротких кодов: сервер Oneshot выключен до следующего открытия. Полный код по-прежнему работает.",
+   "horizon.friends.code_ready": "Код приглашения готов: меню игры → «Игра с друзьями» → «Отправить код».",
+   "horizon.friends.share_failed": "Не удалось открыть мир: %s",
+-  "horizon.friends.finding_route": "Ищу, как друзья смогут к вам подключиться…"
++  "horizon.friends.finding_route": "Ищу, как друзья смогут к вам подключиться…",
++  "horizon.friends.reach_mapped": "Друзья откуда угодно могут зайти: роутер открыл порт через %s.",
++  "horizon.friends.reach_public": "Друзья откуда угодно могут зайти: у этого устройства публичный адрес (брандмауэр не должен блокировать TCP-порт %s).",
++  "horizon.friends.reach_cgnat": "Зайти могут друзья из вашей сети или VPN. Из интернета — нет: ваш роутер сам стоит за другим NAT (CGNAT провайдера или второй роутер), поэтому открыть порт на нём недостаточно. Играйте через сервер Oneshot или VPN, например Tailscale или ZeroTier.",
++  "horizon.friends.reach_local_ip": "Зайти могут друзья из вашей сети или VPN. Для друзей из интернета: включите UPnP на роутере, или перенаправьте TCP-порт %s на %s, или играйте через сервер Oneshot либо VPN, например Tailscale или ZeroTier (ваш VPN-адрес уже есть в коде).",
++  "horizon.friends.reach_local": "Зайти могут друзья из вашей сети или VPN. Для друзей из интернета: включите UPnP на роутере, или перенаправьте TCP-порт %s, или играйте через сервер Oneshot либо VPN, например Tailscale или ZeroTier (ваш VPN-адрес уже есть в коде).",
++  "horizon.friends.reach_relay_only": "Друзья заходят только через сервер Oneshot.",
++  "horizon.friends.relay_short": "Короткий код для сервера Oneshot: %s.",
++  "horizon.friends.relay_unreachable": "Не удаётся связаться с сервером Oneshot %s: %s"
+ }
+diff --git a/crates/horizon-client/src/game/friends.rs b/crates/horizon-client/src/game/friends.rs
+index 38f94ba..a4b02c4 100644
+--- a/crates/horizon-client/src/game/friends.rs
++++ b/crates/horizon-client/src/game/friends.rs
+@@ -295,14 +295,18 @@ impl Game<'_> {
+                 "Finding how friends can reach you…",
+             )
+         } else {
+-            state.summary.clone()
++            localized_summary(&state.summary)
+         };
+         if let Some(short) = &state.short {
+-            status.push_str(&format!(" Short code for the relay: {short}."));
++            status.push(' ');
++            status.push_str(
++                &lang::get_or("horizon.friends.relay_short", "Short code for the relay: %s.")
++                    .replacen("%s", &short.to_string(), 1),
++            );
+         }
+         if let Some(problem) = &state.relay_problem {
+             status.push(' ');
+-            status.push_str(problem);
++            status.push_str(&localized_relay_problem(problem));
+         }
+         let reachable = matches!(
+             state.verdict,
+@@ -361,3 +365,91 @@ impl Game<'_> {
+         }
+     }
+ }
++
++/// Who can join, in the game's language. horizon-friends has no language
++/// table, so its English sentences (`reach::Reach::summary`, the relay-only
++/// one) are matched here and their addresses kept; any other text stays as it is.
++fn localized_summary(summary: &str) -> String {
++    const MAPPED: &str = "Friends anywhere can join: your router opened the port with ";
++    const LOCAL: &str = "Friends on your network or VPN can join. For friends on the internet: turn on UPnP on your router, or forward TCP port ";
++    const LOCAL_END: &str = ", or use a relay, or a VPN";
++    if let Some(rest) = summary.strip_prefix(MAPPED) {
++        let how = rest.strip_suffix('.').unwrap_or(rest);
++        return lang::get_or(
++            "horizon.friends.reach_mapped",
++            "Friends anywhere can join: your router opened the port with %s.",
++        )
++        .replacen("%s", how, 1);
++    }
++    if let Some(port) = summary
++        .strip_prefix("Friends anywhere can join: this computer has a public address (TCP port ")
++        .and_then(|r| r.split_once(' '))
++        .map(|(p, _)| p)
++    {
++        return lang::get_or(
++            "horizon.friends.reach_public",
++            "Friends anywhere can join: this computer has a public address (TCP port %s must not be blocked by a firewall).",
++        )
++        .replacen("%s", port, 1);
++    }
++    if summary.starts_with("Friends on your network or VPN can join. From the internet they can't") {
++        return lang::get_or("horizon.friends.reach_cgnat", summary);
++    }
++    if let Some((target, _)) = summary.strip_prefix(LOCAL).and_then(|r| r.split_once(LOCAL_END)) {
++        return match target.split_once(" to ") {
++            Some((p, ip)) => lang::get_or(
++                "horizon.friends.reach_local_ip",
++                "Friends on your network or VPN can join. For friends on the internet: turn on UPnP on your router, or forward TCP port %s to %s, or use a relay, or a VPN such as Tailscale or ZeroTier (the code already holds your VPN address).",
++            )
++            .replacen("%s", p, 1)
++            .replacen("%s", ip, 1),
++            None => lang::get_or(
++                "horizon.friends.reach_local",
++                "Friends on your network or VPN can join. For friends on the internet: turn on UPnP on your router, or forward TCP port %s, or use a relay, or a VPN such as Tailscale or ZeroTier (the code already holds your VPN address).",
++            )
++            .replacen("%s", target, 1),
++        };
++    }
++    if summary == "Friends join through the relay only." {
++        return lang::get_or("horizon.friends.reach_relay_only", summary);
++    }
++    summary.to_owned()
++}
++
++/// The relay's problem (horizon-friends' "Couldn't reach the relay ADDR: ERROR")
++/// in the game's language; the system's error text stays as it is.
++fn localized_relay_problem(problem: &str) -> String {
++    match problem
++        .strip_prefix("Couldn't reach the relay ")
++        .and_then(|r| r.split_once(": "))
++    {
++        Some((relay, error)) => lang::get_or(
++            "horizon.friends.relay_unreachable",
++            "Couldn't reach the relay %s: %s",
++        )
++        .replacen("%s", relay, 1)
++        .replacen("%s", error, 1),
++        None => problem.to_owned(),
++    }
++}
++
++#[cfg(test)]
++mod localized_tests {
++    use super::*;
++
++    #[test]
++    fn english_summaries_round_trip() {
++        // With no language table loaded, every sentence comes back unchanged.
++        for s in [
++            "Friends anywhere can join: your router opened the port with UPnP (1.2.3.4:25580).",
++            "Friends anywhere can join: this computer has a public address (TCP port 25580 must not be blocked by a firewall).",
++            "Friends on your network or VPN can join. For friends on the internet: turn on UPnP on your router, or forward TCP port 25580 to 10.0.0.2, or use a relay, or a VPN such as Tailscale or ZeroTier (the code already holds your VPN address).",
++            "Friends on your network or VPN can join. For friends on the internet: turn on UPnP on your router, or forward TCP port 25580, or use a relay, or a VPN such as Tailscale or ZeroTier (the code already holds your VPN address).",
++            "Friends join through the relay only.",
++        ] {
++            assert_eq!(localized_summary(s), s);
++        }
++        let p = "Couldn't reach the relay 1.2.3.4:7000: connection refused";
++        assert_eq!(localized_relay_problem(p), p);
++    }
++}
