@@ -1,0 +1,70 @@
+diff --git a/packaging/android/java/dev/horizonlab/horizon/SetupActivity.java b/packaging/android/java/dev/horizonlab/horizon/SetupActivity.java
+index 216bd30..55b5b58 100644
+--- a/packaging/android/java/dev/horizonlab/horizon/SetupActivity.java
++++ b/packaging/android/java/dev/horizonlab/horizon/SetupActivity.java
+@@ -306,14 +306,38 @@ public class SetupActivity extends Activity
+                 "Something went wrong. Tap Retry, the download continues where it stopped.");
+     }
+ 
++    /** The status line's fields (stage, files, of, bytes, of, state, error), split. */
++    static String[] status() {
++        String s = nativeStatus();
++        return s == null ? new String[0] : s.split("\t", -1);
++    }
++
++    /**
++     * The four counters of a status line (files, of, bytes, of), or null for a line that is not a whole one: the
++     * caller looks again in a moment instead of the screen or the service crashing on it.
++     */
++    static long[] counters(String[] p) {
++        if (p.length < 7) return null;
++        try {
++            return new long[] {
++                Long.parseLong(p[1].trim()), Long.parseLong(p[2].trim()),
++                Long.parseLong(p[3].trim()), Long.parseLong(p[4].trim())
++            };
++        } catch (NumberFormatException e) {
++            android.util.Log.w("Horizon", "setup status not understood: " + java.util.Arrays.toString(p));
++            return null;
++        }
++    }
++
+     public void run() {
+-        String[] p = nativeStatus().split("\t", -1);
+-        if (p.length < 7) {
++        String[] p = status();
++        long[] c = counters(p);
++        if (c == null) {
+             handler.postDelayed(this, 300);
+             return;
+         }
+-        long files = Long.parseLong(p[1]), filesTotal = Long.parseLong(p[2]);
+-        long bytes = Long.parseLong(p[3]), bytesTotal = Long.parseLong(p[4]);
++        long files = c[0], filesTotal = c[1];
++        long bytes = c[2], bytesTotal = c[3];
+         long now = SystemClock.elapsedRealtime();
+         if (lastBytes >= 0 && now > lastTime && bytes >= lastBytes) {
+             double s = (bytes - lastBytes) * 1000.0 / (now - lastTime);
+diff --git a/packaging/android/java/dev/horizonlab/horizon/SetupService.java b/packaging/android/java/dev/horizonlab/horizon/SetupService.java
+index 893be9b..014ad10 100644
+--- a/packaging/android/java/dev/horizonlab/horizon/SetupService.java
++++ b/packaging/android/java/dev/horizonlab/horizon/SetupService.java
+@@ -83,13 +83,14 @@ public class SetupService extends Service implements Runnable {
+     }
+ 
+     public void run() {
+-        String[] p = SetupActivity.nativeStatus().split("\t", -1);
+-        if (p.length < 7) {
++        String[] p = SetupActivity.status();
++        long[] c = SetupActivity.counters(p);
++        if (c == null) {
+             handler.postDelayed(this, 1000);
+             return;
+         }
+-        long files = Long.parseLong(p[1]), filesTotal = Long.parseLong(p[2]);
+-        long bytes = Long.parseLong(p[3]), bytesTotal = Long.parseLong(p[4]);
++        long files = c[0], filesTotal = c[1];
++        long bytes = c[2], bytesTotal = c[3];
+         if (p[5].equals("done") || p[5].equals("error") || p[5].equals("idle")) {
+             String text = p[5].equals("done") ? Ui.t("Файлы игры готовы", "Game files are ready") : SetupActivity.friendlyError(p[6]);
+             stopForeground(true);
