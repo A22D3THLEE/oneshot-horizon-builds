@@ -1,0 +1,423 @@
+From 3d720a29dc3436b6dbc1673626653b70b66fd16f Mon Sep 17 00:00:00 2001
+From: oneshot <oneshot@localhost>
+Date: Thu, 12 Nov 2026 01:29:29 +0300
+Subject: [PATCH] 0030: Bedrock touch: hold to use, hold slot to drop, interact
+ button, dismount on sneak
+
+---
+ crates/horizon-client/src/game/touch.rs | 265 ++++++++++++++++++++++--
+ 1 file changed, 244 insertions(+), 21 deletions(-)
+
+diff --git a/crates/horizon-client/src/game/touch.rs b/crates/horizon-client/src/game/touch.rs
+index b36f1409..3e301142 100644
+--- a/crates/horizon-client/src/game/touch.rs
++++ b/crates/horizon-client/src/game/touch.rs
+@@ -14,10 +14,14 @@
+ //! joystick, jump, sneak, sprint (a toggle), attack and
+ //! use (held; the same finger turns the view), pause, chat, keyboard, inventory,
+ //! drop, F1/F2/F3/F5 and the layout editor (the gear). Hotbar slots select
+-//! on tap. Anywhere else turns the view; a short tap there attacks the
+-//! entity under the crosshair or else uses (right click), and a finger held
+-//! still breaks (left click), as on Bedrock. Buttons go through the
+-//! controller bindings (the virtual pad `horizon-ctl pad` uses).
++//! on tap; held, the slot drops its stack. Anywhere else turns the view; a
++//! short tap there attacks the entity under the crosshair or else uses (right
++//! click), and a finger held still breaks (left click) or, with something in
++//! hand that is used by holding (food the player can eat, a potion, a bow with
++//! arrows, a shield, a spyglass), uses it, as on Bedrock. Riding, sneak gets
++//! off. Looking at a villager, a horse or a boat, an interact button above the
++//! hotbar uses it. Buttons go through the controller bindings (the virtual pad
++//! `horizon-ctl pad` uses).
+ //!
+ //! The editor moves (drag), resizes and fades each control, hides or shows
+ //! it, and saves to `touch_layout.json` in the game directory.
+@@ -76,10 +80,43 @@ enum Finger {
+     DragCustom(usize, [f32; 2]),
+     /// Holding the player's own button `usize`.
+     Custom(usize),
++    /// A finger held still with an item that is used by holding: use held until it
++    /// lifts (Bedrock eats, draws a bow, raises a shield so).
++    Holding { last: [f64; 2], start: [f64; 2], since: Instant },
++    /// On a hotbar slot: held for `DROP_MS` it drops the slot's stack.
++    Slot { slot: usize, since: Instant },
+     /// Took over a hotbar slot or the keyboard; nothing until it lifts.
+     Done,
+ }
+ 
++/// How long a finger stays on a hotbar slot to drop its stack.
++const DROP_MS: u128 = 500;
++
++/// The entities the interact button is shown for: those a use rides, trades
++/// with or opens, by their id's path.
++fn interactive(path: &str) -> bool {
++    matches!(
++        path,
++        "villager" | "wandering_trader" | "horse" | "donkey" | "mule" | "skeleton_horse"
++            | "zombie_horse" | "camel" | "camel_husk" | "llama" | "trader_llama" | "pig"
++            | "strider" | "happy_ghast" | "nautilus" | "zombie_nautilus" | "minecart"
++    ) || path.ends_with("_boat")
++        || path.ends_with("_raft")
++        || path.ends_with("_minecart")
++}
++
++/// A ring of dots filling clockwise from the top: `frac` of it bright, the rest dim.
++fn progress(batch: &mut HudBatch, atlas: &HudAtlas, c: [f32; 2], r: f32, frac: f32, a: f32) {
++    const N: usize = 24;
++    for k in 0..N {
++        let at = (k as f32 + 0.5) / N as f32;
++        let angle = at * std::f32::consts::TAU;
++        let (x, y) = (c[0] + r * angle.sin(), c[1] - r * angle.cos());
++        let color = if at <= frac { fade(0xFFFF_FFFF, a) } else { fade(0x70_00_00_00, a) };
++        batch.fill(atlas, (x - 1.0).round(), (y - 1.0).round(), 2.0, 2.0, color);
++    }
++}
++
+ /// Every control there is.
+ #[derive(Clone, Copy, PartialEq, Eq, Debug, Hash, Serialize, Deserialize)]
+ #[serde(rename_all = "snake_case")]
+@@ -557,6 +594,12 @@ pub(super) struct Touches {
+     aim_frames: u8,
+     /// Frames until the Mount button's dismount sneak lets go.
+     unsneak_frames: u8,
++    /// Sneak is a toggle: the dismount's sneak is let go with a second tap.
++    unsneak_tap: bool,
++    /// The interact button's label: the name of the entity it uses, if one is looked at.
++    interact: Option<String>,
++    /// Frames counted, so the interact target is looked up every few.
++    interact_tick: u8,
+     /// Frames until tapped triggers are released (use, attack).
+     trigger_release: [u8; 2],
+     /// Sneak toggled on (Bedrock's sneak button toggles).
+@@ -607,6 +650,9 @@ impl Default for Touches {
+             aim_at: None,
+             aim_frames: 0,
+             unsneak_frames: 0,
++            unsneak_tap: false,
++            interact: None,
++            interact_tick: 0,
+             trigger_release: [0; 2],
+             sneaking: false,
+             sprinting: false,
+@@ -962,11 +1008,18 @@ fn swapped_out(layout: &TouchLayout, id: Id, flying: bool, editing: bool) -> boo
+     }
+ }
+ 
+-/// What a press of `id` does now: in flight with the fly down button hidden, sneak
++/// What a press of `id` does now: riding, sneak gets off (Bedrock's dismount), so
++/// the sneak toggle is not left on. In flight with the fly down button hidden, sneak
+ /// descends while held, as fly down does (jump already rises while held). A sneak
+ /// already toggled on stays a toggle, so a tap turns it off.
+-fn flight_role(layout: &TouchLayout, id: Id, flying: bool, sneaking: bool) -> Id {
+-    if flying && !sneaking && id == Id::Sneak && !layout.spec(Id::FlyDown).visible { Id::FlyDown } else { id }
++fn flight_role(layout: &TouchLayout, id: Id, flying: bool, sneaking: bool, riding: bool) -> Id {
++    if riding && !sneaking && id == Id::Sneak {
++        Id::Mount
++    } else if flying && !sneaking && id == Id::Sneak && !layout.spec(Id::FlyDown).visible {
++        Id::FlyDown
++    } else {
++        id
++    }
+ }
+ 
+ /// The dark pixel colour of icons on the grey tiles.
+@@ -1248,6 +1301,38 @@ impl Game<'_> {
+         if editing {
+             batch.fill(atlas, 0.0, 0.0, gui.w, gui.h, rgba(0, 0, 0, 90));
+         }
++        if !editing && let Some((_, scale)) = self.touch_gui() {
++            // How long is left of a hold: a ring filling around the finger (break or
++            // use) or around the slot (drop).
++            let hold = u128::from(layout.hold_ms).max(1);
++            for f in t.fingers.values() {
++                match *f {
++                    Finger::Look { start, since, moved: false, attacking: false, .. } => {
++                        let e = since.elapsed().as_millis();
++                        if (80..hold).contains(&e) {
++                            let c = [(start[0] / f64::from(scale)) as f32, (start[1] / f64::from(scale)) as f32];
++                            progress(batch, atlas, c, 10.0, e as f32 / hold as f32, layout.opacity);
++                        }
++                    }
++                    Finger::Slot { slot, since } => {
++                        let e = since.elapsed().as_millis();
++                        if (120..DROP_MS).contains(&e) {
++                            let c = [gui.hotbar_x() + slot as f32 * 20.0 + 10.0, gui.h - 11.0];
++                            progress(batch, atlas, c, 13.0, e as f32 / DROP_MS as f32, 1.0);
++                        }
++                    }
++                    _ => {}
++                }
++            }
++        }
++        if !editing
++            && let Some(label) = &t.interact
++            && let Some((c, rx, ry)) = self.touch_interact_rect(&gui)
++        {
++            rect(batch, atlas, c, rx, ry, false, layout.opacity);
++            let tw = HudBatch::text_width(atlas, label);
++            batch.text(atlas, label, (c[0] - tw / 2.0).round(), (c[1] - 3.5).round(), fade(0xFFFF_FFFF, layout.opacity), true);
++        }
+         for id in IDS {
+             let spec = layout.spec(id);
+             if !spec.visible && !editing {
+@@ -1349,7 +1434,7 @@ impl Game<'_> {
+                     square(batch, atlas, c, r, down, a);
+                 }
+                 let ink = fade(INK, a);
+-                let shown = if editing { id } else { flight_role(layout, id, self.touch_flying(), t.sneaking) };
++                let shown = if editing { id } else { flight_role(layout, id, self.touch_flying(), t.sneaking, self.riding.is_some()) };
+                 match square_icon(shown) {
+                     Some(rows) => pixels(batch, atlas, rows, square_icon_turns(shown), c, r * 1.2, ink),
+                     None => icon(batch, atlas, id, c, r, ink),
+@@ -1453,35 +1538,75 @@ impl Game<'_> {
+         if self.touch.unsneak_frames > 0 {
+             self.touch.unsneak_frames -= 1;
+             if self.touch.unsneak_frames == 0 {
+-                self.pad.injected.set(Button::RightStick, self.touch.sneaking);
++                if std::mem::take(&mut self.touch.unsneak_tap) {
++                    self.pad.injected.set(Button::RightStick, true);
++                    self.pad.taps.push(Button::RightStick);
++                } else {
++                    self.pad.injected.set(Button::RightStick, self.touch.sneaking);
++                }
+             }
+         }
+         let touch_aim = self.touch.layout.aim == Aim::Touch;
+         // Bedrock's "dwell before drag": how long a still finger takes to break.
+         let hold = u128::from(self.touch.layout.hold_ms);
+         let mut attack = false;
++        let mut using = false;
+         let mut held = [false; 2];
+         let mut aim_start = None;
++        let mut drop = None;
++        // A finger held still uses what is in hand when that is used by holding.
++        let ripe = self.touch.fingers.values().any(|f| {
++            matches!(f, Finger::Look { moved: false, attacking: false, since, .. } if since.elapsed().as_millis() >= hold)
++        });
++        let hold_uses = ripe && self.touch_hold_uses();
+         for finger in self.touch.fingers.values_mut() {
+-            if let Finger::Look { since, moved, attacking, start, .. } = finger
+-                && !*moved
+-                && !*attacking
++            if let Finger::Look { last, start, since, moved: false, attacking: false } = *finger
+                 && since.elapsed().as_millis() >= hold
+             {
+-                *attacking = true;
+-                aim_start = Some(*start);
++                *finger = if hold_uses {
++                    Finger::Holding { last, start, since }
++                } else {
++                    Finger::Look { last, start, since, moved: false, attacking: true }
++                };
++                aim_start = Some(start);
+             }
+             match finger {
+                 Finger::Look { attacking: true, .. } => attack = true,
++                Finger::Holding { .. } => {
++                    held[0] = true;
++                    using = true;
++                }
+                 Finger::Trigger { i, .. } => held[*i] = true,
++                Finger::Slot { slot, since } if since.elapsed().as_millis() >= DROP_MS => {
++                    drop = Some(*slot);
++                    *finger = Finger::Done;
++                }
+                 _ => {}
+             }
+         }
+         held[1] |= attack;
++        if let Some(slot) = drop
++            && slot == self.selected
++            && self.screen == super::Screen::Playing
++        {
++            // Bedrock's hold on a hotbar slot: the whole stack, through the drop key
++            // (alone and on a server alike).
++            use horizon_client::held::Source;
++            self.pad.drop_stack = true;
++            for down in [true, false] {
++                if let Err(e) = self.mapped_key(KeyCode::KeyQ, down, false, KeyCode::KeyQ, Source::Pad) {
++                    log::warn!("Horizon: touch drop: {e}");
++                }
++            }
++        }
++        self.touch.interact_tick = self.touch.interact_tick.wrapping_add(1);
++        if self.touch.interact_tick % 4 == 0 {
++            self.touch.interact = self.touch_interact_target();
++        }
+         if touch_aim && let Some(start) = aim_start {
+             self.touch.aim_at = self.touch_ndc(start);
+         }
+-        if !attack && self.touch.aim_at.is_some() {
++        if !attack && !using && self.touch.aim_at.is_some() {
+             if self.touch.aim_frames > 0 {
+                 self.touch.aim_frames -= 1;
+             } else {
+@@ -1506,6 +1631,63 @@ impl Game<'_> {
+         self.touch_ime();
+     }
+ 
++    /// Whether a finger held still now uses (Bedrock) rather than breaks: the main
++    /// hand's item is used by holding, or the main hand is empty and the offhand's is.
++    fn touch_hold_uses(&mut self) -> bool {
++        if self.screen != super::Screen::Playing || self.spectator() {
++            return false;
++        }
++        match self.inventory[self.selected].clone() {
++            Some(main) => self.touch_hold_usable(&main),
++            None => self.offhand.clone().is_some_and(|off| self.touch_hold_usable(&off)),
++        }
++    }
++
++    /// `stack` is used by holding and can be now: food when the player can eat it, a
++    /// bow with something to shoot, an unloaded crossbow with something to load, and
++    /// whatever else has a use time (potions, shields, spyglasses, tridents, horns).
++    fn touch_hold_usable(&mut self, stack: &horizon_client::items::ItemStack) -> bool {
++        let food = self.items().get(&stack.item).and_then(|i| i.food.is_some().then_some(i.can_always_eat));
++        if let Some(always) = food
++            && !self.can_eat(stack, always)
++        {
++            return false;
++        }
++        match &*stack.item {
++            "minecraft:bow" => return self.get_projectile(stack).is_some(),
++            "minecraft:crossbow" => {
++                let loaded = stack.data().is_some_and(|d| !d.charged.is_empty());
++                return !loaded && self.get_projectile(stack).is_some();
++            }
++            _ => {}
++        }
++        self.use_duration(stack) > 0
++    }
++
++    /// The name of the entity under the crosshair that a use rides, trades with or
++    /// opens, for the interact button; none while riding, in menus or in the editor.
++    fn touch_interact_target(&self) -> Option<String> {
++        if !self.touch_controls_shown()
++            || self.touch.editing
++            || self.screen != super::Screen::Playing
++            || self.spectator()
++            || self.riding.is_some()
++        {
++            return None;
++        }
++        let id = self.pick_entity_hit()??;
++        let kind = self.target_type(self.level_entity(id)?);
++        let path = kind.strip_prefix("minecraft:")?;
++        interactive(path).then(|| super::screen_info::tr(&format!("entity.minecraft.{path}"), &[]))
++    }
++
++    /// The interact button above the hotbar (centre, half width, half height), while shown.
++    fn touch_interact_rect(&self, gui: &Gui) -> Option<([f32; 2], f32, f32)> {
++        let label = self.touch.interact.as_ref()?;
++        let tw = HudBatch::text_width(&self.gui.atlas, label);
++        Some(([gui.w / 2.0, gui.h - 62.0], (tw / 2.0 + 8.0).round(), 9.0))
++    }
++
+     #[cfg(target_os = "android")]
+     fn touch_ime(&mut self) {
+         use super::android_ime::{self, ImeInput};
+@@ -1661,8 +1843,14 @@ impl Game<'_> {
+             Id::Mount => {
+                 // Riding: get off (sneak); else use what is under the aim (a horse, a boat).
+                 if self.riding.is_some() {
++                    // Held past a tick, whatever the frame rate.
+                     self.pad.injected.set(Button::RightStick, true);
+-                    self.touch.unsneak_frames = 3;
++                    if self.settings.controller.toggle_sneak || self.settings.toggle_crouch {
++                        // A toggled sneak: one tap on now, another off when it lets go.
++                        self.pad.taps.push(Button::RightStick);
++                        self.touch.unsneak_tap = true;
++                    }
++                    self.touch.unsneak_frames = 12;
+                 } else {
+                     self.pad.injected.triggers[0] = 1.0;
+                     self.touch.trigger_release[0] = 3;
+@@ -1831,6 +2019,15 @@ impl Game<'_> {
+                 } else if let Some(i) = gui.custom_hit(&self.touch.buttons, p) {
+                     self.touch_custom(i, true);
+                     Finger::Custom(i)
++                } else if let Some((c, rx, ry)) = self.touch_interact_rect(&gui)
++                    && (p[0] - c[0]).abs() <= rx + 2.0
++                    && (p[1] - c[1]).abs() <= ry + 2.0
++                {
++                    // Bedrock's interact button: a use at the crosshair, where the entity is.
++                    self.touch.aim_at = None;
++                    self.pad.injected.triggers[0] = 1.0;
++                    self.touch.trigger_release[0] = 3;
++                    Finger::Done
+                 } else if let Some(control) = gui.hit(&self.touch.layout, p, false, self.touch_flying())
+                     && matches!(control, Id::Attack | Id::Use | Id::Action)
+                 {
+@@ -1838,7 +2035,8 @@ impl Game<'_> {
+                     let look = self.touch.layout.looks(Some(control));
+                     Finger::Trigger { i, last: pos, since: Instant::now(), look }
+                 } else if let Some(shown) = gui.hit(&self.touch.layout, p, false, self.touch_flying()) {
+-                    let control = flight_role(&self.touch.layout, shown, self.touch_flying(), self.touch.sneaking);
++                    let control =
++                        flight_role(&self.touch.layout, shown, self.touch_flying(), self.touch.sneaking, self.riding.is_some());
+                     self.touch.press_at = pos;
+                     self.touch.pressing = Some(shown);
+                     if control == Id::Dpad && gui.dpad_at(&self.touch.layout, p) == Some([0, 0]) {
+@@ -1867,7 +2065,7 @@ impl Game<'_> {
+                     }
+                 } else if let Some(slot) = gui.hotbar_slot(p) {
+                     self.selected = slot;
+-                    Finger::Done
++                    Finger::Slot { slot, since: Instant::now() }
+                 } else if self.touch.layout.stick_floating
+                     && self.touch.layout.spec(Id::Stick).visible
+                     && !self.touch.fingers.values().any(|f| matches!(f, Finger::Stick))
+@@ -1942,6 +2140,31 @@ impl Game<'_> {
+                         .insert(id, Finger::Look { last: pos, start, since, moved: moved || far, attacking });
+                     self.touch_look(dx, dy);
+                 }
++                Some(Finger::Holding { last, start, since }) => {
++                    if self.touch.layout.aim == Aim::Touch {
++                        // As while breaking: the target follows the finger, the view stays.
++                        self.touch.fingers.insert(id, Finger::Holding { last: pos, start: pos, since });
++                        self.touch.aim_at = self.touch_ndc(pos);
++                        let _ = (last, start);
++                    } else {
++                        let (dx, dy) = (pos[0] - last[0], pos[1] - last[1]);
++                        self.touch.fingers.insert(id, Finger::Holding { last: pos, start, since });
++                        self.touch_look(dx, dy);
++                    }
++                }
++                Some(Finger::Slot { slot, .. }) => {
++                    // Sliding along the hotbar selects; off it, nothing drops.
++                    match gui.hotbar_slot(p) {
++                        Some(s) if s == slot => {}
++                        Some(s) => {
++                            self.selected = s;
++                            self.touch.fingers.insert(id, Finger::Slot { slot: s, since: Instant::now() });
++                        }
++                        None => {
++                            self.touch.fingers.insert(id, Finger::Done);
++                        }
++                    }
++                }
+                 Some(Finger::Trigger { i, last, since, look }) => {
+                     // The attack (or use) button's finger turns the view too, unless
+                     // another finger is already turning it: two fingers' moves added
+@@ -1988,8 +2211,8 @@ impl Game<'_> {
+                     self.touch.dpad = None;
+                     self.pad.injected.left = [0.0, 0.0];
+                 }
+-                Some(Finger::Look { attacking: true, .. }) => {
+-                    // The aim point stays until the attack trigger is let go.
++                Some(Finger::Look { attacking: true, .. } | Finger::Holding { .. }) => {
++                    // The aim point stays until the trigger is let go.
+                     self.touch.aim_frames = 2;
+                 }
+                 Some(Finger::Press(button, _, _)) => {
+@@ -2094,7 +2317,7 @@ impl Game<'_> {
+ 
+     /// Whether a finger other than `id` is turning the view on open screen.
+     fn touch_looking(&self, id: u64) -> bool {
+-        self.touch.fingers.iter().any(|(f, finger)| *f != id && matches!(finger, Finger::Look { .. }))
++        self.touch.fingers.iter().any(|(f, finger)| *f != id && matches!(finger, Finger::Look { .. } | Finger::Holding { .. }))
+     }
+ 
+     /// A window position as -1..1 across the screen, y up.
+-- 
+2.49.0.windows.1
+

@@ -1,0 +1,203 @@
+From 2b816180ad508a0b94e7ded92c88e95946b2fc08 Mon Sep 17 00:00:00 2001
+From: oneshot <oneshot@localhost>
+Date: Thu, 12 Nov 2026 01:35:41 +0300
+Subject: [PATCH] 0031: less heat: ADPF gets work time and the capped target,
+ one limiter sleep, no audio device polling on Android, no idle world updates
+ between ticks
+
+---
+ crates/horizon-client-input/src/window.rs     |  7 +++-
+ crates/horizon-client-render/src/audio.rs     |  3 ++
+ crates/horizon-client-render/src/streaming.rs |  6 ++-
+ crates/horizon-client/src/game.rs             |  5 ++-
+ .../src/game/commands/pregen.rs               |  9 +++--
+ crates/horizon-threads/src/lib.rs             | 37 ++++++++++++++-----
+ 6 files changed, 52 insertions(+), 15 deletions(-)
+
+diff --git a/crates/horizon-client-input/src/window.rs b/crates/horizon-client-input/src/window.rs
+index 4848eea7..78e55fca 100644
+--- a/crates/horizon-client-input/src/window.rs
++++ b/crates/horizon-client-input/src/window.rs
+@@ -196,8 +196,13 @@ impl LimiterClock for SystemClock {
+     }
+ }
+ 
+-/// The longest single sleep of [`SystemClock::park`].
++/// The longest single sleep of [`SystemClock::park`]. Only Apple's systems coalesce
++/// timers: elsewhere (Linux, Android) a sleep wakes within tens of microseconds, and a
++/// sleep a millisecond at a time woke the core a thousand times a second for nothing.
++#[cfg(target_vendor = "apple")]
+ const PARK_STEP_NS: i64 = 1_000_000;
++#[cfg(not(target_vendor = "apple"))]
++const PARK_STEP_NS: i64 = i64::MAX;
+ 
+ /// Sleeps until `now()` reaches `end`, at most [`PARK_STEP_NS`] at a time. macOS lets
+ /// a sleep run late by a share of its length (timer coalescing: 1.8-3.5 ms on a 14 ms
+diff --git a/crates/horizon-client-render/src/audio.rs b/crates/horizon-client-render/src/audio.rs
+index 8f687b4e..dbc9611b 100644
+--- a/crates/horizon-client-render/src/audio.rs
++++ b/crates/horizon-client-render/src/audio.rs
+@@ -1298,6 +1298,9 @@ impl Audio {
+             self.device_probe = None;
+             return self.devices_changed(probe, current);
+         }
++        if cfg!(target_os = "android") {
++            return false;
++        }
+         self.device_ticks += 1;
+         if self._stream.is_none() || self.device_ticks < 20 {
+             return false;
+diff --git a/crates/horizon-client-render/src/streaming.rs b/crates/horizon-client-render/src/streaming.rs
+index 46c0c168..bc17ef5a 100644
+--- a/crates/horizon-client-render/src/streaming.rs
++++ b/crates/horizon-client-render/src/streaming.rs
+@@ -2421,9 +2421,13 @@ impl Streaming {
+     }
+     /// Wait up to `timeout` for a worker to finish a job; the next `update`
+     /// takes it. A server pumps generation with this between its ticks.
+-    pub fn wait(&mut self, timeout: std::time::Duration) {
++    /// Waits up to `timeout` for a worker's result; whether one came.
++    pub fn wait(&mut self, timeout: std::time::Duration) -> bool {
+         if let Some(done) = self.shared.done.recv_timeout(timeout) {
+             self.deferred.push(done);
++            true
++        } else {
++            false
+         }
+     }
+ }
+diff --git a/crates/horizon-client/src/game.rs b/crates/horizon-client/src/game.rs
+index 17db5189..f3e03463 100644
+--- a/crates/horizon-client/src/game.rs
++++ b/crates/horizon-client/src/game.rs
+@@ -19916,7 +19916,6 @@ impl Game<'_> {
+                     let between = now.saturating_duration_since(self.frame_end);
+                     self.frame_ticks = elapsed.as_secs_f32() * 20.0;
+                     self.previous = now;
+-                    horizon_threads::frame_hint(elapsed);
+                     // Arrow-key camera controls belong to gameplay; chat and
+                     // other screens use the same keys for their own navigation.
+                     if self.screen == Screen::Playing
+@@ -20060,6 +20059,10 @@ impl Game<'_> {
+                         self.frame_stats.record_gpu(&r.gpu_times);
+                         r.gpu_times.clear();
+                     }
++                    // The frame's own work, without the wait for the swapchain: the
++                    // sleep below and that wait are idle time the clocks needn't cover.
++                    let waited = self.renderer.as_ref().map_or(Duration::ZERO, |r| r.last_wait);
++                    horizon_threads::frame_hint(now.elapsed().saturating_sub(waited), self.framerate_limit());
+                     self.limit_frame();
+                     self.pause = self.pauses_game();
+                     if let Some(server) = &self.integrated {
+diff --git a/crates/horizon-client/src/game/commands/pregen.rs b/crates/horizon-client/src/game/commands/pregen.rs
+index 649166f8..1c36abdd 100644
+--- a/crates/horizon-client/src/game/commands/pregen.rs
++++ b/crates/horizon-client/src/game/commands/pregen.rs
+@@ -264,9 +264,12 @@ impl Game<'_> {
+             if now >= until {
+                 break;
+             }
+-            self.streaming
+-                .wait((until - now).min(Duration::from_millis(5)));
+-            self.update_world();
++            // Nothing finished: the world is as it was, so another full update (every
++            // loaded column scanned) would change nothing but the server's CPU time.
++            let came = self.streaming.wait((until - now).min(Duration::from_millis(5)));
++            if came || self.pregen_runs_here() {
++                self.update_world();
++            }
+         }
+     }
+ 
+diff --git a/crates/horizon-threads/src/lib.rs b/crates/horizon-threads/src/lib.rs
+index 559f2158..d61ad799 100644
+--- a/crates/horizon-threads/src/lib.rs
++++ b/crates/horizon-threads/src/lib.rs
+@@ -785,21 +785,25 @@ mod junction_tests {
+ }
+ 
+ /// Android's performance hints (ADPF, API 33+): the render thread tells the system how
+-/// long each frame took against a target, so the CPU governor picks clocks for the game
+-/// before a frame runs late instead of after. A hint, never a cap: frames still run as
+-/// fast as they can. Nothing elsewhere, or where the API isn't there.
+-pub fn frame_hint(frame: std::time::Duration) {
++/// long each frame's work took (not the sleep after it) against the time a frame has at
++/// `fps`, so the CPU governor picks clocks for the game before a frame runs late, and
++/// lets them down while the frame rate is capped lower (idle, menus). A hint, never a
++/// cap: frames still run as fast as they can. Nothing elsewhere, or where the API isn't.
++pub fn frame_hint(work: std::time::Duration, fps: i32) {
+     #[cfg(target_os = "android")]
+-    adpf::report(frame);
++    adpf::report(work, fps);
+     #[cfg(not(target_os = "android"))]
+-    let _ = frame;
++    let _ = (work, fps);
+ }
+ 
+ #[cfg(target_os = "android")]
+ mod adpf {
+     use std::sync::OnceLock;
+ 
+-    /// 120 frames a second: the target the clocks are chosen for.
++    use std::sync::atomic::{AtomicI64, Ordering};
++
++    /// 120 frames a second: the target the session starts with, and the one for an
++    /// unlimited frame rate.
+     const TARGET_NS: i64 = 8_333_333;
+ 
+     type GetManager = unsafe extern "C" fn() -> *mut libc::c_void;
+@@ -810,6 +814,9 @@ mod adpf {
+     struct Session {
+         session: usize,
+         report: Report,
++        /// `APerformanceHint_updateTargetWorkDuration`: the same signature as report.
++        update: Option<Report>,
++        target: AtomicI64,
+         tid: i32,
+     }
+ 
+@@ -837,11 +844,16 @@ mod adpf {
+                     if manager.is_null() {
+                         return None;
+                     }
++                    let update =
++                        libc::dlsym(lib, c"APerformanceHint_updateTargetWorkDuration".as_ptr());
+                     let tid = libc::gettid();
+                     let session = create(manager, &tid, 1, TARGET_NS);
+                     (!session.is_null()).then(|| Session {
+                         session: session as usize,
+                         report: std::mem::transmute::<*mut libc::c_void, Report>(report),
++                        update: (!update.is_null())
++                            .then(|| std::mem::transmute::<*mut libc::c_void, Report>(update)),
++                        target: AtomicI64::new(TARGET_NS),
+                         tid,
+                     })
+                 }
+@@ -849,7 +861,7 @@ mod adpf {
+             .as_ref()
+     }
+ 
+-    pub(super) fn report(frame: std::time::Duration) {
++    pub(super) fn report(work: std::time::Duration, fps: i32) {
+         let Some(s) = session() else {
+             return;
+         };
+@@ -857,7 +869,14 @@ mod adpf {
+         if unsafe { libc::gettid() } != s.tid {
+             return;
+         }
+-        let ns = i64::try_from(frame.as_nanos()).unwrap_or(i64::MAX).max(1);
++        let target = if (1..260).contains(&fps) { 1_000_000_000 / i64::from(fps) } else { TARGET_NS };
++        if let Some(update) = s.update {
++            if s.target.swap(target, Ordering::Relaxed) != target {
++                // SAFETY: a session this module created, never closed.
++                unsafe { update(s.session as *mut libc::c_void, target) };
++            }
++        }
++        let ns = i64::try_from(work.as_nanos()).unwrap_or(i64::MAX).max(1);
+         // SAFETY: a session this module created, never closed.
+         unsafe { (s.report)(s.session as *mut libc::c_void, ns) };
+     }
+-- 
+2.49.0.windows.1
+
