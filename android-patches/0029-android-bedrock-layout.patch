@@ -1,0 +1,225 @@
+diff --git a/crates/horizon-client/src/game/touch.rs b/crates/horizon-client/src/game/touch.rs
+index 623fb841..b36f1409 100644
+--- a/crates/horizon-client/src/game/touch.rs
++++ b/crates/horizon-client/src/game/touch.rs
+@@ -44,8 +44,8 @@ use winit::{
+ const HOLD_MS: u128 = 280;
+ /// Moved further than this (GUI pixels), a look finger is no tap or hold.
+ const SLOP: f64 = 8.0;
+-/// A new file whenever the defaults change (v4: Bedrock's sizes and places, fixed joystick).
+-const LAYOUT_FILE: &str = "touch_layout_v4.json";
++/// A new file whenever the defaults change (v5: Bedrock's measured geometry, no fly buttons).
++const LAYOUT_FILE: &str = "touch_layout_v5.json";
+ 
+ /// What a finger is doing, from where it went down.
+ #[derive(Clone, Copy, Debug)]
+@@ -288,10 +288,12 @@ impl TouchLayout {
+         Self::with(controls, Preset::Dpad, Aim::Crosshair)
+     }
+ 
+-    /// Bedrock Edition's touch layout, at the sizes and places Bedrock uses: a big fixed
+-    /// joystick left of centre height, on the right three buttons (jump above sneak, sprint
+-    /// to their left; in flight fly up and fly down take jump's and sneak's places), three
+-    /// small tiles top centre and nothing else. Tap uses or hits, hold breaks.
++    /// Bedrock Edition's touch layout, measured on Bedrock itself (1.26, a 3200 x 2136
++    /// tablet, where this port's GUI is 400 x 267 at scale 8): a big fixed joystick, on
++    /// the right jump above sneak with sprint to their left, three small tiles top centre.
++    /// Flight uses jump and sneak, as Bedrock's does. Tap uses or hits, hold breaks.
++    /// Spots are on the 560 x 270 reference and keep their distance from the nearest
++    /// edge (see `Gui::anchor`); sizes are divided by that GUI's 267 / 270 shrink.
+     fn bedrock() -> Self {
+         let (w, h) = (560.0f32, 270.0f32);
+         let at = |x: f32, y: f32, size: f32| Spec { x: x / w, y: y / h, size, opacity: 1.0, visible: true, look: None };
+@@ -300,15 +302,18 @@ impl TouchLayout {
+         let mut layout = Self::dpad();
+         let controls = &mut layout.controls;
+         controls.insert(Id::Dpad, off(64.0, h - 64.0, 13.0));
+-        // A third of the screen's height across, its centre a little below the middle.
+-        controls.insert(Id::Stick, at(67.0, h - 121.0, 44.0));
+-        // The right cluster: each button about an eighth of the height.
+-        controls.insert(Id::Jump, at(w - 30.0, 108.0, 18.0));
+-        controls.insert(Id::Sneak, at(w - 30.0, h - 108.0, 18.0));
+-        controls.insert(Id::Sprint, at(w - 70.0, 134.0, 18.0));
+-        controls.insert(Id::FlyUp, at(w - 30.0, 108.0, 18.0));
+-        controls.insert(Id::FlyDown, at(w - 30.0, h - 108.0, 18.0));
++        // Base (188,832)-(880,1522) px: centre 66.75 from the left, 119.9 above the bottom.
++        controls.insert(Id::Stick, at(66.75, h - 119.875, 43.67));
++        // 268 px squares: jump and sneak 30.1 from the right, sprint 70.1.
++        controls.insert(Id::Jump, at(w - 30.125, 106.875, 16.94));
++        controls.insert(Id::Sprint, at(w - 70.125, 133.625, 16.94));
++        controls.insert(Id::Sneak, at(w - 30.125, h - 106.625, 16.94));
++        // No fly buttons: in flight jump rises and sneak, held, descends. Shown from the
++        // editor they sit above and below sprint.
++        controls.insert(Id::FlyUp, off(w - 70.125, 92.0, 16.94));
++        controls.insert(Id::FlyDown, off(w - 70.125, h - 83.0, 16.94));
+         controls.insert(Id::Attack, off(w - 82.0, h - 70.0, 13.0));
++        controls.insert(Id::Use, off(w - 80.0, h - 80.0, 14.0));
+         controls.insert(Id::Mount, off(w - 82.0, h - 62.0, 14.0));
+         controls.insert(Id::Action, off(w - 84.0, h - 62.0, 14.0));
+         controls.insert(Id::AimToggle, off(w - 14.0, 40.0, 9.0));
+@@ -316,14 +321,16 @@ impl TouchLayout {
+         controls.insert(Id::Drop, off(w / 2.0 - 24.0, 12.0, 9.0));
+         controls.insert(Id::F1, off(w / 2.0 + 24.0, 12.0, 9.0));
+         controls.insert(Id::F8, off(w / 2.0 + 48.0, 12.0, 9.0));
+-        // Three small tiles top centre, as on Bedrock: camera, chat, pause.
+-        controls.insert(Id::F5, at(w / 2.0 - 16.0, 9.0, 7.0));
+-        controls.insert(Id::Chat, at(w / 2.0, 9.0, 7.0));
+-        controls.insert(Id::Pause, at(w / 2.0 + 16.0, 9.0, 7.0));
+-        // The editor opens from the pause screen, as Bedrock's from its settings.
+-        controls.insert(Id::Edit, off(w - 38.0, 14.0, 10.0));
++        // The top row's 80 x 72 px tiles at x 1508, 1600, 1696: chat, pause, camera.
++        controls.insert(Id::Chat, at(w / 2.0 - 11.5, 6.0, 4.8));
++        controls.insert(Id::Pause, at(w / 2.0, 6.0, 4.8));
++        controls.insert(Id::F5, at(w / 2.0 + 12.0, 6.0, 4.8));
++        // Not on Bedrock: the controls editor, small in the top right corner.
++        controls.insert(Id::Edit, at(w - 10.0, 6.0, 4.8));
+         let controls = layout.controls;
+-        Self::with(controls, Preset::Bedrock, Aim::Touch)
++        let mut layout = Self::with(controls, Preset::Bedrock, Aim::Touch);
++        layout.stick_always = true;
++        layout
+     }
+ 
+     /// Laid out on a 560 x 270 GUI (a 20:9 phone at GUI scale 4).
+@@ -731,7 +738,7 @@ impl Gui {
+     /// The control under `p`; hidden ones only in the editor.
+     fn hit(&self, layout: &TouchLayout, p: [f32; 2], editing: bool, flying: bool) -> Option<Id> {
+         IDS.into_iter()
+-            .filter(|&id| (editing || layout.spec(id).visible) && !swapped_out(layout, id, flying))
++            .filter(|&id| (editing || layout.spec(id).visible) && !swapped_out(layout, id, flying, editing))
+             // A floating joystick has no fixed circle: the left half of the screen starts it.
+             .filter(|&id| !(layout.stick_floating && id == Id::Stick && !editing))
+             .filter_map(|id| {
+@@ -908,11 +915,14 @@ fn pixels(batch: &mut HudBatch, atlas: &HudAtlas, name: &str, turns: u8, c: [f32
+     }
+ }
+ 
+-/// A Bedrock-style square tile on whole pixels: a dark outline with cut corners,
++/// A Bedrock-style square tile on whole screen pixels: a dark outline with cut corners,
+ /// translucent grey inside, a light top-left bevel and a darker bottom-right one.
+ #[allow(clippy::too_many_arguments)]
+ fn tile(batch: &mut HudBatch, atlas: &HudAtlas, x: f32, y: f32, w: f32, h: f32, fill: u32, hi: u32, lo: u32, edge: u32) {
+-    let (x, y, w, h) = (x.round(), y.round(), w.round(), h.round());
++    // Screen pixels, not GUI ones: at GUI scale 8 a whole GUI pixel moves a tile 8 px.
++    let k = batch.scale.max(1.0);
++    let snap = |v: f32| (v * k).round() / k;
++    let (x, y, w, h) = (snap(x), snap(y), snap(w), snap(h));
+     batch.fill(atlas, x + 1.0, y, w - 2.0, 1.0, edge);
+     batch.fill(atlas, x + 1.0, y + h - 1.0, w - 2.0, 1.0, edge);
+     batch.fill(atlas, x, y + 1.0, 1.0, h - 2.0, edge);
+@@ -927,26 +937,38 @@ fn tile(batch: &mut HudBatch, atlas: &HudAtlas, x: f32, y: f32, w: f32, h: f32,
+ /// A Bedrock-style square button of half-size `r` at `c`.
+ fn square(batch: &mut HudBatch, atlas: &HudAtlas, c: [f32; 2], r: f32, down: bool, a: f32) {
+     let r = r.round();
++    rect(batch, atlas, c, r, r, down, a);
++}
++
++/// A grey tile `rx` by `ry` from its centre (half sizes, GUI px).
++fn rect(batch: &mut HudBatch, atlas: &HudAtlas, c: [f32; 2], rx: f32, ry: f32, down: bool, a: f32) {
+     let fill = if down { rgba(214, 214, 214, 200) } else { rgba(160, 160, 160, 130) };
+     let hi = rgba(255, 255, 255, if down { 120 } else { 95 });
+     let lo = rgba(40, 40, 40, if down { 60 } else { 90 });
+     // Pressed: the bevel flips, as a key pushed in.
+     let (hi, lo) = if down { (lo, hi) } else { (hi, lo) };
+     let edge = fade(rgba(20, 20, 20, 215), a);
+-    tile(batch, atlas, c[0] - r, c[1] - r, r * 2.0, r * 2.0, fade(fill, a), fade(hi, a), fade(lo, a), edge);
++    tile(batch, atlas, c[0] - rx, c[1] - ry, rx * 2.0, ry * 2.0, fade(fill, a), fade(hi, a), fade(lo, a), edge);
+ }
+ 
+ /// A button that gives its place to another for now: the fly buttons out of flight,
+ /// jump and sneak in it (when the fly buttons are shown).
+-fn swapped_out(layout: &TouchLayout, id: Id, flying: bool) -> bool {
++fn swapped_out(layout: &TouchLayout, id: Id, flying: bool, editing: bool) -> bool {
+     match id {
+-        Id::FlyUp | Id::FlyDown => !flying,
++        Id::FlyUp | Id::FlyDown => !flying && !editing,
+         Id::Jump => flying && layout.spec(Id::FlyUp).visible,
+         Id::Sneak => flying && layout.spec(Id::FlyDown).visible,
+         _ => false,
+     }
+ }
+ 
++/// What a press of `id` does now: in flight with the fly down button hidden, sneak
++/// descends while held, as fly down does (jump already rises while held). A sneak
++/// already toggled on stays a toggle, so a tap turns it off.
++fn flight_role(layout: &TouchLayout, id: Id, flying: bool, sneaking: bool) -> Id {
++    if flying && !sneaking && id == Id::Sneak && !layout.spec(Id::FlyDown).visible { Id::FlyDown } else { id }
++}
++
+ /// The dark pixel colour of icons on the grey tiles.
+ const INK: u32 = 0xF0_1E_1E_1E;
+ 
+@@ -1235,7 +1257,7 @@ impl Game<'_> {
+             if !spec.visible {
+                 a *= 0.35;
+             }
+-            if swapped_out(layout, id, self.touch_flying()) {
++            if swapped_out(layout, id, self.touch_flying(), editing) {
+                 continue;
+             }
+             let (c, r) = match (id, layout.stick_floating, t.stick_origin) {
+@@ -1270,7 +1292,7 @@ impl Game<'_> {
+                 }
+             } else if id == Id::Stick && layout.preset == Preset::Bedrock {
+                 // Bedrock's stick: a square translucent pad in a dark frame, a square knob.
+-                let (x, y, s) = ((c[0] - r).round(), (c[1] - r).round(), (r * 2.0).round());
++                let (x, y, s) = (c[0] - r, c[1] - r, r * 2.0);
+                 tile(
+                     batch,
+                     atlas,
+@@ -1286,7 +1308,7 @@ impl Game<'_> {
+                 let k = t.knob;
+                 let knob = [(c[0] + k[0] * r * 0.5).round(), (c[1] - k[1] * r * 0.5).round()];
+                 let held = t.fingers.values().any(|f| matches!(f, Finger::Stick));
+-                square(batch, atlas, knob, (r * 0.5).round(), held, a);
++                square(batch, atlas, knob, (r * 0.483).round(), held, a);
+             } else if id == Id::Stick && squared {
+                 // A square base with a square knob.
+                 square(batch, atlas, c, r, false, a * 0.8);
+@@ -1307,17 +1329,29 @@ impl Game<'_> {
+                 }
+             } else if squared {
+                 let down = match id {
+-                    Id::Sneak => t.sneaking,
++                    Id::Sneak => {
++                        t.sneaking
++                            || t.fly_fingers.iter().any(|f| matches!(t.fingers.get(f), Some(Finger::Press(Button::RightStick, ..))))
++                    }
+                     Id::Sprint => t.sprinting,
+                     Id::Jump => self.pad.injected.held(Button::South),
+                     Id::Attack => self.pad.injected.triggers[1] > 0.5,
+                     Id::AimToggle => layout.aim == Aim::Crosshair,
+                     _ => false,
+                 };
+-                square(batch, atlas, c, r, down, a);
++                if layout.preset == Preset::Bedrock && matches!(id, Id::Chat | Id::Pause | Id::F5 | Id::Edit) {
++                    // Bedrock's top row: tiles a tenth lower than wide.
++                    rect(batch, atlas, c, r.round(), r.round() * 0.9, down, a);
++                } else if layout.preset == Preset::Bedrock {
++                    // Bedrock's measured sizes, to the screen pixel.
++                    rect(batch, atlas, c, r, r, down, a);
++                } else {
++                    square(batch, atlas, c, r, down, a);
++                }
+                 let ink = fade(INK, a);
+-                match square_icon(id) {
+-                    Some(rows) => pixels(batch, atlas, rows, square_icon_turns(id), c, r * 1.2, ink),
++                let shown = if editing { id } else { flight_role(layout, id, self.touch_flying(), t.sneaking) };
++                match square_icon(shown) {
++                    Some(rows) => pixels(batch, atlas, rows, square_icon_turns(shown), c, r * 1.2, ink),
+                     None => icon(batch, atlas, id, c, r, ink),
+                 }
+             } else if id == Id::Stick {
+@@ -1803,9 +1837,10 @@ impl Game<'_> {
+                     let i = if control == Id::Attack { 1 } else { 0 };
+                     let look = self.touch.layout.looks(Some(control));
+                     Finger::Trigger { i, last: pos, since: Instant::now(), look }
+-                } else if let Some(control) = gui.hit(&self.touch.layout, p, false, self.touch_flying()) {
++                } else if let Some(shown) = gui.hit(&self.touch.layout, p, false, self.touch_flying()) {
++                    let control = flight_role(&self.touch.layout, shown, self.touch_flying(), self.touch.sneaking);
+                     self.touch.press_at = pos;
+-                    self.touch.pressing = Some(control);
++                    self.touch.pressing = Some(shown);
+                     if control == Id::Dpad && gui.dpad_at(&self.touch.layout, p) == Some([0, 0]) {
+                         // The centre: sneak, toggled (Bedrock).
+                         self.touch_press(Id::Sneak)

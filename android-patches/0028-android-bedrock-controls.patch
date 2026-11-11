@@ -1,7 +1,18 @@
 diff --git a/crates/horizon-client/src/game/touch.rs b/crates/horizon-client/src/game/touch.rs
-index e3a32788..092e2991 100644
+index e3a32788..623fb841 100644
 --- a/crates/horizon-client/src/game/touch.rs
 +++ b/crates/horizon-client/src/game/touch.rs
+@@ -44,8 +44,8 @@ use winit::{
+ const HOLD_MS: u128 = 280;
+ /// Moved further than this (GUI pixels), a look finger is no tap or hold.
+ const SLOP: f64 = 8.0;
+-/// A new file whenever the defaults change (v3: Bedrock layout acts where the finger is).
+-const LAYOUT_FILE: &str = "touch_layout_v3.json";
++/// A new file whenever the defaults change (v4: Bedrock's sizes and places, fixed joystick).
++const LAYOUT_FILE: &str = "touch_layout_v4.json";
+ 
+ /// What a finger is doing, from where it went down.
+ #[derive(Clone, Copy, Debug)]
 @@ -104,9 +104,16 @@ pub(super) enum Id {
      F3,
      F5,
@@ -73,7 +84,7 @@ index e3a32788..092e2991 100644
  }
  
  impl Default for TouchLayout {
-@@ -194,6 +233,27 @@ impl Default for TouchLayout {
+@@ -194,6 +233,26 @@ impl Default for TouchLayout {
  }
  
  impl TouchLayout {
@@ -87,9 +98,8 @@ index e3a32788..092e2991 100644
 +            aim,
 +            left_handed: false,
 +            top_scale: 1.0,
-+            // Bedrock's joystick layouts float under the finger; the D-pad and the
-+            // button layout keep their stick where it is drawn.
-+            stick_floating: preset == Preset::Bedrock,
++            // Bedrock's default joystick is fixed and always drawn; floating is the player's choice.
++            stick_floating: false,
 +            stick_always: false,
 +            look_scale: 1.0,
 +            hold_ms: HOLD_MS as u32,
@@ -101,7 +111,7 @@ index e3a32788..092e2991 100644
      /// Bedrock's D-pad layout on a 560 x 270 GUI: the pad bottom left (`size` is half a
      /// cell), jump bottom right, pause and chat top centre, "..." by the hotbar.
      fn dpad() -> Self {
-@@ -210,6 +270,9 @@ impl TouchLayout {
+@@ -210,6 +269,9 @@ impl TouchLayout {
              (Id::Attack, at(w - 82.0, h - 70.0, 13.0)),
              (Id::Use, off(w - 80.0, h - 80.0, 14.0)),
              (Id::Mount, at(w - 78.0, h - 104.0, 10.0)),
@@ -111,7 +121,7 @@ index e3a32788..092e2991 100644
              (Id::AimToggle, off(w - 14.0, 40.0, 9.0)),
              (Id::Chat, at(w / 2.0 - 48.0, 12.0, 9.0)),
              (Id::Drop, at(w / 2.0 - 24.0, 12.0, 9.0)),
-@@ -223,7 +286,7 @@ impl TouchLayout {
+@@ -223,12 +285,13 @@ impl TouchLayout {
              (Id::F5, at(w - 14.0, 12.0, 9.0)),
              (Id::Edit, at(w - 36.0, 12.0, 8.0)),
          ]);
@@ -119,31 +129,60 @@ index e3a32788..092e2991 100644
 +        Self::with(controls, Preset::Dpad, Aim::Crosshair)
      }
  
-     /// Bedrock Edition's touch layout: no attack or use buttons (tap to use or hit,
-@@ -242,7 +305,12 @@ impl TouchLayout {
-         controls.insert(Id::Sneak, at(w - 36.0, h - 36.0, 18.0));
+-    /// Bedrock Edition's touch layout: no attack or use buttons (tap to use or hit,
+-    /// hold to break), jump and sneak bottom right, pause and chat top centre,
+-    /// the camera switch top right; pushing the stick all the way forward sprints.
++    /// Bedrock Edition's touch layout, at the sizes and places Bedrock uses: a big fixed
++    /// joystick left of centre height, on the right three buttons (jump above sneak, sprint
++    /// to their left; in flight fly up and fly down take jump's and sneak's places), three
++    /// small tiles top centre and nothing else. Tap uses or hits, hold breaks.
+     fn bedrock() -> Self {
+         let (w, h) = (560.0f32, 270.0f32);
+         let at = |x: f32, y: f32, size: f32| Spec { x: x / w, y: y / h, size, opacity: 1.0, visible: true, look: None };
+@@ -237,24 +300,30 @@ impl TouchLayout {
+         let mut layout = Self::dpad();
+         let controls = &mut layout.controls;
+         controls.insert(Id::Dpad, off(64.0, h - 64.0, 13.0));
+-        controls.insert(Id::Stick, at(52.0, h - 76.0, 38.0));
+-        controls.insert(Id::Jump, at(w - 36.0, h - 86.0, 22.0));
+-        controls.insert(Id::Sneak, at(w - 36.0, h - 36.0, 18.0));
++        // A third of the screen's height across, its centre a little below the middle.
++        controls.insert(Id::Stick, at(67.0, h - 121.0, 44.0));
++        // The right cluster: each button about an eighth of the height.
++        controls.insert(Id::Jump, at(w - 30.0, 108.0, 18.0));
++        controls.insert(Id::Sneak, at(w - 30.0, h - 108.0, 18.0));
++        controls.insert(Id::Sprint, at(w - 70.0, 134.0, 18.0));
++        controls.insert(Id::FlyUp, at(w - 30.0, 108.0, 18.0));
++        controls.insert(Id::FlyDown, at(w - 30.0, h - 108.0, 18.0));
          controls.insert(Id::Attack, off(w - 82.0, h - 70.0, 13.0));
-         controls.insert(Id::Sprint, off(w - 44.0, h - 92.0, 11.0));
+-        controls.insert(Id::Sprint, off(w - 44.0, h - 92.0, 11.0));
 -        controls.insert(Id::Mount, at(w - 82.0, h - 62.0, 14.0));
+-        controls.insert(Id::AimToggle, at(w - 14.0, 40.0, 9.0));
 +        controls.insert(Id::Mount, off(w - 82.0, h - 62.0, 14.0));
-+        // Bedrock's contextual action button (use / interact) in the mount button's place.
-+        controls.insert(Id::Action, at(w - 84.0, h - 62.0, 14.0));
-+        // Fly up and fly down, above jump and beside sneak (shown only in flight).
-+        controls.insert(Id::FlyUp, at(w - 36.0, h - 138.0, 15.0));
-+        controls.insert(Id::FlyDown, at(w - 84.0, h - 20.0, 13.0));
-         controls.insert(Id::AimToggle, at(w - 14.0, 40.0, 9.0));
++        controls.insert(Id::Action, off(w - 84.0, h - 62.0, 14.0));
++        controls.insert(Id::AimToggle, off(w - 14.0, 40.0, 9.0));
          controls.insert(Id::Inventory, at(bar + 11.0, h - 11.0, 10.0));
          controls.insert(Id::Drop, off(w / 2.0 - 24.0, 12.0, 9.0));
-@@ -254,7 +322,7 @@ impl TouchLayout {
-         controls.insert(Id::Pause, at(w / 2.0 + 26.0, 14.0, 12.0));
-         controls.insert(Id::Edit, at(w - 38.0, 14.0, 10.0));
+         controls.insert(Id::F1, off(w / 2.0 + 24.0, 12.0, 9.0));
+         controls.insert(Id::F8, off(w / 2.0 + 48.0, 12.0, 9.0));
+-        // Three tiles top centre, as on Bedrock: camera, chat, pause.
+-        controls.insert(Id::F5, at(w / 2.0 - 26.0, 14.0, 12.0));
+-        controls.insert(Id::Chat, at(w / 2.0, 14.0, 12.0));
+-        controls.insert(Id::Pause, at(w / 2.0 + 26.0, 14.0, 12.0));
+-        controls.insert(Id::Edit, at(w - 38.0, 14.0, 10.0));
++        // Three small tiles top centre, as on Bedrock: camera, chat, pause.
++        controls.insert(Id::F5, at(w / 2.0 - 16.0, 9.0, 7.0));
++        controls.insert(Id::Chat, at(w / 2.0, 9.0, 7.0));
++        controls.insert(Id::Pause, at(w / 2.0 + 16.0, 9.0, 7.0));
++        // The editor opens from the pause screen, as Bedrock's from its settings.
++        controls.insert(Id::Edit, off(w - 38.0, 14.0, 10.0));
          let controls = layout.controls;
 -        Self { opacity: 0.85, controls, preset: Preset::Bedrock, pass_through: true, aim: Aim::Touch }
 +        Self::with(controls, Preset::Bedrock, Aim::Touch)
      }
  
      /// Laid out on a 560 x 270 GUI (a 20:9 phone at GUI scale 4).
-@@ -267,6 +335,9 @@ impl TouchLayout {
+@@ -267,6 +336,9 @@ impl TouchLayout {
              (Id::Dpad, Spec { visible: false, ..at(62.0, h - 62.0, 13.0) }),
              (Id::AimToggle, Spec { visible: false, ..at(w - 14.0, 40.0, 9.0) }),
              (Id::Mount, Spec { visible: false, ..at(w - 78.0, h - 104.0, 10.0) }),
@@ -153,7 +192,7 @@ index e3a32788..092e2991 100644
              (Id::F8, Spec { visible: false, ..at(109.0, 12.0, 8.0) }),
              (Id::Jump, at(w - 30.0, h - 42.0, 18.0)),
              (Id::Sneak, at(w - 72.0, h - 22.0, 13.0)),
-@@ -285,7 +356,7 @@ impl TouchLayout {
+@@ -285,7 +357,7 @@ impl TouchLayout {
              (Id::F5, at(69.0, 12.0, 8.0)),
              (Id::Edit, at(90.0, 12.0, 8.0)),
          ]);
@@ -162,7 +201,7 @@ index e3a32788..092e2991 100644
      }
  
      fn of(preset: Preset) -> Self {
-@@ -312,9 +383,38 @@ impl TouchLayout {
+@@ -312,9 +384,37 @@ impl TouchLayout {
              layout.opacity = saved.opacity.clamp(0.1, 1.0);
              layout.pass_through = saved.pass_through;
              layout.aim = saved.aim;
@@ -170,8 +209,7 @@ index e3a32788..092e2991 100644
 +            layout.top_scale = saved.top_scale.clamp(0.6, 2.0);
 +            // A layout file from before the floating joystick gets the preset's own
 +            // answer (Bedrock's joystick floats, the D-pad does not).
-+            layout.stick_floating =
-+                if text.contains("\"stick_floating\"") { saved.stick_floating } else { preset == Preset::Bedrock };
++            layout.stick_floating = saved.stick_floating;
 +            layout.stick_always = saved.stick_always;
 +            layout.look_scale = saved.look_scale.clamp(0.2, 3.0);
 +            layout.hold_ms = saved.hold_ms.clamp(80, 2000);
@@ -284,7 +322,22 @@ index e3a32788..092e2991 100644
          let rx = if (x - self.w / 2.0).abs() <= 110.0 {
              REF_W / 2.0 + x - self.w / 2.0
          } else if x < self.w / 2.0 {
-@@ -597,9 +721,11 @@ impl Gui {
+@@ -587,6 +711,14 @@ impl Gui {
+     fn profile(&self) -> ([f32; 2], f32) {
+         ([12.0, 12.0], 9.0)
+     }
++    /// The touch controls editor's button on the pause screen, right of the profile.
++    fn edit_entry(&self) -> ([f32; 2], f32) {
++        ([36.0, 12.0], 9.0)
++    }
++    fn edit_entry_hit(&self, p: [f32; 2]) -> bool {
++        let (c, r) = self.edit_entry();
++        (p[0] - c[0]).abs().max((p[1] - c[1]).abs()) <= r + 5.0
++    }
+     fn profile_hit(&self, p: [f32; 2]) -> bool {
+         let (c, r) = self.profile();
+         (p[0] - c[0]).hypot(p[1] - c[1]) <= r + 5.0
+@@ -597,9 +729,11 @@ impl Gui {
          (p[0] - c[0]).hypot(p[1] - c[1]) <= r + 10.0
      }
      /// The control under `p`; hidden ones only in the editor.
@@ -292,13 +345,13 @@ index e3a32788..092e2991 100644
 +    fn hit(&self, layout: &TouchLayout, p: [f32; 2], editing: bool, flying: bool) -> Option<Id> {
          IDS.into_iter()
 -            .filter(|&id| editing || layout.spec(id).visible)
-+            .filter(|&id| editing || (layout.spec(id).visible && (flying || !matches!(id, Id::FlyUp | Id::FlyDown))))
++            .filter(|&id| (editing || layout.spec(id).visible) && !swapped_out(layout, id, flying))
 +            // A floating joystick has no fixed circle: the left half of the screen starts it.
 +            .filter(|&id| !(layout.stick_floating && id == Id::Stick && !editing))
              .filter_map(|id| {
                  let (c, r) = self.place(layout, id);
                  if id == Id::Dpad {
-@@ -617,23 +743,28 @@ impl Gui {
+@@ -617,23 +751,28 @@ impl Gui {
      }
      /// The editor's panel: a row of buttons a third of the way down.
      fn panel(&self) -> impl Iterator<Item = (EditAction, &'static str, [f32; 4])> {
@@ -334,7 +387,7 @@ index e3a32788..092e2991 100644
              )
              .chain({
                  let btotal = BUTTON_ACTIONS.len() as f32 * (pw + gap) - gap;
-@@ -641,7 +772,7 @@ impl Gui {
+@@ -641,7 +780,7 @@ impl Gui {
                  BUTTON_ACTIONS
                      .into_iter()
                      .enumerate()
@@ -343,7 +396,25 @@ index e3a32788..092e2991 100644
              })
      }
      /// The D-pad cell under `p` (x right, y forward), `None` off the pad.
-@@ -813,10 +944,17 @@ fn square_icon(id: Id) -> Option<&'static str> {
+@@ -797,6 +936,17 @@ fn square(batch: &mut HudBatch, atlas: &HudAtlas, c: [f32; 2], r: f32, down: boo
+     tile(batch, atlas, c[0] - r, c[1] - r, r * 2.0, r * 2.0, fade(fill, a), fade(hi, a), fade(lo, a), edge);
+ }
+ 
++/// A button that gives its place to another for now: the fly buttons out of flight,
++/// jump and sneak in it (when the fly buttons are shown).
++fn swapped_out(layout: &TouchLayout, id: Id, flying: bool) -> bool {
++    match id {
++        Id::FlyUp | Id::FlyDown => !flying,
++        Id::Jump => flying && layout.spec(Id::FlyUp).visible,
++        Id::Sneak => flying && layout.spec(Id::FlyDown).visible,
++        _ => false,
++    }
++}
++
+ /// The dark pixel colour of icons on the grey tiles.
+ const INK: u32 = 0xF0_1E_1E_1E;
+ 
+@@ -813,10 +963,17 @@ fn square_icon(id: Id) -> Option<&'static str> {
          Id::AimToggle => "crosshair",
          Id::Mount => "mount",
          Id::Drop => "drop",
@@ -361,7 +432,7 @@ index e3a32788..092e2991 100644
  /// A line `t` wide from `a` to `b`.
  fn line(batch: &mut HudBatch, atlas: &HudAtlas, a: [f32; 2], b: [f32; 2], t: f32, color: u32) {
      let (dx, dy) = (b[0] - a[0], b[1] - a[1]);
-@@ -839,6 +977,8 @@ fn icon(batch: &mut HudBatch, atlas: &HudAtlas, id: Id, c: [f32; 2], r: f32, col
+@@ -839,6 +996,8 @@ fn icon(batch: &mut HudBatch, atlas: &HudAtlas, id: Id, c: [f32; 2], r: f32, col
      };
      match id {
          Id::Stick | Id::Dpad => {}
@@ -370,7 +441,7 @@ index e3a32788..092e2991 100644
          Id::AimToggle => {
              line(batch, atlas, [x, y - s], [x, y + s], 1.0, color);
              line(batch, atlas, [x - s, y], [x + s, y], 1.0, color);
-@@ -865,7 +1005,7 @@ fn icon(batch: &mut HudBatch, atlas: &HudAtlas, id: Id, c: [f32; 2], r: f32, col
+@@ -865,7 +1024,7 @@ fn icon(batch: &mut HudBatch, atlas: &HudAtlas, id: Id, c: [f32; 2], r: f32, col
              line(batch, atlas, [x - s * 0.9, y + s * 0.1], [x - s * 0.1, y + s * 0.9], (s * 0.3).max(1.2), color);
              line(batch, atlas, [x - s * 0.6, y + s * 0.6], [x - s, y + s], (s * 0.3).max(1.2), color);
          }
@@ -379,7 +450,19 @@ index e3a32788..092e2991 100644
              // A hand: palm and fingers.
              batch.fill(atlas, x - s * 0.6, y - s * 0.1, s * 1.2, s * 0.9, color);
              for i in 0..4 {
-@@ -992,7 +1132,11 @@ impl Game<'_> {
+@@ -963,6 +1122,11 @@ impl Game<'_> {
+             && (self.title.as_ref().is_some_and(|t| matches!(t.mode, horizon_client::title::Mode::Main)) || (self.player.is_some() && self.screen == super::Screen::Paused))
+     }
+ 
++    /// On the pause screen: the button that opens the touch controls editor.
++    fn touch_edit_entry_shown(&self) -> bool {
++        cfg!(target_os = "android") && self.player.is_some() && self.screen == super::Screen::Paused && !self.touch.hardware
++    }
++
+     /// A text box has focus (the soft keyboard is wanted).
+     fn touch_text_focused(&self) -> bool {
+         use super::Screen;
+@@ -992,7 +1156,11 @@ impl Game<'_> {
          for i in held {
              self.touch_custom(i, false);
          }
@@ -391,7 +474,7 @@ index e3a32788..092e2991 100644
          self.touch.knob = [0.0, 0.0];
          self.touch.dpad = None;
          self.touch.aim_at = None;
-@@ -1001,6 +1145,10 @@ impl Game<'_> {
+@@ -1001,6 +1169,10 @@ impl Game<'_> {
          let sneaking = self.touch.sneaking;
          self.pad.injected = Default::default();
          self.pad.injected.set(Button::RightStick, sneaking);
@@ -402,12 +485,24 @@ index e3a32788..092e2991 100644
      }
  
      /// The controls over the HUD, while playing.
-@@ -1058,7 +1206,15 @@ impl Game<'_> {
+@@ -1030,6 +1202,11 @@ impl Game<'_> {
+             batch.fill(atlas, c[0] - 2.5, c[1] - 5.0, 5.0, 5.0, 0xFFFF_FFFF);
+             batch.fill(atlas, c[0] - 4.5, c[1] + 1.0, 9.0, 4.0, 0xFFFF_FFFF);
+         }
++        if self.touch_edit_entry_shown() {
++            let (c, r) = gui.edit_entry();
++            square(batch, atlas, c, r, false, 1.0);
++            icon(batch, atlas, Id::Edit, c, r, INK);
++        }
+         if !self.touch_controls_shown() {
+             return;
+         }
+@@ -1058,7 +1235,15 @@ impl Game<'_> {
              if !spec.visible {
                  a *= 0.35;
              }
 -            let (c, r) = gui.place(layout, id);
-+            if matches!(id, Id::FlyUp | Id::FlyDown) && !self.touch_flying() && !editing {
++            if swapped_out(layout, id, self.touch_flying()) {
 +                continue;
 +            }
 +            let (c, r) = match (id, layout.stick_floating, t.stick_origin) {
@@ -419,7 +514,7 @@ index e3a32788..092e2991 100644
              let squared = layout.preset != Preset::Standard;
              if id == Id::Dpad {
                  let cell = dpad_cell(r);
-@@ -1132,7 +1288,7 @@ impl Game<'_> {
+@@ -1132,7 +1317,7 @@ impl Game<'_> {
                  square(batch, atlas, c, r, down, a);
                  let ink = fade(INK, a);
                  match square_icon(id) {
@@ -428,7 +523,7 @@ index e3a32788..092e2991 100644
                      None => icon(batch, atlas, id, c, r, ink),
                  }
              } else if id == Id::Stick {
-@@ -1218,6 +1374,19 @@ impl Game<'_> {
+@@ -1218,6 +1403,19 @@ impl Game<'_> {
                  }
              }
          }
@@ -448,7 +543,7 @@ index e3a32788..092e2991 100644
          if self.touch.unsneak_frames > 0 {
              self.touch.unsneak_frames -= 1;
              if self.touch.unsneak_frames == 0 {
-@@ -1225,6 +1394,8 @@ impl Game<'_> {
+@@ -1225,6 +1423,8 @@ impl Game<'_> {
              }
          }
          let touch_aim = self.touch.layout.aim == Aim::Touch;
@@ -457,7 +552,7 @@ index e3a32788..092e2991 100644
          let mut attack = false;
          let mut held = [false; 2];
          let mut aim_start = None;
-@@ -1232,7 +1403,7 @@ impl Game<'_> {
+@@ -1232,7 +1432,7 @@ impl Game<'_> {
              if let Finger::Look { since, moved, attacking, start, .. } = finger
                  && !*moved
                  && !*attacking
@@ -466,7 +561,7 @@ index e3a32788..092e2991 100644
              {
                  *attacking = true;
                  aim_start = Some(*start);
-@@ -1339,20 +1510,22 @@ impl Game<'_> {
+@@ -1339,20 +1539,22 @@ impl Game<'_> {
              EditAction::AllFadeDown => t.layout.opacity = (t.layout.opacity - 0.1).max(0.1),
              EditAction::AllFadeUp => t.layout.opacity = (t.layout.opacity + 0.1).min(1.0),
              EditAction::Reset => {
@@ -499,7 +594,7 @@ index e3a32788..092e2991 100644
                  t.selected = None;
                  t.dirty = false;
              }
-@@ -1386,6 +1559,20 @@ impl Game<'_> {
+@@ -1386,6 +1588,20 @@ impl Game<'_> {
                  t.editing = false;
                  t.selected = None;
              }
@@ -520,7 +615,7 @@ index e3a32788..092e2991 100644
              _ => {}
          }
      }
-@@ -1441,6 +1628,27 @@ impl Game<'_> {
+@@ -1441,6 +1657,27 @@ impl Game<'_> {
                  Finger::Done
              }
              Id::Attack | Id::Use => unreachable!("touch_event starts trigger fingers"),
@@ -548,7 +643,23 @@ index e3a32788..092e2991 100644
              Id::Pause => pad(self, Button::Start),
              // Straight to the chat screen: the pad's chat binding (DPadUp by
              // default, DPadRight in some layouts) is not a fixed button.
-@@ -1540,7 +1748,7 @@ impl Game<'_> {
+@@ -1506,7 +1743,14 @@ impl Game<'_> {
+         }
+         match touch.phase {
+             TouchPhase::Started => {
+-                let finger = if self.touch_profile_shown() && gui.profile_hit(p) {
++                let finger = if self.touch_edit_entry_shown() && gui.edit_entry_hit(p) {
++                    // Back to the game with the editor open over it.
++                    self.touch_back();
++                    self.touch.editing = true;
++                    self.touch.dirty = false;
++                    self.touch.selected = None;
++                    Finger::Done
++                } else if self.touch_profile_shown() && gui.profile_hit(p) {
+                     #[cfg(target_os = "android")]
+                     super::android_ime::open_profile();
+                     Finger::Done
+@@ -1540,7 +1784,7 @@ impl Game<'_> {
                          self.touch.selected_button = Some(i);
                          let (c, _) = gui.custom(&self.touch.buttons[i]);
                          Finger::DragCustom(i, [c[0] - p[0], c[1] - p[1]])
@@ -557,7 +668,7 @@ index e3a32788..092e2991 100644
                          self.touch.selected_button = None;
                          self.touch.selected = Some(control);
                          let (c, _) = gui.place(&self.touch.layout, control);
-@@ -1553,22 +1761,34 @@ impl Game<'_> {
+@@ -1553,22 +1797,34 @@ impl Game<'_> {
                  } else if let Some(i) = gui.custom_hit(&self.touch.buttons, p) {
                      self.touch_custom(i, true);
                      Finger::Custom(i)
@@ -597,7 +708,7 @@ index e3a32788..092e2991 100644
                              Finger::Dpad => self.touch_dpad(&gui, p, true),
                              _ => {}
                          }
-@@ -1577,6 +1797,20 @@ impl Game<'_> {
+@@ -1577,6 +1833,20 @@ impl Game<'_> {
                  } else if let Some(slot) = gui.hotbar_slot(p) {
                      self.selected = slot;
                      Finger::Done
@@ -618,7 +729,7 @@ index e3a32788..092e2991 100644
                  } else {
                      Finger::Look { last: pos, start: pos, since: Instant::now(), moved: false, attacking: false }
                  };
-@@ -1615,7 +1849,8 @@ impl Game<'_> {
+@@ -1615,7 +1885,8 @@ impl Game<'_> {
                  Some(Finger::Drag(control, off)) => {
                      self.touch.dirty = true;
                      if let Some(spec) = self.touch.layout.controls.get_mut(&control) {
@@ -628,7 +739,7 @@ index e3a32788..092e2991 100644
                          spec.x = at[0];
                          spec.y = at[1];
                      }
-@@ -1634,8 +1869,7 @@ impl Game<'_> {
+@@ -1634,8 +1905,7 @@ impl Game<'_> {
                      self.touch
                          .fingers
                          .insert(id, Finger::Look { last: pos, start, since, moved: moved || far, attacking });
@@ -638,7 +749,7 @@ index e3a32788..092e2991 100644
                  }
                  Some(Finger::Trigger { i, last, since, look }) => {
                      // The attack (or use) button's finger turns the view too, unless
-@@ -1644,21 +1878,21 @@ impl Game<'_> {
+@@ -1644,21 +1914,21 @@ impl Game<'_> {
                      let (dx, dy) = (pos[0] - last[0], pos[1] - last[1]);
                      self.touch.fingers.insert(id, Finger::Trigger { i, last: pos, since, look });
                      if look && !self.touch_looking(id) {
@@ -665,7 +776,7 @@ index e3a32788..092e2991 100644
                  Some(Finger::Pointer) => {
                      // A cancelled touch (a system gesture took it) lets go off screen: no click.
                      // A swipe that scrolled lets go off screen too: it clicks nothing.
-@@ -1673,6 +1907,7 @@ impl Game<'_> {
+@@ -1673,6 +1943,7 @@ impl Game<'_> {
                  }
                  Some(Finger::Stick) => {
                      self.touch.knob = [0.0, 0.0];
@@ -673,7 +784,7 @@ index e3a32788..092e2991 100644
                      self.pad.injected.left = [0.0, 0.0];
                  }
                  Some(Finger::Dpad) => {
-@@ -1686,10 +1921,17 @@ impl Game<'_> {
+@@ -1686,10 +1957,17 @@ impl Game<'_> {
                      // The aim point stays until the attack trigger is let go.
                      self.touch.aim_frames = 2;
                  }
@@ -693,7 +804,7 @@ index e3a32788..092e2991 100644
                      // A short tap: keep it down a few frames so a tick sees
                      // one hit (or one use).
                      self.pad.injected.triggers[i] = 1.0;
-@@ -1707,7 +1949,8 @@ impl Game<'_> {
+@@ -1707,7 +1985,8 @@ impl Game<'_> {
                      self.touch.trigger_release[i] = 3;
                  }
                  _ => {}
@@ -703,7 +814,7 @@ index e3a32788..092e2991 100644
          }
      }
  
-@@ -1846,17 +2089,76 @@ impl Game<'_> {
+@@ -1846,17 +2125,76 @@ impl Game<'_> {
          };
      }
  

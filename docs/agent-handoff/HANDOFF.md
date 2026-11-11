@@ -103,3 +103,9 @@ cargo check -p horizon-android --target aarch64-linux-android
 > «порт + все патчи из android-patches/» (`git apply --check` сначала), прогони
 > `cargo check -p horizon-client --lib` и почини ошибки компиляции, если они есть. Ничего в поведении
 > не меняй без указания: цель — чтобы патч собирался.
+## 9. Геометрия тача Bedrock (отдельная задача)
+
+В этом же каталоге: BEDROCK-UI-AGENT.md (задание для агента), edrock-geometry.md +
+edrock-geometry.json (измеренные прямоугольники контролов Bedrock 1.26.40.5 на 3200x2136),
+docs/../bedrock-ui-pack в C:\Users\user\Documents\bedrock-ui-pack (полный UI-пак Bedrock:
+JSON UI, HBUI, спрайты, скрипты замера). Начинать с BEDROCK-UI-AGENT.md.

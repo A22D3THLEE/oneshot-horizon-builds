@@ -1,0 +1,326 @@
+{
+ "screen_px": [
+  3200,
+  2136
+ ],
+ "gui_scale": 4.8,
+ "source": "Minecraft Bedrock 1.26.40.5, MIUI tablet 24091RPADG, 3200x2136 landscape",
+ "method": "screenshot gradients: outer border of each control at the strongest edge",
+ "controls": [
+  {
+   "name": "joystick_base",
+   "rect_px": [
+    188,
+    832,
+    880,
+    1522
+   ],
+   "centre_px": [
+    534,
+    1177
+   ],
+   "size_px": [
+    692,
+    690
+   ],
+   "centre_pct": [
+    16.69,
+    55.1
+   ],
+   "size_pct_of_height": 32.3,
+   "gui_units": {
+    "w": 144.2,
+    "h": 143.8,
+    "cx": 111.2,
+    "cy": 245.2
+   },
+   "anchors_px": {
+    "left": 188,
+    "right": 2320,
+    "top": 832,
+    "bottom": 614
+   },
+   "note": "квадратная база джойстика (скруглённые углы)"
+  },
+  {
+   "name": "joystick_knob",
+   "rect_px": [
+    367,
+    1009,
+    701,
+    1343
+   ],
+   "centre_px": [
+    534,
+    1176
+   ],
+   "size_px": [
+    334,
+    334
+   ],
+   "centre_pct": [
+    16.69,
+    55.06
+   ],
+   "size_pct_of_height": 15.64,
+   "gui_units": {
+    "w": 69.6,
+    "h": 69.6,
+    "cx": 111.2,
+    "cy": 245.0
+   },
+   "anchors_px": {
+    "left": 367,
+    "right": 2499,
+    "top": 1009,
+    "bottom": 793
+   },
+   "note": "квадратный кноб в центре базы"
+  },
+  {
+   "name": "btn_jump",
+   "rect_px": [
+    2825,
+    721,
+    3093,
+    989
+   ],
+   "centre_px": [
+    2959,
+    855
+   ],
+   "size_px": [
+    268,
+    268
+   ],
+   "centre_pct": [
+    92.47,
+    40.03
+   ],
+   "size_pct_of_height": 12.55,
+   "gui_units": {
+    "w": 55.8,
+    "h": 55.8,
+    "cx": 616.5,
+    "cy": 178.1
+   },
+   "anchors_px": {
+    "left": 2825,
+    "right": 107,
+    "top": 721,
+    "bottom": 1147
+   },
+   "note": "прыжок; под водой — «всплыть» (стрелка с волнами)"
+  },
+  {
+   "name": "btn_sprint",
+   "rect_px": [
+    2505,
+    935,
+    2773,
+    1203
+   ],
+   "centre_px": [
+    2639,
+    1069
+   ],
+   "size_px": [
+    268,
+    268
+   ],
+   "centre_pct": [
+    82.47,
+    50.05
+   ],
+   "size_pct_of_height": 12.55,
+   "gui_units": {
+    "w": 55.8,
+    "h": 55.8,
+    "cx": 549.8,
+    "cy": 222.7
+   },
+   "anchors_px": {
+    "left": 2505,
+    "right": 427,
+    "top": 935,
+    "bottom": 933
+   },
+   "note": "спринт (двойной шеврон)"
+  },
+  {
+   "name": "btn_sneak",
+   "rect_px": [
+    2825,
+    1149,
+    3093,
+    1417
+   ],
+   "centre_px": [
+    2959,
+    1283
+   ],
+   "size_px": [
+    268,
+    268
+   ],
+   "centre_pct": [
+    92.47,
+    60.07
+   ],
+   "size_pct_of_height": 12.55,
+   "gui_units": {
+    "w": 55.8,
+    "h": 55.8,
+    "cx": 616.5,
+    "cy": 267.3
+   },
+   "anchors_px": {
+    "left": 2825,
+    "right": 107,
+    "top": 1149,
+    "bottom": 719
+   },
+   "note": "присед; под водой — «погрузиться»"
+  },
+  {
+   "name": "top_chat",
+   "rect_px": [
+    1468,
+    12,
+    1548,
+    84
+   ],
+   "centre_px": [
+    1508,
+    48
+   ],
+   "size_px": [
+    80,
+    72
+   ],
+   "centre_pct": [
+    47.12,
+    2.25
+   ],
+   "size_pct_of_height": 3.37,
+   "gui_units": {
+    "w": 16.7,
+    "h": 15.0,
+    "cx": 314.2,
+    "cy": 10.0
+   },
+   "anchors_px": {
+    "left": 1468,
+    "right": 1652,
+    "top": 12,
+    "bottom": 2052
+   },
+   "note": "верхний ряд, 1-я плитка (иконка ввода/чата)"
+  },
+  {
+   "name": "top_pause",
+   "rect_px": [
+    1560,
+    12,
+    1640,
+    84
+   ],
+   "centre_px": [
+    1600,
+    48
+   ],
+   "size_px": [
+    80,
+    72
+   ],
+   "centre_pct": [
+    50.0,
+    2.25
+   ],
+   "size_pct_of_height": 3.37,
+   "gui_units": {
+    "w": 16.7,
+    "h": 15.0,
+    "cx": 333.3,
+    "cy": 10.0
+   },
+   "anchors_px": {
+    "left": 1560,
+    "right": 1560,
+    "top": 12,
+    "bottom": 2052
+   },
+   "note": "верхний ряд, 2-я плитка (пауза)"
+  },
+  {
+   "name": "top_extra",
+   "rect_px": [
+    1656,
+    12,
+    1736,
+    84
+   ],
+   "centre_px": [
+    1696,
+    48
+   ],
+   "size_px": [
+    80,
+    72
+   ],
+   "centre_pct": [
+    53.0,
+    2.25
+   ],
+   "size_pct_of_height": 3.37,
+   "gui_units": {
+    "w": 16.7,
+    "h": 15.0,
+    "cx": 353.3,
+    "cy": 10.0
+   },
+   "anchors_px": {
+    "left": 1656,
+    "right": 1464,
+    "top": 12,
+    "bottom": 2052
+   },
+   "note": "верхний ряд, 3-я плитка"
+  },
+  {
+   "name": "hotbar",
+   "rect_px": [
+    1095,
+    2021,
+    2110,
+    2131
+   ],
+   "centre_px": [
+    1602,
+    2076
+   ],
+   "size_px": [
+    1015,
+    110
+   ],
+   "centre_pct": [
+    50.08,
+    97.19
+   ],
+   "size_pct_of_height": 5.15,
+   "gui_units": {
+    "w": 211.5,
+    "h": 22.9,
+    "cx": 333.9,
+    "cy": 432.5
+   },
+   "anchors_px": {
+    "left": 1095,
+    "right": 1090,
+    "top": 2021,
+    "bottom": 5
+   },
+   "note": "9 слотов + «…» (инвентарь), шаг слота ≈ 101.5 px"
+  }
+ ]
+}
