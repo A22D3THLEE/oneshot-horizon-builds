@@ -1,0 +1,45 @@
+diff --git a/crates/horizon-client-render/src/settings.rs b/crates/horizon-client-render/src/settings.rs
+index 230c054..52beaac 100644
+--- a/crates/horizon-client-render/src/settings.rs
++++ b/crates/horizon-client-render/src/settings.rs
+@@ -396,6 +396,8 @@ impl Settings {
+         // Only the first start's defaults: what the player sets afterwards stays.
+         #[cfg(target_os = "android")]
+         let settings = if first_run { settings.fit_phone() } else { settings };
++        #[cfg(target_os = "android")]
++        let settings = settings.auto_jump_once(path);
+         #[cfg(not(target_os = "android"))]
+         let _ = first_run;
+         settings.describe_for_crashes();
+@@ -405,6 +407,31 @@ impl Settings {
+             ..settings
+         }
+     }
++    /// Touch controls jump on their own, as Bedrock's do: auto-jump is turned on once per
++    /// player folder, new or already played, and the player's choice in Controls stays
++    /// after that. The mark is written only once options.txt holds the change.
++    #[cfg(target_os = "android")]
++    fn auto_jump_once(mut self, path: &Path) -> Self {
++        let Some(dir) = path.parent() else {
++            return self;
++        };
++        let mark = dir.join("horizon-autojump.txt");
++        if mark.exists() {
++            return self;
++        }
++        if !self.auto_jump {
++            self.auto_jump = true;
++            if let Err(e) = fs::write(path, self.serialize()) {
++                log::warn!("Horizon: options.txt is not saved: {e}");
++                return self;
++            }
++            log::info!("Horizon: auto-jump on for touch controls");
++        }
++        if let Err(e) = fs::write(&mark, "auto-jump turned on once; Controls > Auto-Jump changes it\n") {
++            log::warn!("Horizon: {}: {e}", mark.display());
++        }
++        self
++    }
+     /// Phones under 7 GiB (Redmi Note 9 Pro is 6 GB) stall and get killed on
+     /// Java servers at the desktop default of 12 chunks: the client cannot
+     /// answer keep-alives, so the tab list shows thousands of ms, then the
