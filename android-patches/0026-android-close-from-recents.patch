@@ -1,0 +1,61 @@
+diff --git a/packaging/android/java/dev/horizonlab/horizon/HorizonActivity.java b/packaging/android/java/dev/horizonlab/horizon/HorizonActivity.java
+index 427838a..855b19b 100644
+--- a/packaging/android/java/dev/horizonlab/horizon/HorizonActivity.java
++++ b/packaging/android/java/dev/horizonlab/horizon/HorizonActivity.java
+@@ -318,17 +318,25 @@ public class HorizonActivity extends NativeActivity {
+ 
+     @Override
+     protected void onDestroy() {
+-        super.onDestroy();
+         // The window went away for good while the game still ran in this process (swiped away,
+         // or finished by the system). The native side can't start again here: end the process
+         // so the next launch is a fresh one. A configuration change is not an end.
++        // Before super: NativeActivity's onDestroy waits for the game loop to stop, and the loop
++        // never hears of it (winit drops Destroy), so with HostService keeping the process up the
++        // main thread hung there and the launcher could not open again. The world was saved when
++        // it went to the background (`suspended` in game.rs).
+         if (isFinishing() && !isChangingConfigurations() && !quitting) {
+-            // The player closed it: not a failed start, however short (android_main.rs).
+-            new java.io.File(getFilesDir(), "launch.pending").delete();
+-            new java.io.File(getFilesDir(), "vulkan-driver.pending").delete();
+-            PlayStats.end(this);
+-            System.exit(0);
++            endProcess(this);
+         }
++        super.onDestroy();
++    }
++
++    /** The game was closed from Recents: no failed start, however short (android_main.rs). */
++    static void endProcess(android.content.Context c) {
++        new java.io.File(c.getFilesDir(), "launch.pending").delete();
++        new java.io.File(c.getFilesDir(), "vulkan-driver.pending").delete();
++        PlayStats.end(c);
++        System.exit(0);
+     }
+ 
+     /**
+diff --git a/packaging/android/java/dev/horizonlab/horizon/HostService.java b/packaging/android/java/dev/horizonlab/horizon/HostService.java
+index c26de01..f91beb2 100644
+--- a/packaging/android/java/dev/horizonlab/horizon/HostService.java
++++ b/packaging/android/java/dev/horizonlab/horizon/HostService.java
+@@ -103,6 +103,20 @@ public class HostService extends Service implements Runnable {
+         handler.postDelayed(this, 15000);
+     }
+ 
++    /**
++     * The game was swiped out of Recents while it shared its world: the player closed it, so the
++     * process ends (the world was saved when it went to the background). Left alone, this
++     * foreground service kept a process whose game window was gone, and the launcher could not
++     * open again until the system force-stopped the app.
++     */
++    @Override
++    public void onTaskRemoved(Intent rootIntent) {
++        android.util.Log.i("Horizon", "game closed from Recents while hosting: ending the process");
++        stopForeground(true);
++        stopSelf();
++        HorizonActivity.endProcess(this);
++    }
++
+     @Override
+     public void onDestroy() {
+         if (running == this) running = null;
