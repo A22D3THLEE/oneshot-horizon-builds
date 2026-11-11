@@ -1,0 +1,288 @@
+diff --git a/crates/horizon-client/src/game.rs b/crates/horizon-client/src/game.rs
+index 448ef4a..17db518 100644
+--- a/crates/horizon-client/src/game.rs
++++ b/crates/horizon-client/src/game.rs
+@@ -18588,8 +18588,15 @@ impl ApplicationHandler for Game<'_> {
+                 let reply = self.owner_console_command("save-all flush");
+                 log::info!("Horizon: saved on going to the background: {reply:?}");
+             }
++            // A world open to the LAN or to friends plays on for them behind Home, as it does
++            // behind the pause menu (`pauses_game`); the loop takes in what its server sends this
++            // window meanwhile (`about_to_wait`), and Oneshot's HostService keeps the process up.
+             if let Some(server) = &self.integrated {
+-                server.set_paused(true);
++                let published = self.is_published();
++                server.set_paused(!published);
++                if published {
++                    log::info!("Horizon: the world stays open for friends in the background");
++                }
+             }
+             self.touch_release_all();
+             android_input::reset();
+@@ -20249,10 +20256,22 @@ impl Game<'_> {
+             event_loop.exit();
+             return;
+         }
+-        // In the background nothing is simulated or drawn: the loop waits for `resumed`.
++        // In the background nothing is simulated or drawn: the loop waits for `resumed`. A world
++        // still open to friends runs on its server thread: once a second this window takes in what
++        // that server sent it (it would pile up in memory until `resumed`) and reads new codes.
+         #[cfg(target_os = "android")]
+         if ANDROID_BACKGROUND.load(Ordering::Relaxed) {
+-            event_loop.set_control_flow(ControlFlow::Wait);
++            if self.integrated.is_some() && self.is_published() {
++                if let Err(e) = self.poll_remote() {
++                    log::warn!("Horizon: {e}");
++                }
++                self.tick_friends();
++                event_loop.set_control_flow(ControlFlow::WaitUntil(
++                    Instant::now() + Duration::from_secs(1),
++                ));
++            } else {
++                event_loop.set_control_flow(ControlFlow::Wait);
++            }
+             return;
+         }
+         if let Some(w) = &self.window {
+diff --git a/crates/horizon-client/src/game/android_ime.rs b/crates/horizon-client/src/game/android_ime.rs
+index cd9292e..63d63df 100644
+--- a/crates/horizon-client/src/game/android_ime.rs
++++ b/crates/horizon-client/src/game/android_ime.rs
+@@ -162,6 +162,29 @@ pub(super) fn share_invite(code: &str) {
+     }
+ }
+ 
++/// The world is shared under `code`, or no longer (`None`): `HorizonActivity.hostingChanged`
++/// starts or stops HostService, which keeps the process running behind Home.
++pub(super) fn hosting(code: Option<&str>) {
++    let Some(app) = super::ANDROID_APP.get() else {
++        return;
++    };
++    // SAFETY: as in `show`.
++    let result = (|| -> jni::errors::Result<()> {
++        let vm = unsafe { jni::JavaVM::from_raw(app.vm_as_ptr().cast())? };
++        let mut env = vm.attach_current_thread_permanently()?;
++        let activity = unsafe { jni::objects::JObject::from_raw(app.activity_as_ptr().cast()) };
++        let code = match code {
++            Some(code) => jni::objects::JObject::from(env.new_string(code)?),
++            None => jni::objects::JObject::null(),
++        };
++        env.call_method(&activity, "hostingChanged", "(Ljava/lang/String;)V", &[jni::objects::JValue::Object(&code)])?;
++        Ok(())
++    })();
++    if let Err(e) = result {
++        log::warn!("Horizon: the friends host service: {e}");
++    }
++}
++
+ /// Capture the mouse pointer (relative movement, no pointer drawn) or let it go
+ /// (`HorizonActivity.setPointerCapture`).
+ pub(super) fn pointer_capture(on: bool) {
+diff --git a/crates/horizon-client/src/game/friends.rs b/crates/horizon-client/src/game/friends.rs
+index a4b02c4..a160d09 100644
+--- a/crates/horizon-client/src/game/friends.rs
++++ b/crates/horizon-client/src/game/friends.rs
+@@ -53,6 +53,9 @@ fn stun_servers() -> Vec<String> {
+ /// `HORIZON_ONESHOT_INVITE` (written when a code is ready or changes, removed when sharing ends). Nothing without
+ /// the variable.
+ fn oneshot_invite(code: Option<&str>) {
++    // Android: HostService keeps the process (and so the world) up behind Home while shared.
++    #[cfg(target_os = "android")]
++    super::android_ime::hosting(code);
+     let Some(path) = std::env::var_os("HORIZON_ONESHOT_INVITE").filter(|p| !p.is_empty()) else {
+         return;
+     };
+diff --git a/packaging/android/AndroidManifest.xml b/packaging/android/AndroidManifest.xml
+index 1445f98..e5dd2e1 100644
+--- a/packaging/android/AndroidManifest.xml
++++ b/packaging/android/AndroidManifest.xml
+@@ -8,6 +8,7 @@
+     <uses-permission android:name="android.permission.ACCESS_NETWORK_STATE" />
+     <uses-permission android:name="android.permission.FOREGROUND_SERVICE" />
+     <uses-permission android:name="android.permission.FOREGROUND_SERVICE_DATA_SYNC" />
++    <uses-permission android:name="android.permission.FOREGROUND_SERVICE_SPECIAL_USE" />
+     <uses-permission android:name="android.permission.POST_NOTIFICATIONS" />
+     <uses-permission android:name="android.permission.WAKE_LOCK" />
+     <uses-permission android:name="android.permission.ACCESS_WIFI_STATE" />
+@@ -115,6 +116,15 @@
+             android:name=".SetupService"
+             android:exported="false"
+             android:foregroundServiceType="dataSync" />
++        <!-- A world shared with friends keeps running behind Home (specialUse from Android 14). -->
++        <service
++            android:name=".HostService"
++            android:exported="false"
++            android:foregroundServiceType="dataSync|specialUse">
++            <property
++                android:name="android.app.PROPERTY_SPECIAL_USE_FGS_SUBTYPE"
++                android:value="Hosting a game world that friends play in over the network" />
++        </service>
+         <provider
+             android:name=".HorizonDocumentsProvider"
+             android:authorities="dev.horizonlab.horizon.documents"
+diff --git a/packaging/android/java/dev/horizonlab/horizon/HorizonActivity.java b/packaging/android/java/dev/horizonlab/horizon/HorizonActivity.java
+index 212e8c2..427838a 100644
+--- a/packaging/android/java/dev/horizonlab/horizon/HorizonActivity.java
++++ b/packaging/android/java/dev/horizonlab/horizon/HorizonActivity.java
+@@ -253,6 +253,36 @@ public class HorizonActivity extends NativeActivity {
+         });
+     }
+ 
++    /**
++     * Oneshot: called from the game thread when the world is shared under {@code code} (a new code
++     * included), or no longer ({@code null}). HostService keeps the process running behind Home so
++     * friends can stay; it is started while the game is in front, where Android allows it.
++     */
++    public void hostingChanged(final String code) {
++        runOnUiThread(new Runnable() {
++            public void run() {
++                android.content.Intent i = new android.content.Intent(HorizonActivity.this, HostService.class);
++                if (code == null) {
++                    stopService(i);
++                    return;
++                }
++                HostService s = HostService.running;
++                if (s != null) {
++                    s.update(code);
++                    return;
++                }
++                i.putExtra("code", code);
++                try {
++                    if (android.os.Build.VERSION.SDK_INT >= 26) startForegroundService(i);
++                    else startService(i);
++                } catch (Exception e) {
++                    // Android 12+ refuses it from the background: sharing still works while in front.
++                    android.util.Log.w("Horizon", "HostService not started: " + e);
++                }
++            }
++        });
++    }
++
+     /**
+      * Called from the game thread once the native loop has exited (Quit Game, or the game could
+      * not go on). NativeActivity can't run the game twice in one process, so the task is removed
+diff --git a/packaging/android/java/dev/horizonlab/horizon/HostService.java b/packaging/android/java/dev/horizonlab/horizon/HostService.java
+new file mode 100644
+index 0000000..c26de01
+--- /dev/null
++++ b/packaging/android/java/dev/horizonlab/horizon/HostService.java
+@@ -0,0 +1,119 @@
++package dev.horizonlab.horizon;
++
++import android.app.Notification;
++import android.app.NotificationChannel;
++import android.app.NotificationManager;
++import android.app.PendingIntent;
++import android.app.Service;
++import android.content.Context;
++import android.content.Intent;
++import android.content.pm.ServiceInfo;
++import android.net.wifi.WifiManager;
++import android.os.Handler;
++import android.os.IBinder;
++import android.os.PowerManager;
++
++/**
++ * Keeps a world shared with friends going with the game behind Home or the screen off: without a
++ * foreground service Android (MIUI first) freezes the process, the relay drops the host a minute
++ * later and the code stops working. The game starts it when sharing begins and stops it when it
++ * ends (HorizonActivity.hostingChanged); the world itself runs on the game's server thread.
++ */
++public class HostService extends Service implements Runnable {
++    static final String CHANNEL = "host";
++    static final int ID = 3;
++    /** The running service, for the game to change the code it shows without starting it again. */
++    static volatile HostService running;
++
++    private final Handler handler = new Handler();
++    private PowerManager.WakeLock wake;
++    private WifiManager.WifiLock wifi;
++    private NotificationManager nm;
++    private String code = "";
++
++    @Override
++    public void onCreate() {
++        super.onCreate();
++        nm = (NotificationManager) getSystemService(Context.NOTIFICATION_SERVICE);
++        if (android.os.Build.VERSION.SDK_INT >= 26) {
++            nm.createNotificationChannel(new NotificationChannel(CHANNEL,
++                    Ui.t("Мир для друзей", "World for friends"), NotificationManager.IMPORTANCE_LOW));
++        }
++    }
++
++    @Override
++    public int onStartCommand(Intent intent, int flags, int startId) {
++        String c = intent != null ? intent.getStringExtra("code") : null;
++        if (c != null) code = c;
++        Notification n = build();
++        if (android.os.Build.VERSION.SDK_INT >= 34) {
++            // specialUse: no daily limit, unlike dataSync on Android 15.
++            startForeground(ID, n, ServiceInfo.FOREGROUND_SERVICE_TYPE_SPECIAL_USE);
++        } else if (android.os.Build.VERSION.SDK_INT >= 29) {
++            startForeground(ID, n, ServiceInfo.FOREGROUND_SERVICE_TYPE_DATA_SYNC);
++        } else {
++            startForeground(ID, n);
++        }
++        if (wake == null) {
++            wake = ((PowerManager) getSystemService(Context.POWER_SERVICE))
++                    .newWakeLock(PowerManager.PARTIAL_WAKE_LOCK, "horizon:host");
++            wake.setReferenceCounted(false);
++            wake.acquire();
++            wifi = ((WifiManager) getApplicationContext().getSystemService(Context.WIFI_SERVICE))
++                    .createWifiLock(WifiManager.WIFI_MODE_FULL_HIGH_PERF, "horizon:host");
++            wifi.setReferenceCounted(false);
++            wifi.acquire();
++        }
++        running = this;
++        handler.removeCallbacks(this);
++        handler.postDelayed(this, 15000);
++        return START_NOT_STICKY;
++    }
++
++    /** From the game, on the main thread: a new code to show. */
++    void update(String c) {
++        code = c;
++        nm.notify(ID, build());
++    }
++
++    private Notification build() {
++        Intent open = new Intent(this, HorizonActivity.class);
++        open.addFlags(Intent.FLAG_ACTIVITY_NEW_TASK);
++        PendingIntent pi = PendingIntent.getActivity(this, 0, open, PendingIntent.FLAG_IMMUTABLE);
++        Notification.Builder b = android.os.Build.VERSION.SDK_INT >= 26
++                ? new Notification.Builder(this, CHANNEL) : new Notification.Builder(this);
++        String text = code.isEmpty()
++                ? Ui.t("Друзья могут зайти, пока это уведомление есть.", "Friends can join while this notification is here.")
++                : Ui.t("Код: ", "Code: ") + code;
++        return b.setSmallIcon(android.R.drawable.ic_menu_share)
++                .setContentTitle(Ui.t("Мир открыт для друзей", "World open to friends"))
++                .setContentText(text)
++                .setContentIntent(pi)
++                .setOngoing(true)
++                .setOnlyAlertOnce(true)
++                .build();
++    }
++
++    /** The game removes invite-code.txt when sharing ends: a stop that never came ends it too. */
++    public void run() {
++        if (!new java.io.File(SetupActivity.home(this), "invite-code.txt").isFile()) {
++            stopSelf();
++            return;
++        }
++        handler.postDelayed(this, 15000);
++    }
++
++    @Override
++    public void onDestroy() {
++        if (running == this) running = null;
++        handler.removeCallbacks(this);
++        if (wake != null && wake.isHeld()) wake.release();
++        if (wifi != null && wifi.isHeld()) wifi.release();
++        super.onDestroy();
++    }
++
++    @Override
++    public IBinder onBind(Intent intent) {
++        return null;
++    }
++}
