@@ -1,0 +1,176 @@
+diff --git a/crates/horizon-client/assets/horizon/lang/en_us.json b/crates/horizon-client/assets/horizon/lang/en_us.json
+index 38315e9..fba2837 100644
+--- a/crates/horizon-client/assets/horizon/lang/en_us.json
++++ b/crates/horizon-client/assets/horizon/lang/en_us.json
+@@ -386,6 +386,7 @@
+   "horizon.friends.troubleshooting": "Troubleshooting...",
+   "horizon.friends.stopped": "Stopped sharing the invite code.",
+   "horizon.friends.short_code_changed": "Someone kept trying a wrong short code, so it changed.",
++  "horizon.friends.code_changed": "The invite code changed: send your friends the new one.",
+   "horizon.friends.wrong_code": "Someone tried a wrong code.",
+   "horizon.friends.relay_stopped": "Too many wrong short codes, so the relay is off until you share again. Friends can still join with the full code.",
+   "horizon.friends.code_ready": "Your invite code is ready: Game Menu, Play with Friends. Copy it and send it to your friends.",
+diff --git a/crates/horizon-client/assets/horizon/lang/ru_ru.json b/crates/horizon-client/assets/horizon/lang/ru_ru.json
+index eb5e71c..42f1e92 100644
+--- a/crates/horizon-client/assets/horizon/lang/ru_ru.json
++++ b/crates/horizon-client/assets/horizon/lang/ru_ru.json
+@@ -258,6 +258,7 @@
+   "horizon.friends.troubleshooting": "Если не подключается...",
+   "horizon.friends.stopped": "Доступ по коду приглашения закрыт.",
+   "horizon.friends.short_code_changed": "Кто-то подбирал короткий код, поэтому он сменился.",
++  "horizon.friends.code_changed": "Код приглашения сменился: отправьте друзьям новый.",
+   "horizon.friends.wrong_code": "Кто-то ввёл неверный код.",
+   "horizon.friends.relay_stopped": "Слишком много неверных коротких кодов: сервер Oneshot выключен до следующего открытия. Полный код по-прежнему работает.",
+   "horizon.friends.code_ready": "Код приглашения готов: меню игры → «Игра с друзьями» → «Отправить код».",
+diff --git a/crates/horizon-client/src/android_main.rs b/crates/horizon-client/src/android_main.rs
+index 7e85a5e..4048d79 100644
+--- a/crates/horizon-client/src/android_main.rs
++++ b/crates/horizon-client/src/android_main.rs
+@@ -98,6 +98,14 @@ fn android_main(app: AndroidApp) {
+                 std::env::set_var("HORIZON_RELAY_URL", relay);
+             }
+         }
++        // How the world is shared and friends are joined, chosen on the launcher's Friends page:
++        // `friends-path.txt` holds relay (the Oneshot server only), direct (no relay) or auto.
++        if std::env::var_os("HORIZON_FRIENDS_PATH").is_none()
++            && let Ok(path) = std::fs::read_to_string(home.join("friends-path.txt"))
++            && matches!(path.trim(), "relay" | "direct")
++        {
++            std::env::set_var("HORIZON_FRIENDS_PATH", path.trim());
++        }
+     }
+     let _ = std::fs::create_dir_all(home.join("..").join("cache"));
+     let _ = std::env::set_current_dir(&home);
+diff --git a/crates/horizon-client/src/game/friends.rs b/crates/horizon-client/src/game/friends.rs
+index a160d09..23a21c3 100644
+--- a/crates/horizon-client/src/game/friends.rs
++++ b/crates/horizon-client/src/game/friends.rs
+@@ -99,12 +99,18 @@ impl Game<'_> {
+             })?;
+         }
+         let port = self.lan_port().ok_or("the world isn't open to LAN")?;
++        let path = PathMode::from_env();
+         let host = match Host::start(HostConfig {
+             lan: std::net::SocketAddr::from(([127, 0, 0, 1], port)),
+             protocol: PROTOCOL_VERSION,
+             game: GAME_VERSION.to_owned(),
+-            relay: horizon_client::net::friends_relay_setting(),
+-            path: PathMode::from_env(),
++            // "Direct only" on the launcher's Friends page leaves the relay out of the code.
++            relay: if path == PathMode::DirectOnly {
++                None
++            } else {
++                horizon_client::net::friends_relay_setting()
++            },
++            path,
+             port: std::env::var("HORIZON_FRIENDS_PORT")
+                 .ok()
+                 .and_then(|p| p.parse().ok())
+@@ -173,6 +179,23 @@ impl Game<'_> {
+         for event in sharing.host.poll() {
+             match event {
+                 HostEvent::Code(code) => {
++                    // Through the relay only, a code without the relay (before it answers, or while
++                    // it reconnects) lets no one in: keep the last one until the relay's comes.
++                    let relayed = matches!(
++                        horizon_friends::invite::parse(&code),
++                        Some(horizon_friends::invite::Parsed::Long(ref i)) if i.relay.is_some()
++                    );
++                    if PathMode::from_env() == PathMode::RelayOnly && !relayed {
++                        continue;
++                    }
++                    // Only once the old code was sent: the relay's code replacing the first one
++                    // a moment after sharing starts is no news.
++                    if sharing.copied.is_some() && sharing.code.as_deref().is_some_and(|old| old != code) {
++                        sharing.notice = Some(lang::get_or(
++                            "horizon.friends.code_changed",
++                            "The invite code changed: send your friends the new one.",
++                        ));
++                    }
+                     if sharing.code.is_some() && sharing.wrong >= horizon_friends::host::MAX_WRONG {
+                         sharing.notice = Some(lang::get_or(
+                             "horizon.friends.short_code_changed",
+diff --git a/packaging/android/java/dev/horizonlab/horizon/FriendsPage.java b/packaging/android/java/dev/horizonlab/horizon/FriendsPage.java
+index 95ca818..2667528 100644
+--- a/packaging/android/java/dev/horizonlab/horizon/FriendsPage.java
++++ b/packaging/android/java/dev/horizonlab/horizon/FriendsPage.java
+@@ -24,6 +24,53 @@ final class FriendsPage extends Page {
+     private final Button copyCode, shareCode;
+     private final Button restore;
+     private String code;
++    /** friends-path.txt in the game folder, read by the game at start (android_main.rs). */
++    static final String[] PATH_IDS = {"auto", "relay", "direct"};
++    private final TextView[] pathChips = new TextView[PATH_IDS.length];
++    private final TextView pathNote;
++
++    static String path(android.app.Activity a) {
++        try {
++            String s = new String(java.nio.file.Files.readAllBytes(new java.io.File(SetupActivity.home(a), "friends-path.txt").toPath()),
++                    java.nio.charset.StandardCharsets.UTF_8).trim();
++            return s.equals("relay") || s.equals("direct") ? s : "auto";
++        } catch (Exception e) {
++            return "auto";
++        }
++    }
++
++    private void setPath(String id) {
++        try {
++            java.nio.file.Files.write(new java.io.File(SetupActivity.home(a), "friends-path.txt").toPath(),
++                    (id + "\n").getBytes(java.nio.charset.StandardCharsets.UTF_8));
++        } catch (Exception e) {
++            a.say(Ui.t("Не удалось сохранить: ", "Couldn't save: ") + e.getMessage(), Ui.BAD);
++            return;
++        }
++        paintPath();
++        a.say(Net.hostCode(a) != null
++                ? Ui.t("Сохранено. Сработает после перезапуска игры и новой раздачи.", "Saved. It applies after the game restarts and you share again.")
++                : Ui.t("Сохранено.", "Saved."), Ui.GREEN);
++    }
++
++    private void paintPath() {
++        String cur = path(a);
++        String[] names = {Ui.t("Авто", "Auto"), Ui.t("Через сервер Oneshot", "Through the Oneshot server"), Ui.t("Только напрямую", "Direct only")};
++        for (int i = 0; i < PATH_IDS.length; i++) {
++            boolean on = PATH_IDS[i].equals(cur);
++            pathChips[i].setText(names[i]);
++            pathChips[i].setTextColor(on ? Ui.ON_ACCENT : Ui.TEXT);
++            pathChips[i].setBackground(on ? Ui.rounded(a, Ui.GREEN, 0, 20) : Ui.rounded(a, Ui.HIGH, Ui.EDGE, 20));
++        }
++        pathNote.setText(cur.equals("relay")
++                ? Ui.t("Друзья заходят только через сервер Oneshot: работает с мобильным интернетом и CGNAT, ваш адрес друзьям не виден. Код появится, когда сервер ответит.",
++                        "Friends join through the Oneshot server only: works on mobile internet and behind CGNAT, and your address stays hidden. The code shows up once the server answers.")
++                : cur.equals("direct")
++                ? Ui.t("Только напрямую, без сервера: нужна одна сеть (Wi-Fi, VPN вроде Radmin) или проброшенный порт.",
++                        "Direct only, no server: you need one network (Wi-Fi, a VPN such as Radmin) or a forwarded port.")
++                : Ui.t("Сначала напрямую, а если не выходит — через сервер Oneshot.",
++                        "Direct first, through the Oneshot server when that fails."));
++    }
+ 
+     FriendsPage(final ProfileActivity a) {
+         super(a);
+@@ -85,6 +132,25 @@ final class FriendsPage extends Page {
+         });
+         buttons(host, copyCode, shareCode);
+ 
++        LinearLayout way = block(Ui.t("Как раздавать мир", "How to share the world"));
++        LinearLayout ways = Ui.row(a);
++        way.addView(ways, Ui.gap(a, 4));
++        pathNote = note(way, "");
++        for (int i = 0; i < PATH_IDS.length; i++) {
++            TextView c = Ui.chip(a, "", false);
++            final String id = PATH_IDS[i];
++            c.setOnClickListener(new View.OnClickListener() {
++                public void onClick(View v) {
++                    setPath(id);
++                }
++            });
++            LinearLayout.LayoutParams lp = new LinearLayout.LayoutParams(-2, -2);
++            if (i > 0) lp.leftMargin = Ui.dp(a, 8);
++            ways.addView(c, lp);
++            pathChips[i] = c;
++        }
++        paintPath();
++
+         LinearLayout relay = block(Ui.t("Сервер Oneshot", "Oneshot server"));
+         relay.addView(a.relayLabel());
+         note(relay, Ui.t("Через него друзья находят друг друга, когда напрямую не выходит (мобильный интернет, CGNAT). "
