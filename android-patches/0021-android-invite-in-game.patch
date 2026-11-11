@@ -1,0 +1,167 @@
+diff --git a/crates/horizon-client/assets/horizon/lang/en_us.json b/crates/horizon-client/assets/horizon/lang/en_us.json
+index c4e914e..38315e9 100644
+--- a/crates/horizon-client/assets/horizon/lang/en_us.json
++++ b/crates/horizon-client/assets/horizon/lang/en_us.json
+@@ -377,6 +377,7 @@
+   "horizon.friends.hint": "Friends paste the code after the title screen's Friends button, in Direct Connection, or on the launcher's Play page.",
+   "horizon.friends.copied": "Copied",
+   "horizon.friends.copy_code": "Copy Code",
++  "horizon.friends.send_invite": "Send Invite",
+   "horizon.friends.stop_sharing": "Stop Sharing",
+   "horizon.friends.none_yet": "No friends here yet.",
+   "horizon.friends.here_now": "Here now: %s",
+diff --git a/crates/horizon-client/assets/horizon/lang/ru_ru.json b/crates/horizon-client/assets/horizon/lang/ru_ru.json
+index 9a81819..7183488 100644
+--- a/crates/horizon-client/assets/horizon/lang/ru_ru.json
++++ b/crates/horizon-client/assets/horizon/lang/ru_ru.json
+@@ -244,5 +244,23 @@
+   "%s settings": "Настройки %s",
+   "Settings made by the pack's author: they change only this pack.": "Настройки, созданные автором пакета: они меняют только этот пакет.",
+   "horizon.mods.not_built_phone": " (только ПК)",
+-  "horizon.mods.not_built_phone.tip": "Нативный мод (.hnmod) собирается в игру лаунчером на ПК, поэтому на телефоне он не запустится. Возьмите .hmod-версию мода, если она есть, или играйте с ним на ПК."
++  "horizon.mods.not_built_phone.tip": "Нативный мод (.hnmod) собирается в игру лаунчером на ПК, поэтому на телефоне он не запустится. Возьмите .hmod-версию мода, если она есть, или играйте с ним на ПК.",
++  "horizon.friends.title": "Игра с друзьями",
++  "horizon.friends.hint": "Друзья вставляют код в лаунчере Oneshot (Друзья → Подключиться к другу) или открывают присланную ссылку.",
++  "horizon.friends.copied": "Скопировано",
++  "horizon.friends.copy_code": "Скопировать код",
++  "horizon.friends.send_invite": "Отправить код",
++  "horizon.friends.stop_sharing": "Закрыть доступ",
++  "horizon.friends.none_yet": "Друзей пока нет.",
++  "horizon.friends.here_now": "Сейчас здесь: %s",
++  "horizon.friends.share_intro": "Откройте мир по коду приглашения: друзья из интернета заходят по коду или ссылке.",
++  "horizon.friends.start_sharing": "Открыть для друзей",
++  "horizon.friends.troubleshooting": "Если не подключается...",
++  "horizon.friends.stopped": "Доступ по коду приглашения закрыт.",
++  "horizon.friends.short_code_changed": "Кто-то подбирал короткий код, поэтому он сменился.",
++  "horizon.friends.wrong_code": "Кто-то ввёл неверный код.",
++  "horizon.friends.relay_stopped": "Слишком много неверных коротких кодов: сервер Oneshot выключен до следующего открытия. Полный код по-прежнему работает.",
++  "horizon.friends.code_ready": "Код приглашения готов: меню игры → «Игра с друзьями» → «Отправить код».",
++  "horizon.friends.share_failed": "Не удалось открыть мир: %s",
++  "horizon.friends.finding_route": "Ищу, как друзья смогут к вам подключиться…"
+ }
+diff --git a/crates/horizon-client/src/friends_screen.rs b/crates/horizon-client/src/friends_screen.rs
+index ac0ce13..b6fa970 100644
+--- a/crates/horizon-client/src/friends_screen.rs
++++ b/crates/horizon-client/src/friends_screen.rs
+@@ -112,6 +112,9 @@ fn layout(
+             w: 150.0,
+             label: if view.copied {
+                 tr("horizon.friends.copied", "Copied")
++            } else if cfg!(target_os = "android") {
++                // Android: the code is copied and the share sheet opens with the join link.
++                tr("horizon.friends.send_invite", "Send Invite")
+             } else {
+                 tr("horizon.friends.copy_code", "Copy Code")
+             },
+diff --git a/crates/horizon-client/src/game/android_ime.rs b/crates/horizon-client/src/game/android_ime.rs
+index 531c1f6..cd9292e 100644
+--- a/crates/horizon-client/src/game/android_ime.rs
++++ b/crates/horizon-client/src/game/android_ime.rs
+@@ -142,6 +142,26 @@ pub(super) fn open_profile() {
+     }
+ }
+ 
++/// Send the invite code (`HorizonActivity.shareInvite`): Android's clipboard gets
++/// `friend:CODE` and the share sheet opens with the join link.
++pub(super) fn share_invite(code: &str) {
++    let Some(app) = super::ANDROID_APP.get() else {
++        return;
++    };
++    // SAFETY: as in `show`.
++    let result = (|| -> jni::errors::Result<()> {
++        let vm = unsafe { jni::JavaVM::from_raw(app.vm_as_ptr().cast())? };
++        let mut env = vm.attach_current_thread_permanently()?;
++        let activity = unsafe { jni::objects::JObject::from_raw(app.activity_as_ptr().cast()) };
++        let code = env.new_string(code)?;
++        env.call_method(&activity, "shareInvite", "(Ljava/lang/String;)V", &[jni::objects::JValue::Object(&code)])?;
++        Ok(())
++    })();
++    if let Err(e) = result {
++        log::warn!("Horizon: share the invite: {e}");
++    }
++}
++
+ /// Capture the mouse pointer (relative movement, no pointer drawn) or let it go
+ /// (`HorizonActivity.setPointerCapture`).
+ pub(super) fn pointer_capture(on: bool) {
+diff --git a/crates/horizon-client/src/game/friends.rs b/crates/horizon-client/src/game/friends.rs
+index 59713aa..38f94ba 100644
+--- a/crates/horizon-client/src/game/friends.rs
++++ b/crates/horizon-client/src/game/friends.rs
+@@ -218,6 +218,10 @@ impl Game<'_> {
+         };
+         use horizon_client::clipboard::Clipboard;
+         self.clipboard.set(&code);
++        // The game's clipboard never reaches Android's: the system clipboard and the share
++        // sheet get the code and the join link, so it goes to a chat without leaving the game.
++        #[cfg(target_os = "android")]
++        super::android_ime::share_invite(&code);
+         if let Some(s) = self.friends.as_mut() {
+             s.copied = Some(Instant::now());
+         }
+diff --git a/packaging/android/java/dev/horizonlab/horizon/FriendsPage.java b/packaging/android/java/dev/horizonlab/horizon/FriendsPage.java
+index 22b9d05..95ca818 100644
+--- a/packaging/android/java/dev/horizonlab/horizon/FriendsPage.java
++++ b/packaging/android/java/dev/horizonlab/horizon/FriendsPage.java
+@@ -134,8 +134,8 @@ final class FriendsPage extends Page {
+         hostNote.setText(has
+                 ? Ui.t("Отправьте ссылку или код другу: он вставит его в «Подключиться к другу» и нажмёт ИГРАТЬ.",
+                         "Send the link or the code: your friend pastes it into Join a friend and presses PLAY.")
+-                : Ui.t("Откройте мир для друзей в игре (пауза → «Открыть для друзей») — код появится здесь.",
+-                        "Open your world to friends in the game (pause → Open to friends): the code shows up here."));
++                : Ui.t("В игре: пауза → «Игра с друзьями» → «Открыть для друзей», затем «Отправить код». Код появится и здесь.",
++                        "In the game: pause → Play with Friends → Start Sharing, then Send Invite. The code shows up here too."));
+         copyCode.setEnabled(has);
+         shareCode.setEnabled(has);
+         copyCode.setAlpha(has ? 1f : 0.4f);
+diff --git a/packaging/android/java/dev/horizonlab/horizon/HomePage.java b/packaging/android/java/dev/horizonlab/horizon/HomePage.java
+index dac28e0..4a848fc 100644
+--- a/packaging/android/java/dev/horizonlab/horizon/HomePage.java
++++ b/packaging/android/java/dev/horizonlab/horizon/HomePage.java
+@@ -13,8 +13,8 @@ final class HomePage extends Page {
+     private static final String[][] TIPS = {
+         {"Скриншот — кнопка F2 на сенсорной панели. Снимки появятся в «Галерее».",
+             "Screenshot: the F2 button on the touch panel. Shots show up in the Gallery."},
+-        {"Чтобы позвать друга, откройте мир для друзей в игре: код приглашения появится на странице «Друзья».",
+-            "To invite a friend, open your world to friends in the game: the invite code shows up on the Friends page."},
++        {"Чтобы позвать друга: в игре пауза → «Игра с друзьями» → «Открыть для друзей» → «Отправить код».",
++            "To invite a friend: in the game, pause → Play with Friends → Start Sharing → Send Invite."},
+         {"Перед обновлением игры сделайте бэкап миров на странице «Миры».",
+             "Back your worlds up on the Worlds page before updating the game."},
+         {"Миры переносятся между телефоном и ПК обычным zip — экспорт и импорт на странице «Миры».",
+diff --git a/packaging/android/java/dev/horizonlab/horizon/HorizonActivity.java b/packaging/android/java/dev/horizonlab/horizon/HorizonActivity.java
+index 354f622..212e8c2 100644
+--- a/packaging/android/java/dev/horizonlab/horizon/HorizonActivity.java
++++ b/packaging/android/java/dev/horizonlab/horizon/HorizonActivity.java
+@@ -228,6 +228,31 @@ public class HorizonActivity extends NativeActivity {
+         startActivity(new android.content.Intent(this, ProfileActivity.class));
+     }
+ 
++    /**
++     * Oneshot: called from the game thread by Play with Friends' Send Invite. The clipboard gets
++     * friend:CODE, then the share sheet opens with the join link, as the Friends page sends it.
++     */
++    public void shareInvite(final String code) {
++        runOnUiThread(new Runnable() {
++            public void run() {
++                android.content.ClipboardManager cm =
++                        (android.content.ClipboardManager) getSystemService(Context.CLIPBOARD_SERVICE);
++                if (cm != null) cm.setPrimaryClip(android.content.ClipData.newPlainText("invite", "friend:" + code));
++                android.content.Intent i = new android.content.Intent(android.content.Intent.ACTION_SEND);
++                i.setType("text/plain");
++                i.putExtra(android.content.Intent.EXTRA_TEXT,
++                        Ui.t("Заходи ко мне в Oneshot: ", "Join me in Oneshot: ") + Net.linkFor(code)
++                        + Ui.t("\nИли вставь код в лаунчере: friend:", "\nOr paste the code in the launcher: friend:") + code);
++                try {
++                    startActivity(android.content.Intent.createChooser(i, Ui.t("Отправить приглашение", "Send the invite")));
++                } catch (Exception e) {
++                    android.widget.Toast.makeText(HorizonActivity.this,
++                            Ui.t("Код скопирован.", "Code copied."), android.widget.Toast.LENGTH_SHORT).show();
++                }
++            }
++        });
++    }
++
+     /**
+      * Called from the game thread once the native loop has exited (Quit Game, or the game could
+      * not go on). NativeActivity can't run the game twice in one process, so the task is removed
