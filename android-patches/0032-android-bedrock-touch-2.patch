@@ -1,0 +1,515 @@
+From a1d68ac9e7f7b7118f0fa04b3fc3c807b321cca8 Mon Sep 17 00:00:00 2001
+From: oneshot <oneshot@localhost>
+Date: Thu, 12 Nov 2026 02:46:49 +0300
+Subject: [PATCH] 0032: Bedrock touch, part 2
+
+- floating left stick that goes away with the finger; sprint by pushing it
+  to the rim, the sprint button hidden in the Bedrock preset (layout rev 2)
+- repeated hits while a finger holds on a mob, at the weapon's cooldown
+- shield in the off hand beside a sword, axe or empty hand: raised by a hold
+  on nothing or while sneaking (Bedrock); a hold on a mob hits, on a block breaks
+- the camera turns while drawing a bow, crossbow, trident or spyglass, and the
+  crosshair shows; a brush still acts under the finger
+- slot screens: a tap moves a stack across (shift-click), a hold takes it
+  into the hand, a drag carries it and puts it down where the finger lifts
+  (a swapped stack goes back to the drag's start), no more one-by-one
+  spreading; a tap on the creative grid gives a stack (never the locked
+  placeholder), a vertical swipe there scrolls; nothing is clicked once the
+  screen under the finger is gone
+
+Co-Authored-By: Claude Opus 5.5 <noreply@anthropic.com>
+---
+ crates/horizon-client/src/game/touch.rs | 321 +++++++++++++++++++++---
+ 1 file changed, 292 insertions(+), 29 deletions(-)
+
+diff --git a/crates/horizon-client/src/game/touch.rs b/crates/horizon-client/src/game/touch.rs
+index 3e301142..86e6e162 100644
+--- a/crates/horizon-client/src/game/touch.rs
++++ b/crates/horizon-client/src/game/touch.rs
+@@ -50,6 +50,9 @@ const HOLD_MS: u128 = 280;
+ const SLOP: f64 = 8.0;
+ /// A new file whenever the defaults change (v5: Bedrock's measured geometry, no fly buttons).
+ const LAYOUT_FILE: &str = "touch_layout_v5.json";
++/// The layout file's revision. 2: Bedrock's joystick floats and hides when let go,
++/// its sprint button is gone (the stick pushed all the way sprints).
++const LAYOUT_REV: u32 = 2;
+ 
+ /// What a finger is doing, from where it went down.
+ #[derive(Clone, Copy, Debug)]
+@@ -261,6 +264,9 @@ pub(super) struct TouchLayout {
+     /// Sprint by pushing the joystick all the way forward (Bedrock's "sprint on movement").
+     #[serde(default = "yes")]
+     sprint_on_movement: bool,
++    /// `LAYOUT_REV` when saved; 0 for a file from before it.
++    #[serde(default)]
++    rev: u32,
+ }
+ 
+ impl Default for TouchLayout {
+@@ -287,6 +293,7 @@ impl TouchLayout {
+             hold_ms: HOLD_MS as u32,
+             // Bedrock's joystick sprints when pushed all the way; the other layouts don't.
+             sprint_on_movement: preset == Preset::Bedrock,
++            rev: LAYOUT_REV,
+         }
+     }
+ 
+@@ -343,7 +350,9 @@ impl TouchLayout {
+         controls.insert(Id::Stick, at(66.75, h - 119.875, 43.67));
+         // 268 px squares: jump and sneak 30.1 from the right, sprint 70.1.
+         controls.insert(Id::Jump, at(w - 30.125, 106.875, 16.94));
+-        controls.insert(Id::Sprint, at(w - 70.125, 133.625, 16.94));
++        // Sprint is the joystick pushed all the way (sprint on movement); the button
++        // stays in the editor for whoever wants it.
++        controls.insert(Id::Sprint, off(w - 70.125, 133.625, 16.94));
+         controls.insert(Id::Sneak, at(w - 30.125, h - 106.625, 16.94));
+         // No fly buttons: in flight jump rises and sneak, held, descends. Shown from the
+         // editor they sit above and below sprint.
+@@ -365,8 +374,9 @@ impl TouchLayout {
+         // Not on Bedrock: the controls editor, small in the top right corner.
+         controls.insert(Id::Edit, at(w - 10.0, 6.0, 4.8));
+         let controls = layout.controls;
++        // Bedrock's joystick shows where the thumb goes down and is gone when it lifts.
+         let mut layout = Self::with(controls, Preset::Bedrock, Aim::Touch);
+-        layout.stick_always = true;
++        layout.stick_floating = true;
+         layout
+     }
+ 
+@@ -432,8 +442,12 @@ impl TouchLayout {
+             layout.top_scale = saved.top_scale.clamp(0.6, 2.0);
+             // A layout file from before the floating joystick gets the preset's own
+             // answer (Bedrock's joystick floats, the D-pad does not).
+-            layout.stick_floating = saved.stick_floating;
+-            layout.stick_always = saved.stick_always;
++            // A file from before revision 2 had Bedrock's joystick fixed and always
++            // drawn by default: it now floats as Bedrock's does.
++            if saved.rev >= 2 || preset != Preset::Bedrock {
++                layout.stick_floating = saved.stick_floating;
++                layout.stick_always = saved.stick_always;
++            }
+             layout.look_scale = saved.look_scale.clamp(0.2, 3.0);
+             layout.hold_ms = saved.hold_ms.clamp(80, 2000);
+             layout.sprint_on_movement = if text.contains("\"sprint_on_movement\"") {
+@@ -638,6 +652,30 @@ pub(super) struct Touches {
+     scroll_y: f32,
+     scroll_acc: f32,
+     scrolled: bool,
++    /// When a finger held on an entity last hit it (Bedrock attacks again and again
++    /// while the finger stays on the mob).
++    last_hit: Option<Instant>,
++    /// The menu finger over a screen with slots: what it turned out to be, where
++    /// (window px) and when it went down, and the slot it went down on.
++    menu: MenuTouch,
++    menu_start: [f64; 2],
++    menu_since: Instant,
++    menu_slot: Option<usize>,
++}
++
++/// A finger on a screen with slots (Bedrock's inventory): a tap moves a stack across
++/// (as shift-click), a hold picks it up, a drag carries it to another slot, a swipe
++/// on the creative grid scrolls.
++#[derive(Clone, Copy, PartialEq, Eq, Debug)]
++enum MenuTouch {
++    /// Down on a slot; nothing sent yet.
++    Pending,
++    /// A swipe: the wheel turns, nothing is clicked.
++    Scroll,
++    /// A stack is carried under the finger; it goes down where the finger lets go.
++    Drag,
++    /// Not over a slot (buttons, tabs, the scrollbar): the mouse as before.
++    Legacy,
+ }
+ 
+ impl Default for Touches {
+@@ -673,6 +711,11 @@ impl Default for Touches {
+             scroll_y: 0.0,
+             scroll_acc: 0.0,
+             scrolled: false,
++            last_hit: None,
++            menu: MenuTouch::Legacy,
++            menu_start: [0.0; 2],
++            menu_since: Instant::now(),
++            menu_slot: None,
+             buttons: if cfg!(target_os = "android") { load_buttons() } else { Vec::new() },
+             selected_button: None,
+         }
+@@ -1176,6 +1219,37 @@ impl Game<'_> {
+         best.map(|(_, c)| [f64::from(c[0] * scale), f64::from(c[1] * scale)])
+     }
+ 
++    /// A screen of slots the finger works as on Bedrock (inventory, containers,
++    /// creative), with no dialog over it.
++    fn touch_slot_screen(&self) -> bool {
++        matches!(self.screen, super::Screen::Inventory | super::Screen::Creative) && !self.dialog_open()
++    }
++
++    /// The slot under a point in GUI pixels.
++    fn touch_slot_under(&self, p: [f32; 2]) -> Option<usize> {
++        let batch = self.gui_scale()?;
++        self.slot_at(&batch, p[0], p[1])
++    }
++
++    /// A tap on the creative grid: a whole stack of the item straight into the
++    /// inventory, as Bedrock's creative screen does.
++    fn touch_creative_take(&mut self, slot: usize) {
++        use horizon_client::creative::Creative;
++        let first = self.creative_screen.first_row(&self.pack.names);
++        let Some(mut stack) = self.creative_screen.shown(&self.pack.names, first * 9 + slot - Creative::DISPLAY)
++        else {
++            return;
++        };
++        // The saved hotbars' placeholder (CustomCreativeSlot.mayPickup) can't be taken.
++        if horizon_client::creative::slot_locked(&stack) {
++            return;
++        }
++        let max = world_items!(self).get(&stack.item).map_or(64, |i| i.max_stack).max(1);
++        stack.count = max;
++        super::inventory_add(&mut self.inventory, &mut self.offhand, self.selected, max, &mut stack);
++        self.send_creative_slots();
++    }
++
+     fn touch_controls_shown(&self) -> bool {
+         cfg!(target_os = "android") && self.player.is_some() && !self.pad_in_menu() && !self.touch.hardware
+     }
+@@ -1554,21 +1628,32 @@ impl Game<'_> {
+         let mut held = [false; 2];
+         let mut aim_start = None;
+         let mut drop = None;
+-        // A finger held still uses what is in hand when that is used by holding.
+-        let ripe = self.touch.fingers.values().any(|f| {
+-            matches!(f, Finger::Look { moved: false, attacking: false, since, .. } if since.elapsed().as_millis() >= hold)
++        // A finger held still uses what is in hand when that is used by holding;
++        // on an entity it attacks instead (Bedrock: holding on a mob hits it).
++        let ripe = self.touch.fingers.values().find_map(|f| match f {
++            Finger::Look { moved: false, attacking: false, since, start, .. } if since.elapsed().as_millis() >= hold => {
++                Some(*start)
++            }
++            _ => None,
+         });
+-        let hold_uses = ripe && self.touch_hold_uses();
++        let hold_uses = ripe.is_some_and(|start| self.touch_hold_uses(start));
++        let view_aims = self.touch_view_aims();
+         for finger in self.touch.fingers.values_mut() {
+             if let Finger::Look { last, start, since, moved: false, attacking: false } = *finger
+                 && since.elapsed().as_millis() >= hold
+             {
+                 *finger = if hold_uses {
++                    // Drawn bows and the like aim with the view (the crosshair shows),
++                    // so the finger turns it and nothing is aimed at the finger; the
++                    // rest (a brush...) acts on what is under the finger.
++                    if !view_aims {
++                        aim_start = Some(start);
++                    }
+                     Finger::Holding { last, start, since }
+                 } else {
++                    aim_start = Some(start);
+                     Finger::Look { last, start, since, moved: false, attacking: true }
+                 };
+-                aim_start = Some(start);
+             }
+             match finger {
+                 Finger::Look { attacking: true, .. } => attack = true,
+@@ -1613,9 +1698,27 @@ impl Game<'_> {
+                 self.touch.aim_at = None;
+             }
+         }
+-        if !touch_aim {
++        if !touch_aim || using && !attack && view_aims {
+             self.touch.aim_at = None;
+         }
++        // Bedrock's shield: sneaking with a shield in the off hand (beside a weapon
++        // or an empty hand) holds it up.
++        if !using && !attack && self.touch.sneaking && self.touch_shield_ready() {
++            held[0] = true;
++        }
++        // A finger held on an entity hits it again and again, as Bedrock, rather than
++        // holding the attack down (which hits once): a hit each time the weapon is
++        // charged again, at most four a second, the trigger let go between them.
++        if attack && self.pick_entity_hit().is_some() {
++            held[1] = false;
++            let charged = self.legacy_rules() || self.hand_strength.scale(0.0, self.main_hand_attack_speed()) >= 0.95;
++            let spaced = self.touch.last_hit.is_none_or(|t| t.elapsed().as_millis() >= 250);
++            if charged && spaced && self.touch.trigger_release[1] == 0 && self.pad.injected.triggers[1] == 0.0 {
++                self.pad.injected.triggers[1] = 1.0;
++                self.touch.trigger_release[1] = 2;
++                self.touch.last_hit = Some(Instant::now());
++            }
++        }
+         // Like vanilla, sprint ends when the player stops moving: here when
+         // the joystick is let go.
+         if self.touch.sprinting && !self.touch.fingers.values().any(|f| matches!(f, Finger::Stick | Finger::Dpad)) {
+@@ -1633,14 +1736,61 @@ impl Game<'_> {
+ 
+     /// Whether a finger held still now uses (Bedrock) rather than breaks: the main
+     /// hand's item is used by holding, or the main hand is empty and the offhand's is.
+-    fn touch_hold_uses(&mut self) -> bool {
++    fn touch_hold_uses(&mut self, start: [f64; 2]) -> bool {
+         if self.screen != super::Screen::Playing || self.spectator() {
+             return false;
+         }
+-        match self.inventory[self.selected].clone() {
+-            Some(main) => self.touch_hold_usable(&main),
+-            None => self.offhand.clone().is_some_and(|off| self.touch_hold_usable(&off)),
++        let main = self.inventory[self.selected].clone();
++        if let Some(main) = &main
++            && self.touch_hold_usable(main)
++        {
++            // A bow draws, food is eaten, whatever is under the finger.
++            return true;
++        }
++        // The off hand is used when the main hand has no use of its own: empty, or a
++        // weapon (a sword with a shield beside it raises the shield), and only at
++        // nothing: a mob under the finger is hit, a block broken.
++        self.touch_main_free(main.as_ref())
++            && self.offhand.clone().is_some_and(|off| self.touch_hold_usable(&off))
++            && self.touch_target_at(start) == (false, false)
++    }
++
++    /// The main hand has no use of its own that the off hand would hide: empty, or a
++    /// melee weapon.
++    fn touch_main_free(&self, main: Option<&horizon_client::items::ItemStack>) -> bool {
++        main.is_none_or(|s| s.item.ends_with("_sword") || s.item.ends_with("_axe") || &*s.item == "minecraft:mace")
++    }
++
++    /// A shield in the off hand that a use now raises: playing, and the main hand
++    /// free of a use of its own.
++    fn touch_shield_ready(&self) -> bool {
++        self.screen == super::Screen::Playing
++            && !self.spectator()
++            && self.offhand.as_ref().is_some_and(|s| &*s.item == "minecraft:shield")
++            && self.touch_main_free(self.inventory[self.selected].as_ref())
++    }
++
++    /// What is under the finger at `start` (window px), or under the crosshair when
++    /// aiming with it: (an entity, a block within reach).
++    fn touch_target_at(&mut self, start: [f64; 2]) -> (bool, bool) {
++        if self.screen != super::Screen::Playing || self.spectator() {
++            return (false, false);
++        }
++        let before = self.touch.aim_at;
++        if self.touch.layout.aim == Aim::Touch {
++            self.touch.aim_at = self.touch_ndc(start);
+         }
++        let hit = (self.pick_entity_hit().is_some(), self.pick().is_some());
++        self.touch.aim_at = before;
++        hit
++    }
++
++    /// A ranged item in hand, which aims with the view while drawn: the finger turns
++    /// the camera then, and the crosshair shows.
++    fn touch_view_aims(&self) -> bool {
++        [self.inventory[self.selected].as_ref(), self.offhand.as_ref()].into_iter().flatten().any(|s| {
++            matches!(&*s.item, "minecraft:bow" | "minecraft:crossbow" | "minecraft:trident" | "minecraft:spyglass")
++        })
+     }
+ 
+     /// `stack` is used by holding and can be now: food when the player can eat it, a
+@@ -1956,6 +2106,15 @@ impl Game<'_> {
+         let send = |game: &mut Self, event: WindowEvent| {
+             game.handle_window_event(event_loop, window_id, event, super::input_trace::InputOrigin::User);
+         };
++        // One whole click at a point of a slot screen: never the second of a double
++        // click, which would gather every like stack.
++        let tap = |game: &mut Self, at: [f64; 2]| {
++            game.last_inv_click = None;
++            send(game, cursor(device_id, at));
++            send(game, click(device_id, ElementState::Pressed));
++            send(game, click(device_id, ElementState::Released));
++            game.last_inv_click = None;
++        };
+         // A finger on the screen: the touch controls come back.
+         if touch.phase == TouchPhase::Started {
+             self.touch.hardware = false;
+@@ -1991,8 +2150,20 @@ impl Game<'_> {
+                     self.touch.scroll_y = p[1];
+                     self.touch.scroll_acc = 0.0;
+                     self.touch.scrolled = false;
++                    let snapped = [(at[0] / f64::from(scale)) as f32, (at[1] / f64::from(scale)) as f32];
++                    let slot = self.touch_slot_screen().then(|| self.touch_slot_under(snapped)).flatten();
++                    self.touch.menu_slot = slot;
++                    self.touch.menu_start = at;
++                    self.touch.menu_since = Instant::now();
+                     send(self, cursor(device_id, at));
+-                    send(self, click(device_id, ElementState::Pressed));
++                    if slot.is_some() {
++                        // Over a slot nothing is clicked yet: what the finger does next
++                        // (a tap, a hold, a drag, a swipe) says what it means.
++                        self.touch.menu = MenuTouch::Pending;
++                    } else {
++                        self.touch.menu = MenuTouch::Legacy;
++                        send(self, click(device_id, ElementState::Pressed));
++                    }
+                     // Asked again on the next frame: a tap on a text field brings the
+                     // keyboard back after the system's back gesture hid it.
+                     self.touch.ime_retap = true;
+@@ -2087,12 +2258,45 @@ impl Game<'_> {
+             }
+             TouchPhase::Moved => match self.touch.fingers.get(&id).copied() {
+                 Some(Finger::Pointer) => {
++                    if self.touch.menu != MenuTouch::Legacy && !self.touch_slot_screen() {
++                        // The slot screen went away under the finger: it clicks nothing more.
++                        self.touch.menu = MenuTouch::Scroll;
++                    }
++                    if self.touch.menu == MenuTouch::Pending {
++                        let s = f64::from(scale);
++                        let start = self.touch.menu_start;
++                        let (mx, my) = ((pos[0] - start[0]) / s, (pos[1] - start[1]) / s);
++                        if mx.hypot(my) > SLOP {
++                            let grid = self
++                                .touch
++                                .menu_slot
++                                .is_some_and(|i| i >= horizon_client::creative::Creative::DISPLAY);
++                            self.touch.menu = if self.carried.is_some() {
++                                // Carried from before: no slot of its own to go back to.
++                                self.touch.menu_slot = None;
++                                MenuTouch::Drag
++                            } else if grid && my.abs() >= mx.abs() {
++                                // Up or down over the creative grid: the list scrolls.
++                                MenuTouch::Scroll
++                            } else {
++                                // Sideways, or over any other slot: the stack comes
++                                // along under the finger.
++                                tap(self, start);
++                                if self.carried.is_some() { MenuTouch::Drag } else { MenuTouch::Scroll }
++                            };
++                        }
++                    }
+                     send(self, cursor(device_id, pos));
+                     // With nothing in hand a vertical swipe turns the wheel: lists and
+                     // the creative grid scroll under the finger.
+                     let dy = p[1] - self.touch.scroll_y;
+                     self.touch.scroll_y = p[1];
+-                    if self.carried.is_none() {
++                    let wheel = match self.touch.menu {
++                        MenuTouch::Legacy => true,
++                        MenuTouch::Scroll => self.touch_slot_screen(),
++                        _ => false,
++                    };
++                    if self.carried.is_none() && wheel {
+                         self.touch.scroll_acc += dy;
+                         let steps = (self.touch.scroll_acc / SWIPE_STEP).trunc();
+                         if steps != 0.0 {
+@@ -2141,12 +2345,14 @@ impl Game<'_> {
+                     self.touch_look(dx, dy);
+                 }
+                 Some(Finger::Holding { last, start, since }) => {
+-                    if self.touch.layout.aim == Aim::Touch {
+-                        // As while breaking: the target follows the finger, the view stays.
++                    if self.touch.layout.aim == Aim::Touch && !self.touch_view_aims() {
++                        // A brush and the like: the target follows the finger, the view stays.
+                         self.touch.fingers.insert(id, Finger::Holding { last: pos, start: pos, since });
+                         self.touch.aim_at = self.touch_ndc(pos);
+                         let _ = (last, start);
+                     } else {
++                        // A drawn bow aims with the view: the finger turns it, as Bedrock,
++                        // so the shot goes where it is dragged.
+                         let (dx, dy) = (pos[0] - last[0], pos[1] - last[1]);
+                         self.touch.fingers.insert(id, Finger::Holding { last: pos, start, since });
+                         self.touch_look(dx, dy);
+@@ -2188,16 +2394,68 @@ impl Game<'_> {
+                 let hold = u128::from(self.touch.layout.hold_ms);
+                 match self.touch.fingers.remove(&id) {
+                 Some(Finger::Pointer) => {
+-                    // A cancelled touch (a system gesture took it) lets go off screen: no click.
+-                    // A swipe that scrolled lets go off screen too: it clicks nothing.
+-                    let at = if touch.phase == TouchPhase::Cancelled || self.touch.scrolled {
+-                        [-1.0, -1.0]
+-                    } else {
+-                        self.touch_snap(scale, p).unwrap_or(pos)
+-                    };
++                    let cancelled = touch.phase == TouchPhase::Cancelled;
++                    let start = self.touch.menu_start;
++                    if self.touch.menu != MenuTouch::Legacy && !self.touch_slot_screen() {
++                        // The slot screen went away under the finger: it clicks nothing more.
++                        self.touch.menu = MenuTouch::Scroll;
++                    }
++                    match std::mem::replace(&mut self.touch.menu, MenuTouch::Legacy) {
++                        MenuTouch::Legacy => {
++                            // A cancelled touch (a system gesture took it) lets go off screen: no click.
++                            // A swipe that scrolled lets go off screen too: it clicks nothing.
++                            let at = if cancelled || self.touch.scrolled {
++                                [-1.0, -1.0]
++                            } else {
++                                self.touch_snap(scale, p).unwrap_or(pos)
++                            };
++                            send(self, cursor(device_id, at));
++                            send(self, click(device_id, ElementState::Released));
++                        }
++                        // Nothing was pressed: nothing to let go.
++                        MenuTouch::Scroll => {}
++                        MenuTouch::Drag => {
++                            // The stack goes down where the finger left the glass (the
++                            // nearest slot if between two); taken away by the system,
++                            // back where it came from.
++                            let at = if cancelled { start } else { self.touch_snap(scale, p).unwrap_or(pos) };
++                            if self.carried.is_some() {
++                                tap(self, at);
++                            }
++                            // Dropped on another stack the two changed places (or the slot
++                            // took only part): what is left in hand goes where the drag began,
++                            // as Bedrock swaps two slots, never left floating.
++                            // (Not to the creative grid: a stack put down there is deleted.)
++                            let home = self.touch.menu_slot.is_some_and(|i| i < horizon_client::creative::Creative::DISPLAY);
++                            if self.carried.is_some() && at != start && home {
++                                tap(self, start);
++                            }
++                        }
++                        MenuTouch::Pending if cancelled => {}
++                        MenuTouch::Pending => {
++                            let held = self.touch.menu_since.elapsed().as_millis() >= hold;
++                            let slot = self.touch.menu_slot;
++                            let grid = slot.is_some_and(|i| i >= horizon_client::creative::Creative::DISPLAY);
++                            let hotbar_in_tab = self.creative_tab_open() && slot.is_some_and(|i| i < 9);
++                            if self.carried.is_some() || held || hotbar_in_tab {
++                                // A stack in hand goes down here; a hold takes the stack
++                                // up into the hand, to be put down by the next tap.
++                                tap(self, start);
++                            } else if grid {
++                                if let Some(i) = slot {
++                                    self.touch_creative_take(i);
++                                }
++                            } else {
++                                // A tap moves the stack across, as shift-click.
++                                let modifiers = self.modifiers;
++                                self.modifiers.set(winit::keyboard::ModifiersState::SHIFT, true);
++                                tap(self, start);
++                                self.modifiers = modifiers;
++                            }
++                        }
++                    }
+                     self.touch.scrolled = false;
+-                    send(self, cursor(device_id, at));
+-                    send(self, click(device_id, ElementState::Released));
++                    self.touch.menu_slot = None;
+                 }
+                 Some(Finger::Stick) => {
+                     self.touch.knob = [0.0, 0.0];
+@@ -2344,8 +2602,13 @@ impl Game<'_> {
+     }
+ 
+     /// Touch aiming hides the crosshair, as Bedrock's Touch mode.
++    /// While a bow, crossbow or trident is drawn it shows, so the shot can be aimed.
+     pub(super) fn touch_hides_crosshair(&self) -> bool {
+         self.touch.layout.aim == Aim::Touch
++            && !(self.touch.fingers.values().any(|f| matches!(f, Finger::Holding { .. }))
++                && [self.inventory[self.selected].as_ref(), self.offhand.as_ref()].into_iter().flatten().any(|s| {
++                    matches!(&*s.item, "minecraft:bow" | "minecraft:crossbow" | "minecraft:trident")
++                }))
+     }
+ 
+     /// The D-pad under the finger: the direction it moves; the forward diagonals
+@@ -2449,8 +2712,8 @@ impl Game<'_> {
+         self.pad.injected.left = v;
+         // Bedrock's "sprint on movement": the stick pushed all the way forward sprints.
+         if self.touch.layout.sprint_on_movement
+-            && v[1] > 0.93
+-            && v[0].abs() < 0.4
++            && v[1] > 0.9
++            && v[0].abs() < 0.5
+             && !self.touch.sprinting
+         {
+             self.touch.sprinting = true;
+-- 
+2.49.0.windows.1
+
