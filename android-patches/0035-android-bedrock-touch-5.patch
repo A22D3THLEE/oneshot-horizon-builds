@@ -1,0 +1,171 @@
+From 1afe149e97d5e394678c9bc503e9258b17428bb5 Mon Sep 17 00:00:00 2001
+From: oneshot <oneshot@localhost>
+Date: Thu, 12 Nov 2026 12:45:09 +0300
+Subject: [PATCH] 0035 touch: sneaking raises the shield whatever the other
+ hand holds
+
+A tap's use lets the shield go first, so blocks are still placed while sneaking.
+
+Co-Authored-By: Claude Fable 5.2 <noreply@anthropic.com>
+---
+ crates/horizon-client/src/game/remote.rs |  8 ++++
+ crates/horizon-client/src/game/touch.rs  | 58 +++++++++++++++++++++---
+ 2 files changed, 59 insertions(+), 7 deletions(-)
+
+diff --git a/crates/horizon-client/src/game/remote.rs b/crates/horizon-client/src/game/remote.rs
+index 16ac1fe7..6fbfde7f 100644
+--- a/crates/horizon-client/src/game/remote.rs
++++ b/crates/horizon-client/src/game/remote.rs
+@@ -7921,6 +7921,14 @@ impl Game<'_> {
+         if self.hands_busy() {
+             return;
+         }
++        // Touch: the use that sneaking holds down is the shield's alone, whatever the
++        // other hand holds (a block is not placed, food not eaten by it).
++        if let Some(hand) = self.touch_shield_hand() {
++            if self.remote_use_item(hand) {
++                self.heights.item_used(hand);
++            }
++            return;
++        }
+         // InputEvent.InteractionKeyMappingTriggered for the main hand: a cancel
+         // ends the whole click, the off hand gets no turn.
+         if let Some(swing) = self.native_interaction(1, Hand::Main) {
+diff --git a/crates/horizon-client/src/game/touch.rs b/crates/horizon-client/src/game/touch.rs
+index 94f501d3..13272eed 100644
+--- a/crates/horizon-client/src/game/touch.rs
++++ b/crates/horizon-client/src/game/touch.rs
+@@ -669,6 +669,8 @@ pub(super) struct Touches {
+     /// A tap's hit put off until the shield is down: when it was asked for and the
+     /// point it aims at.
+     pending_hit: Option<(Instant, Option<[f32; 2]>)>,
++    /// A tap's use that waits for the sneak-raised shield to let the use go.
++    pending_use: Option<(Instant, Option<[f32; 2]>)>,
+     /// The menu finger over a screen with slots: what it turned out to be, where
+     /// (window px) and when it went down, and the slot it went down on.
+     menu: MenuTouch,
+@@ -736,6 +738,7 @@ impl Default for Touches {
+             shield_up: false,
+             shield_down_at: Instant::now(),
+             pending_hit: None,
++            pending_use: None,
+             menu: MenuTouch::Legacy,
+             menu_start: [0.0; 2],
+             menu_since: Instant::now(),
+@@ -1331,6 +1334,20 @@ impl Game<'_> {
+     /// On touch a shield is raised by sneaking only (Bedrock): any other use of
+     /// the player's own (a tap that missed a mob, a tap on a block) leaves it down,
+     /// so taps with a sword beside it only ever hit. Not for a guest's use.
++    /// The hand whose shield the touch's sneaking holds up now, if it does.
++    pub(super) fn touch_shield_hand(&self) -> Option<horizon_client::first_person::Hand> {
++        use horizon_client::first_person::Hand;
++        let shield = |s: Option<&horizon_client::items::ItemStack>| s.is_some_and(|s| &*s.item == "minecraft:shield");
++        if !self.touch.shield_up || !self.touch_controls_shown() {
++            None
++        } else if shield(self.inventory[self.selected].as_ref()) {
++            Some(Hand::Main)
++        } else if shield(self.offhand.as_ref()) {
++            Some(Hand::Off)
++        } else {
++            None
++        }
++    }
+     pub(super) fn touch_shield_barred(&self, stack: &horizon_client::items::ItemStack) -> bool {
+         &*stack.item == "minecraft:shield"
+             && self.guest_use.is_none()
+@@ -1390,6 +1407,7 @@ impl Game<'_> {
+     /// Every finger lifted at once (the app went to the background): nothing stays held.
+     pub(super) fn touch_release_all(&mut self) {
+         self.touch.pending_hit = None;
++        self.touch.pending_use = None;
+         let held: Vec<usize> = self.touch.fingers.values().filter_map(|f| if let Finger::Custom(i) = f { Some(*i) } else { None }).collect();
+         for i in held {
+             self.touch_custom(i, false);
+@@ -1800,6 +1818,7 @@ impl Game<'_> {
+         if self.screen != super::Screen::Playing {
+             // A menu came up: a waiting hit is dropped, not sent to the menu.
+             self.touch.pending_hit = None;
++            self.touch.pending_use = None;
+         }
+         // A tap's hit that waited for the shield to go down.
+         if let Some((at, aim)) = self.touch.pending_hit
+@@ -1815,15 +1834,31 @@ impl Game<'_> {
+             self.pad.injected.triggers[1] = 1.0;
+             self.touch.trigger_release[1] = 3;
+         }
+-        // Bedrock's shield: only sneaking holds it up (in either hand, the main hand
+-        // free of a use of its own), never a finger held on the world, so a sword
+-        // beside it only ever hits. It goes down for a hit and while one waits.
++        // A tap's use that waited for the shield to go down: a fresh press of the use,
++        // so a block is placed or a door opened while sneaking behind the shield.
++        if let Some((at, aim)) = self.touch.pending_use
++            && !self.touch.shield_up
++            && at.elapsed().as_millis() >= SHIELD_REST_MS
++            && self.touch.shield_down_at.elapsed().as_millis() >= SHIELD_REST_MS
++        {
++            self.touch.pending_use = None;
++            if aim.is_some() {
++                self.touch.aim_at = aim;
++                self.touch.aim_frames = 4;
++            }
++            self.pad.injected.triggers[0] = 1.0;
++            self.touch.trigger_release[0] = 3;
++        }
++        // Bedrock's shield: only sneaking holds it up (in either hand, whatever the
++        // other holds), never a finger held on the world, so a sword beside it only
++        // ever hits. It goes down for a hit or a tap's use and while one waits.
+         let shield = !using
+             && !attack
+             && self.touch.sneaking
+             && !held[1]
+             && self.touch.pending_hit.is_none()
+-            && self.touch.trigger_release[1] == 0
++            && self.touch.pending_use.is_none()
++            && self.touch.trigger_release == [0; 2]
+             && self.touch_shield_ready();
+         if shield {
+             held[0] = true;
+@@ -1891,14 +1926,13 @@ impl Game<'_> {
+         main.is_none_or(|s| s.item.ends_with("_sword") || s.item.ends_with("_axe") || &*s.item == "minecraft:mace")
+     }
+ 
+-    /// A shield that a use now raises: playing, and in the main hand, or in the off
+-    /// hand with the main hand free of a use of its own.
++    /// A shield that sneaking now raises: playing, and in either hand.
+     fn touch_shield_ready(&self) -> bool {
+         let shield = |s: Option<&horizon_client::items::ItemStack>| s.is_some_and(|s| &*s.item == "minecraft:shield");
+         let main = self.inventory[self.selected].as_ref();
+         self.screen == super::Screen::Playing
+             && !self.spectator()
+-            && (shield(main) || shield(self.offhand.as_ref()) && self.touch_main_free(main))
++            && (shield(main) || shield(self.offhand.as_ref()))
+     }
+ 
+     /// What is under the finger at `start` (window px), or under the crosshair when
+@@ -2853,6 +2887,10 @@ impl Game<'_> {
+                         if self.touch.pending_hit.is_none() {
+                             self.touch.pending_hit = Some((Instant::now(), None));
+                         }
++                    } else if i == 0 && self.touch.shield_up {
++                        if self.touch.pending_use.is_none() {
++                            self.touch.pending_use = Some((Instant::now(), None));
++                        }
+                     } else {
+                         self.pad.injected.triggers[i] = 1.0;
+                         self.touch.trigger_release[i] = 3;
+@@ -2879,6 +2917,12 @@ impl Game<'_> {
+                             Some((_, aim)) => *aim = self.touch.aim_at,
+                             None => self.touch.pending_hit = Some((Instant::now(), self.touch.aim_at)),
+                         }
++                    } else if i == 0 && self.touch.shield_up {
++                        // The shield holds the use down: it lets go first, then the tap uses.
++                        match &mut self.touch.pending_use {
++                            Some((_, aim)) => *aim = self.touch.aim_at,
++                            None => self.touch.pending_use = Some((Instant::now(), self.touch.aim_at)),
++                        }
+                     } else {
+                         self.pad.injected.triggers[i] = 1.0;
+                         self.touch.trigger_release[i] = 3;
+-- 
+2.49.0.windows.1
+
