@@ -1,0 +1,64 @@
+From e63a217e7ddbeaa53d8f1688ba21884e3cd346d0 Mon Sep 17 00:00:00 2001
+From: oneshot <oneshot@localhost>
+Date: Thu, 12 Nov 2026 18:04:45 +0300
+Subject: [PATCH] 0039 android: screen stays on in the game, a background kill
+ is no failed start, the app is a game
+
+Co-Authored-By: Claude Opus 5.5 <noreply@anthropic.com>
+---
+ packaging/android/AndroidManifest.xml         |  1 +
+ .../horizonlab/horizon/HorizonActivity.java   | 19 +++++++++++++++++++
+ 2 files changed, 20 insertions(+)
+
+diff --git a/packaging/android/AndroidManifest.xml b/packaging/android/AndroidManifest.xml
+index e5dd2e13..281f0383 100644
+--- a/packaging/android/AndroidManifest.xml
++++ b/packaging/android/AndroidManifest.xml
+@@ -24,6 +24,7 @@
+         android:hasCode="true"
+         android:extractNativeLibs="true"
+         android:largeHeap="true"
++        android:appCategory="game"
+         android:theme="@style/HorizonGame">
+         <profileable android:shell="true" />
+         <activity
+diff --git a/packaging/android/java/dev/horizonlab/horizon/HorizonActivity.java b/packaging/android/java/dev/horizonlab/horizon/HorizonActivity.java
+index c027fb00..25a9021b 100644
+--- a/packaging/android/java/dev/horizonlab/horizon/HorizonActivity.java
++++ b/packaging/android/java/dev/horizonlab/horizon/HorizonActivity.java
+@@ -60,6 +60,9 @@ public class HorizonActivity extends NativeActivity {
+             PlayStats.alive = true;
+         }
+         applyCutout(this);
++        // The screen stays on while the game is in front: a gamepad or a long
++        // look at the map does not count as a touch, and the screen dimmed mid-game.
++        getWindow().addFlags(WindowManager.LayoutParams.FLAG_KEEP_SCREEN_ON);
+         sink = new TextSink(this);
+         addContentView(sink, new ViewGroup.LayoutParams(1, 1));
+         renewAccount();
+@@ -333,6 +336,22 @@ public class HorizonActivity extends NativeActivity {
+         super.onDestroy();
+     }
+ 
++    /**
++     * The game went to the background: if the system ends the process there, that
++     * is not a failed start, however short (android_main.rs safe start). Without
++     * this, two quick switches to another app turned OpenGL ES on for good.
++     */
++    @Override
++    protected void onStop() {
++        // Only on the way to the background: the game's own error exit finishes
++        // the activity too, and that start must still count as a failed one.
++        if (!isFinishing() && !quitting) {
++            new java.io.File(getFilesDir(), "launch.pending").delete();
++            new java.io.File(getFilesDir(), "vulkan-driver.pending").delete();
++        }
++        super.onStop();
++    }
++
+     /** The game was closed from Recents: no failed start, however short (android_main.rs). */
+     static void endProcess(android.content.Context c) {
+         new java.io.File(c.getFilesDir(), "launch.pending").delete();
+-- 
+2.49.0.windows.1
+

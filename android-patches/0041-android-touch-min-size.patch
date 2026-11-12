@@ -1,0 +1,174 @@
+From 70469a3c13cd93589bf2a2521aa0a74727dc390d Mon Sep 17 00:00:00 2001
+From: oneshot <oneshot@localhost>
+Date: Thu, 12 Nov 2026 19:19:16 +0300
+Subject: [PATCH] 0041 android: touch buttons at least 36 dp, top row spreads
+ to fit
+
+On a phone (GUI scale 4, 440 dpi) Bedrock's top tiles were 14 dp across.
+Buttons now grow to an 18 dp half-size from the screen's density, and the
+top row moves apart by as much so the tiles do not overlap; the layout
+editor takes the spread back so a dragged button stays under the finger.
+
+Co-Authored-By: Claude Opus 5.5 <noreply@anthropic.com>
+---
+ crates/horizon-client/src/game/touch.rs | 102 ++++++++++++++++++++++--
+ 1 file changed, 94 insertions(+), 8 deletions(-)
+
+diff --git a/crates/horizon-client/src/game/touch.rs b/crates/horizon-client/src/game/touch.rs
+index 13272eed..25bb7cfa 100644
+--- a/crates/horizon-client/src/game/touch.rs
++++ b/crates/horizon-client/src/game/touch.rs
+@@ -759,21 +759,67 @@ const SWIPE_STEP: f32 = 18.0;
+ /// How far from a slot (GUI px) a dropped stack still lands in it.
+ const SNAP: f32 = 30.0;
+ 
++/// The smallest a button's half-size is drawn and hit, in dp (a 36 dp tile, about
++/// 6 mm). A phone's GUI is a third of a tablet's in dp: at GUI scale 4 on a 440 dpi
++/// screen Bedrock's top tiles came out 14 dp across, too small for a thumb.
++const MIN_DP: f32 = 18.0;
++
++/// The screen's density in dpi, 0 where it is not known (not Android).
++#[cfg(target_os = "android")]
++fn screen_dpi() -> u32 {
++    super::ANDROID_APP
++        .get()
++        .and_then(|app| app.config().density())
++        // 0 is the default, 0xfffe "any" and 0xffff "none": no real screen.
++        .filter(|d| (1..0xfffe).contains(d))
++        .unwrap_or(0)
++}
++
++#[cfg(not(target_os = "android"))]
++fn screen_dpi() -> u32 {
++    0
++}
++
+ /// The GUI's size, for placing controls.
+ #[derive(Clone, Copy)]
+ struct Gui {
+     w: f32,
+     h: f32,
++    /// `MIN_DP` in GUI px; 0 where the density is not known.
++    min: f32,
+ }
+ 
+ impl Gui {
+-    fn place(&self, layout: &TouchLayout, id: Id) -> ([f32; 2], f32) {
++    fn new(batch: &HudBatch) -> Self {
++        let dpi = screen_dpi() as f32;
++        let min = if dpi > 0.0 && batch.scale > 0.0 { MIN_DP * dpi / 160.0 / batch.scale } else { 0.0 };
++        Self { w: batch.width, h: batch.height, min }
++    }
++
++    /// A control's half-size here and how much the top row spreads for it:
++    /// the button grown to `MIN_DP` (and Bedrock's top button scale) moves away from
++    /// its edge or the centre by as much, so the row's tiles stay apart.
++    fn size(&self, layout: &TouchLayout, id: Id) -> (f32, f32) {
+         let s = layout.spec(id);
+         // Short screens get smaller controls; the top row follows Bedrock's top button scale.
+         let top = s.y < 0.2;
+-        let k = (self.h / REF_H).clamp(0.8, 1.0) * if top { layout.top_scale.clamp(0.6, 2.0) } else { 1.0 };
+-        let size = s.size * k;
+-        let (mut x, y) = self.anchor(s.x, s.y);
++        let base = s.size * (self.h / REF_H).clamp(0.8, 1.0);
++        // The joystick and the D-pad are drawn from their size differently, and big already.
++        let grown = if matches!(id, Id::Stick | Id::Dpad) { base } else { base.max(self.min) };
++        if !top {
++            return (grown, 1.0);
++        }
++        let size = grown * layout.top_scale.clamp(0.6, 2.0);
++        (size, if base > 0.0 { (size / base).max(1.0) } else { 1.0 })
++    }
++
++    fn place(&self, layout: &TouchLayout, id: Id) -> ([f32; 2], f32) {
++        let s = layout.spec(id);
++        let (size, spread) = self.size(layout, id);
++        let (mut x, mut y) = self.anchor(s.x, s.y);
++        if spread > 1.0 {
++            (x, y) = self.spread(s.x, x, y, spread);
++        }
+         // Bedrock's left-handed layout mirrors every control but the hotbar's own button.
+         if layout.left_handed && id != Id::Inventory {
+             x = self.w - x;
+@@ -781,8 +827,48 @@ impl Gui {
+         if id == Id::Inventory && x > self.w / 2.0 {
+             x = x.max(self.hotbar_x() + 182.0 + size + 1.0);
+         }
++        // A grown button stays on the screen.
++        if !matches!(id, Id::Stick | Id::Dpad) {
++            x = x.clamp(size.min(self.w / 2.0), (self.w - size).max(self.w / 2.0));
++            y = y.clamp(size.min(self.h / 2.0), (self.h - size).max(self.h / 2.0));
++        }
+         ([x, y], size)
+     }
++
++    /// A top-row spot `(x, y)` (anchored from the spec's `fx`) moved `g` times as far
++    /// from its anchor: the centre column from the centre, the sides from their edge.
++    fn spread(&self, fx: f32, x: f32, y: f32, g: f32) -> (f32, f32) {
++        let rx = fx * REF_W;
++        let x = if (rx - REF_W / 2.0).abs() <= 110.0 {
++            self.w / 2.0 + (x - self.w / 2.0) * g
++        } else if rx < REF_W / 2.0 {
++            x * g
++        } else {
++            self.w - (self.w - x) * g
++        };
++        (x, y * g)
++    }
++
++    /// The reverse of `place` for a dragged control: the spec fractions that put it
++    /// under the finger at `(x, y)`, the top row's spread taken back.
++    fn unplace(&self, layout: &TouchLayout, id: Id, x: f32, y: f32, mirrored: bool) -> [f32; 2] {
++        let x = if mirrored { self.w - x } else { x };
++        let plain = self.unanchor(x, y, false);
++        // The spread is the control's own: its size does not change with the drag.
++        let g = self.size(layout, id).1;
++        if g <= 1.0 || plain[1] >= 0.2 {
++            return plain;
++        }
++        let rx = plain[0] * REF_W;
++        let x = if (rx - REF_W / 2.0).abs() <= 110.0 {
++            self.w / 2.0 + (x - self.w / 2.0) / g
++        } else if rx < REF_W / 2.0 {
++            x / g
++        } else {
++            self.w - (self.w - x) / g
++        };
++        self.unanchor(x, y / g, false)
++    }
+     /// A control's spot on this GUI. Specs are drawn on the 560 x 270 reference;
+     /// here each keeps its distance from the nearest edge (or from the centre
+     /// column), so the GUI's width and height never push controls over each other.
+@@ -1222,7 +1308,7 @@ fn icon(batch: &mut HudBatch, atlas: &HudAtlas, id: Id, c: [f32; 2], r: f32, col
+ impl Game<'_> {
+     fn touch_gui(&self) -> Option<(Gui, f32)> {
+         let batch = self.gui_scale()?;
+-        Some((Gui { w: batch.width, h: batch.height }, batch.scale))
++        Some((Gui::new(&batch), batch.scale))
+     }
+ 
+     /// A stack in hand and the finger over no slot: the nearest slot's centre within
+@@ -1433,7 +1519,7 @@ impl Game<'_> {
+ 
+     /// The controls over the HUD, while playing.
+     pub(super) fn draw_touch_controls(&self, batch: &mut HudBatch) {
+-        let gui = Gui { w: batch.width, h: batch.height };
++        let gui = Gui::new(batch);
+         let atlas = &self.gui.atlas;
+         if self.touch_close_shown() {
+             let (c, r) = gui.close();
+@@ -2682,9 +2768,9 @@ impl Game<'_> {
+                 }
+                 Some(Finger::Drag(control, off)) => {
+                     self.touch.dirty = true;
++                    let mirrored = self.touch.layout.left_handed && control != Id::Inventory;
++                    let at = gui.unplace(&self.touch.layout, control, p[0] + off[0], p[1] + off[1], mirrored);
+                     if let Some(spec) = self.touch.layout.controls.get_mut(&control) {
+-                        let mirrored = self.touch.layout.left_handed && control != Id::Inventory;
+-                        let at = gui.unanchor(p[0] + off[0], p[1] + off[1], mirrored);
+                         spec.x = at[0];
+                         spec.y = at[1];
+                     }
+-- 
+2.49.0.windows.1
+

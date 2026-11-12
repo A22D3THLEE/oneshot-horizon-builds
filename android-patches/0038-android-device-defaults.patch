@@ -1,0 +1,382 @@
+From d75d157be0a850127d30222236c0db329ae8210b Mon Sep 17 00:00:00 2001
+From: oneshot <oneshot@localhost>
+Date: Thu, 12 Nov 2026 18:03:39 +0300
+Subject: [PATCH] 0038 android: first-start settings fit the device (memory,
+ CPU clock, screen size and refresh rate), once, for new players only
+
+Co-Authored-By: Claude Opus 5.5 <noreply@anthropic.com>
+---
+ crates/horizon-client-render/src/settings.rs  | 262 ++++++++++++++++--
+ .../horizonlab/horizon/HorizonActivity.java   |  36 +++
+ 2 files changed, 278 insertions(+), 20 deletions(-)
+
+diff --git a/crates/horizon-client-render/src/settings.rs b/crates/horizon-client-render/src/settings.rs
+index 52beaac0..1009d45a 100644
+--- a/crates/horizon-client-render/src/settings.rs
++++ b/crates/horizon-client-render/src/settings.rs
+@@ -340,6 +340,8 @@ impl Settings {
+             .map_or(-1, |i| i as i32)
+     }
+     pub fn load(path: &Path) -> Self {
++        #[cfg(target_os = "android")]
++        let fresh = fresh_player(path);
+         let mut horizon = path
+             .parent()
+             .map(crate::graphics::Graphics::load)
+@@ -369,7 +371,6 @@ impl Settings {
+             .parent()
+             .map(|dir| crate::mod_list::ModList::load(&crate::logging::shared_dir(dir)))
+             .unwrap_or_default();
+-        let first_run = !path.exists();
+         let mut settings = match fs::read(path) {
+             Ok(bytes) => {
+                 let text = String::from_utf8_lossy(&bytes);
+@@ -394,12 +395,12 @@ impl Settings {
+         let emote = settings.extras.emote_key.clone();
+         settings.keys.set("key.emote", &emote);
+         // Only the first start's defaults: what the player sets afterwards stays.
++        // `fresh` only: options.txt gone but Horizon's own files kept is a
++        // player who has played before, and their graphics file stays.
+         #[cfg(target_os = "android")]
+-        let settings = if first_run { settings.fit_phone() } else { settings };
++        let settings = settings.device_defaults_once(path, fresh);
+         #[cfg(target_os = "android")]
+         let settings = settings.auto_jump_once(path);
+-        #[cfg(not(target_os = "android"))]
+-        let _ = first_run;
+         settings.describe_for_crashes();
+         // Options.load: the backend asked for at startup, what a restart is measured from.
+         Self {
+@@ -432,31 +433,197 @@ impl Settings {
+         }
+         self
+     }
+-    /// Phones under 7 GiB (Redmi Note 9 Pro is 6 GB) stall and get killed on
+-    /// Java servers at the desktop default of 12 chunks: the client cannot
+-    /// answer keep-alives, so the tab list shows thousands of ms, then the
+-    /// process dies. The mined items are already on the server.
++    /// The first start's settings fit the phone (`DeviceProfile`): picked once per
++    /// player folder, for a new player only, and saved, so what the player changes
++    /// afterwards stays. A folder that was already played gets the mark and
++    /// nothing else. The mark is written only once the files hold the change.
+     #[cfg(target_os = "android")]
+-    fn fit_phone(mut self) -> Self {
+-        let kb = mem_total_kb();
+-        if kb == 0 || kb >= 7 * 1024 * 1024 {
++    fn device_defaults_once(mut self, path: &Path, fresh: bool) -> Self {
++        let Some(dir) = path.parent() else {
++            return self;
++        };
++        let mark = dir.join(DEVICE_MARK);
++        if mark.exists() {
+             return self;
+         }
+-        if self.render_distance > 6 {
++        let note = if fresh {
++            let mut device = DeviceProfile::parse(
++                &fs::read_to_string(dir.join("device.txt")).unwrap_or_default(),
++            );
++            if device.ram_mb == 0 {
++                device.ram_mb = mem_total_kb() / 1024;
++            }
++            device.max_cpu_khz = max_cpu_khz();
++            let tier = self.apply_device(&device);
++            if let Err(e) = fs::write(path, self.serialize()) {
++                log::warn!("Horizon: options.txt is not saved: {e}");
++                return self;
++            }
++            self.horizon.save(dir);
+             log::info!(
+-                "Horizon: {} MB RAM, render distance {} -> 6",
+-                kb / 1024,
+-                self.render_distance
++                "Horizon: first start on {device:?}: {tier:?}, render distance {}, resolution {}%, max FPS {}",
++                self.render_distance,
++                self.horizon.resolution_scale,
++                self.max_fps
+             );
+-            self.render_distance = 6;
++            format!(
++                "first-start settings for this device ({tier:?}) applied once; the options menu changes them\n"
++            )
++        } else {
++            "settings were already there; none were changed\n".to_owned()
++        };
++        if let Err(e) = fs::write(&mark, note) {
++            log::warn!("Horizon: {}: {e}", mark.display());
+         }
+-        if self.simulation_distance > 6 {
+-            self.simulation_distance = 6;
++        self
++    }
++    /// The tier's settings: a graphics preset, distances, the frame cap and the
++    /// 3D resolution. Fewer world workers on phones under 7 GiB (Redmi Note 9
++    /// Pro is 6 GB): at the desktop's they stall on Java servers and get killed.
++    pub fn apply_device(&mut self, device: &DeviceProfile) -> DeviceTier {
++        use crate::graphics::Preset;
++        let tier = device.tier();
++        let (preset, rd, sim) = match tier {
++            DeviceTier::Low => (Preset::Performance, 6, 5),
++            DeviceTier::Mid => (Preset::Performance, 8, 6),
++            DeviceTier::High => (Preset::Balanced, 10, 8),
++            DeviceTier::Flagship => (Preset::Balanced, 12, 8),
++        };
++        crate::graphics::apply_preset(preset, self);
++        self.render_distance = rd;
++        self.simulation_distance = sim;
++        self.max_fps = device.max_fps(tier);
++        if let Some(scale) = device.resolution_scale(tier) {
++            self.horizon.resolution_scale = scale;
+         }
+-        if self.horizon.workers == 0 || self.horizon.workers > 2 {
++        if matches!(tier, DeviceTier::Low | DeviceTier::Mid)
++            && (self.horizon.workers == 0 || self.horizon.workers > 2)
++        {
+             self.horizon.workers = 2;
+         }
+-        self
++        tier
++    }
++}
++
++/// The mark that the first start's device settings were decided for a player folder.
++pub const DEVICE_MARK: &str = "horizon-device-defaults.txt";
++
++/// A new player: options.txt holds no game options yet (the launcher may have
++/// written only the resource packs there) and no Horizon file was written.
++#[cfg(target_os = "android")]
++fn fresh_player(path: &Path) -> bool {
++    let Some(dir) = path.parent() else {
++        return false;
++    };
++    let options = fs::read_to_string(path).unwrap_or_default();
++    !options.lines().any(|l| l.starts_with("renderDistance:"))
++        && !dir.join("horizon-autojump.txt").exists()
++        && !dir.join(crate::graphics::FILE).exists()
++}
++
++/// The fastest core's top clock in kHz (cpufreq), 0 when it can't be read.
++#[cfg(target_os = "android")]
++fn max_cpu_khz() -> u64 {
++    (0..64)
++        .filter_map(|i| {
++            fs::read_to_string(format!("/sys/devices/system/cpu/cpu{i}/cpufreq/cpuinfo_max_freq")).ok()
++        })
++        .filter_map(|t| t.trim().parse::<u64>().ok())
++        .max()
++        .unwrap_or(0)
++}
++
++/// How much the first start's settings ask of the phone.
++#[derive(Clone, Copy, Debug, PartialEq, Eq)]
++pub enum DeviceTier {
++    Low,
++    Mid,
++    High,
++    Flagship,
++}
++
++/// What the first start's settings are picked from: the screen and memory the
++/// activity writes to device.txt, and the CPU's top clock. 0 is unknown.
++#[derive(Clone, Copy, Debug, Default, PartialEq)]
++pub struct DeviceProfile {
++    pub width: u32,
++    pub height: u32,
++    pub refresh_hz: u32,
++    pub ram_mb: u64,
++    pub low_ram: bool,
++    pub max_cpu_khz: u64,
++}
++
++impl DeviceProfile {
++    /// `key=value` lines; unknown keys and bad numbers are skipped.
++    pub fn parse(text: &str) -> Self {
++        let mut d = Self::default();
++        for line in text.lines() {
++            let Some((key, value)) = line.split_once('=') else {
++                continue;
++            };
++            let value = value.trim();
++            match key.trim() {
++                "width" => d.width = value.parse().unwrap_or(0),
++                "height" => d.height = value.parse().unwrap_or(0),
++                "refresh" => d.refresh_hz = value.parse::<f32>().map_or(0, |v| v.round() as u32),
++                "ram_mb" => d.ram_mb = value.parse().unwrap_or(0),
++                "low_ram" => d.low_ram = value == "1" || value == "true",
++                _ => {}
++            }
++        }
++        d
++    }
++    /// By memory first (what a phone reports is a little under its label: 12 GB
++    /// is about 11 200 MB), then by the top CPU clock when it is known. Nothing
++    /// known at all is Mid. 2.2 GHz chips (Snapdragon 695 / 6 Gen 1, Helio G99,
++    /// Dimensity 700) are Mid however much memory they have: a Redmi on an SD695
++    /// with 8 GB held about 30 FPS at render distance 12, the Adreno 619 working
++    /// flat out.
++    pub fn tier(&self) -> DeviceTier {
++        let ram = self.ram_mb;
++        let khz = self.max_cpu_khz;
++        let slower = |limit: u64| khz > 0 && khz < limit;
++        if self.low_ram || (ram > 0 && ram < 4_500) {
++            DeviceTier::Low
++        } else if ram == 0 && khz == 0 {
++            DeviceTier::Mid
++        } else if (ram > 0 && ram < 7_000) || slower(2_300_000) {
++            DeviceTier::Mid
++        } else if (ram > 0 && ram < 10_000) || slower(2_900_000) {
++            DeviceTier::High
++        } else {
++            DeviceTier::Flagship
++        }
++    }
++    /// The 3D scene's resolution in percent so it draws about the tier's pixel
++    /// count (the HUD stays sharp), in steps of 5 from 50 to 100. None when the
++    /// screen size is unknown.
++    pub fn resolution_scale(&self, tier: DeviceTier) -> Option<u32> {
++        let pixels = self.width as f64 * self.height as f64;
++        if pixels <= 0.0 {
++            return None;
++        }
++        let target = match tier {
++            DeviceTier::Low => 1.6e6,
++            DeviceTier::Mid => 2.5e6,
++            DeviceTier::High => 3.5e6,
++            DeviceTier::Flagship => 4.5e6,
++        };
++        if pixels <= target {
++            return Some(100);
++        }
++        let percent = 100.0 * (target / pixels).sqrt();
++        Some((((percent / 5.0).round() * 5.0) as u32).clamp(50, 100))
++    }
++    /// The tier's frame cap, never above the screen's top refresh rate.
++    pub fn max_fps(&self, tier: DeviceTier) -> u32 {
++        let want = match tier {
++            DeviceTier::Low | DeviceTier::Mid => 60,
++            DeviceTier::High => 90,
++            DeviceTier::Flagship => 120,
++        };
++        if self.refresh_hz >= 30 { want.min(self.refresh_hz) } else { want }
+     }
+ }
+ 
+@@ -950,6 +1117,61 @@ pub enum Opt {
+ mod tests {
+     use super::*;
+     #[test]
++    fn device_tiers_follow_memory_and_cpu() {
++        // The test tablet: Xiaomi, SM8635, 12 GB, 2136x3200, 144 Hz.
++        let tablet = DeviceProfile {
++            max_cpu_khz: 3_014_400,
++            ..DeviceProfile::parse("width=2136\nheight=3200\nrefresh=144.0\nram_mb=11236\nlow_ram=0\n")
++        };
++        assert_eq!(tablet.tier(), DeviceTier::Flagship);
++        assert_eq!(tablet.resolution_scale(DeviceTier::Flagship), Some(80));
++        assert_eq!(tablet.max_fps(DeviceTier::Flagship), 120);
++        // 6 GB, 1080x2400, 60 Hz: Mid, full resolution (2.6 MP is about the target).
++        let mid = DeviceProfile { width: 1080, height: 2400, refresh_hz: 60, ram_mb: 5_600, low_ram: false, max_cpu_khz: 2_400_000 };
++        assert_eq!(mid.tier(), DeviceTier::Mid);
++        assert_eq!(mid.resolution_scale(DeviceTier::Mid), Some(100));
++        assert_eq!(mid.max_fps(DeviceTier::Mid), 60);
++        // 8 GB with a slow CPU is held at Mid; 8 GB with a fast one is High.
++        let slow = DeviceProfile { ram_mb: 7_500, max_cpu_khz: 2_000_000, ..mid };
++        assert_eq!(slow.tier(), DeviceTier::Mid);
++        // The test phone: Redmi, SD695 (2.208 GHz), 8 GB, 1080x2400, 120 Hz.
++        let sd695 = DeviceProfile { ram_mb: 7_456, max_cpu_khz: 2_208_000, refresh_hz: 120, ..mid };
++        assert_eq!(sd695.tier(), DeviceTier::Mid);
++        assert_eq!(sd695.max_fps(DeviceTier::Mid), 60);
++        // Snapdragon 778G / 7 Gen 1 (2.4 GHz) with 8 GB stay High.
++        assert_eq!(DeviceProfile { max_cpu_khz: 2_400_000, ..sd695 }.tier(), DeviceTier::High);
++        let high = DeviceProfile { ram_mb: 7_500, max_cpu_khz: 2_800_000, refresh_hz: 120, ..mid };
++        assert_eq!(high.tier(), DeviceTier::High);
++        assert_eq!(high.max_fps(DeviceTier::High), 90);
++        // Android's low-RAM flag and 4 GB are Low; nothing known is Mid.
++        assert_eq!(DeviceProfile { low_ram: true, ..tablet }.tier(), DeviceTier::Low);
++        assert_eq!(DeviceProfile { ram_mb: 3_700, ..mid }.tier(), DeviceTier::Low);
++        assert_eq!(DeviceProfile::default().tier(), DeviceTier::Mid);
++        assert_eq!(DeviceProfile::default().resolution_scale(DeviceTier::Mid), None);
++        assert_eq!(DeviceProfile::default().max_fps(DeviceTier::Flagship), 120);
++        // A huge screen on a Low phone is not drawn under half resolution.
++        let big = DeviceProfile { width: 3000, height: 3000, ..DeviceProfile::default() };
++        assert_eq!(big.resolution_scale(DeviceTier::Low), Some(50));
++    }
++    #[test]
++    fn device_settings_change_only_what_the_tier_sets() {
++        let mut s = Settings::default();
++        let tablet = DeviceProfile { width: 2136, height: 3200, refresh_hz: 144, ram_mb: 11_236, low_ram: false, max_cpu_khz: 3_014_400 };
++        assert_eq!(s.apply_device(&tablet), DeviceTier::Flagship);
++        assert_eq!((s.render_distance, s.simulation_distance, s.max_fps), (12, 8, 120));
++        assert_eq!(s.horizon.resolution_scale, 80);
++        assert_eq!(s.horizon.workers, 0);
++        let mut low = Settings::default();
++        let phone = DeviceProfile { width: 720, height: 1600, refresh_hz: 60, ram_mb: 3_700, low_ram: false, max_cpu_khz: 2_000_000 };
++        assert_eq!(low.apply_device(&phone), DeviceTier::Low);
++        assert_eq!((low.render_distance, low.simulation_distance, low.max_fps), (6, 5, 60));
++        assert_eq!(low.horizon.resolution_scale, 100);
++        assert_eq!(low.horizon.workers, 2);
++        // Round trip: the saved options.txt reads back the same distances and cap.
++        let back = Settings::parse(&low.serialize());
++        assert_eq!((back.render_distance, back.simulation_distance, back.max_fps), (6, 5, 60));
++    }
++    #[test]
+     fn the_narrator_reads_its_status_and_the_voice_under_master() {
+         let s = Settings::parse("narrator:2\nsoundCategory_master:0.5\nsoundCategory_voice:0.5\n");
+         assert_eq!(s.narrator(), horizon_narrator::Status::Chat);
+diff --git a/packaging/android/java/dev/horizonlab/horizon/HorizonActivity.java b/packaging/android/java/dev/horizonlab/horizon/HorizonActivity.java
+index 855b19b8..c027fb00 100644
+--- a/packaging/android/java/dev/horizonlab/horizon/HorizonActivity.java
++++ b/packaging/android/java/dev/horizonlab/horizon/HorizonActivity.java
+@@ -46,6 +46,8 @@ public class HorizonActivity extends NativeActivity {
+ 
+     @Override
+     protected void onCreate(Bundle state) {
++        // Before super.onCreate: that starts the game's thread, which reads device.txt.
++        writeDevice(this);
+         super.onCreate(state);
+         Ui.load(this);
+         if (!PlayStats.alive) {
+@@ -394,6 +396,40 @@ public class HorizonActivity extends NativeActivity {
+         runOnUiThread(new Toggle(this, show));
+     }
+ 
++    /**
++     * Oneshot: the screen and memory the game picks its first-start settings
++     * from (device.txt next to options.txt; settings.rs DeviceProfile). Only the
++     * first start of a new player uses it; later the player's own settings stay.
++     */
++    static void writeDevice(android.app.Activity a) {
++        try {
++            StringBuilder b = new StringBuilder();
++            android.view.Display d = a.getWindowManager().getDefaultDisplay();
++            android.util.DisplayMetrics m = new android.util.DisplayMetrics();
++            d.getRealMetrics(m);
++            float hz = d.getRefreshRate();
++            for (android.view.Display.Mode mode : d.getSupportedModes()) {
++                hz = Math.max(hz, mode.getRefreshRate());
++            }
++            b.append("width=").append(m.widthPixels).append('\n');
++            b.append("height=").append(m.heightPixels).append('\n');
++            b.append("dpi=").append(m.densityDpi).append('\n');
++            b.append("refresh=").append(hz).append('\n');
++            android.app.ActivityManager am = (android.app.ActivityManager) a.getSystemService(Context.ACTIVITY_SERVICE);
++            if (am != null) {
++                android.app.ActivityManager.MemoryInfo mi = new android.app.ActivityManager.MemoryInfo();
++                am.getMemoryInfo(mi);
++                b.append("ram_mb=").append(mi.totalMem / (1024 * 1024)).append('\n');
++                b.append("low_ram=").append(am.isLowRamDevice() ? 1 : 0).append('\n');
++            }
++            java.io.File home = new java.io.File(SetupActivity.home(a));
++            java.nio.file.Files.write(new java.io.File(home, "device.txt").toPath(),
++                    b.toString().getBytes(java.nio.charset.StandardCharsets.UTF_8));
++        } catch (Throwable t) {
++            android.util.Log.w("Horizon", "device.txt: " + t);
++        }
++    }
++
+     static class Toggle implements Runnable {
+         private final HorizonActivity a;
+         private final boolean show;
+-- 
+2.49.0.windows.1
+

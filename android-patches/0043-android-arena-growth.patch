@@ -1,0 +1,87 @@
+From 9d1eb2e8929ec463f13fe0fc02c539dfdf03fbde Mon Sep 17 00:00:00 2001
+From: oneshot <oneshot@localhost>
+Date: Fri, 13 Nov 2026 00:51:30 +0300
+Subject: [PATCH] android: arena growth frees off the render thread, smaller
+ compaction budget
+
+Buffers a page grows out of go to the graveyard with emptied pages instead of
+being dropped inline in the frame that grew; compaction copies 8 MiB a frame
+on Android (shared memory bus) instead of 32 MiB.
+
+Co-Authored-By: Claude Opus 5.5 <noreply@anthropic.com>
+---
+ crates/horizon-client-render/src/gfx.rs       |  5 +++--
+ crates/horizon-client-render/src/gfx/arena.rs | 13 ++++++++++---
+ 2 files changed, 13 insertions(+), 5 deletions(-)
+
+diff --git a/crates/horizon-client-render/src/gfx.rs b/crates/horizon-client-render/src/gfx.rs
+index 3bc63d39..a3d39edb 100644
+--- a/crates/horizon-client-render/src/gfx.rs
++++ b/crates/horizon-client-render/src/gfx.rs
+@@ -813,8 +813,9 @@ const SECTION_COPY_LIMIT: u64 = 64 << 20;
+ /// What compaction copies in a frame, `compact_arena` first and
+ /// `shrink_translucent` with what it left, and a range more where a call's
+ /// first is larger (`move_off_page`): a page empties over a few frames, with
+-/// no hitch.
+-const COMPACT_BUDGET: u64 = 32 << 20;
++/// no hitch. A phone's GPU shares its memory bus with the CPU: a quarter of it
++/// there, so compaction does not keep it busy (and warm) for whole frames.
++const COMPACT_BUDGET: u64 = if cfg!(target_os = "android") { 8 << 20 } else { 32 << 20 };
+ /// A large translucent page starts to shrink (`Renderer::shrink_translucent`)
+ /// this long after terrain last arrived, and `SHRINK_RETRY` after a try found
+ /// no room.
+diff --git a/crates/horizon-client-render/src/gfx/arena.rs b/crates/horizon-client-render/src/gfx/arena.rs
+index 9ca776fe..8a14b7f4 100644
+--- a/crates/horizon-client-render/src/gfx/arena.rs
++++ b/crates/horizon-client-render/src/gfx/arena.rs
+@@ -116,6 +116,10 @@ pub struct Arena {
+     closing: Option<u32>,
+     /// A page had to go to system memory (logged once).
+     spilled: bool,
++    /// Buffers pages grew out of (`Arena::grow`): `trim` gives them back with
++    /// the emptied pages', for a [`Graveyard`], instead of freeing them on the
++    /// render thread in the frame that grew.
++    retired: Vec<wgpu::Buffer>,
+     /// Tests: GPU-local pages fail as if video memory were full.
+     #[cfg(test)]
+     video_memory_full: bool,
+@@ -200,6 +204,7 @@ impl Arena {
+             usage,
+             closing: None,
+             spilled: false,
++            retired: Vec::new(),
+             #[cfg(test)]
+             video_memory_full: false,
+         }
+@@ -544,7 +549,7 @@ impl Arena {
+         // Copies recorded for the old buffer run before this one.
+         encoder.copy_buffer_to_buffer(&old.buffer, 0, &buffer, 0, old.capacity * self.stride);
+         let previous = old.capacity;
+-        old.buffer = buffer;
++        self.retired.push(std::mem::replace(&mut old.buffer, buffer));
+         old.host = host;
+         old.capacity = capacity;
+         old.free.give(previous, capacity - previous);
+@@ -553,7 +558,7 @@ impl Arena {
+     /// Reclaim after an upload batch, so replacing a section can reuse its range. Gives back
+     /// the buffers of the pages it emptied, for a [`Graveyard`].
+     pub fn trim(&mut self) -> Vec<wgpu::Buffer> {
+-        let mut released = Vec::new();
++        let mut released = std::mem::take(&mut self.retired);
+         for page in &mut self.pages {
+             if page
+                 .as_ref()
+@@ -575,7 +580,9 @@ impl Arena {
+     /// Drops every page; gives back their buffers, for a [`Graveyard`].
+     pub fn clear(&mut self) -> Vec<wgpu::Buffer> {
+         self.closing = None;
+-        self.pages.drain(..).flatten().map(|p| p.buffer).collect()
++        let mut released = std::mem::take(&mut self.retired);
++        released.extend(self.pages.drain(..).flatten().map(|p| p.buffer));
++        released
+     }
+ }
+ 
+-- 
+2.49.0.windows.1
+

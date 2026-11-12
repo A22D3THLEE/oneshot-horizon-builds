@@ -1,0 +1,119 @@
+From bc870e9eee748514c570c44b9d3f01251afdfde2 Mon Sep 17 00:00:00 2001
+From: oneshot <oneshot@localhost>
+Date: Thu, 12 Nov 2026 17:50:20 +0300
+Subject: [PATCH] 0036 android: helper threads spread over all cores instead of
+ the pinned fast ones
+
+Co-Authored-By: Claude Opus 5.5 <noreply@anthropic.com>
+---
+ crates/horizon-client/src/lan/chunks.rs |  3 ++
+ crates/horizon-client/src/save.rs       | 10 +++++-
+ crates/horizon-threads/src/lib.rs       | 43 +++++++++++++++++++++++++
+ 3 files changed, 55 insertions(+), 1 deletion(-)
+
+diff --git a/crates/horizon-client/src/lan/chunks.rs b/crates/horizon-client/src/lan/chunks.rs
+index bc286846..e10ccc2d 100644
+--- a/crates/horizon-client/src/lan/chunks.rs
++++ b/crates/horizon-client/src/lan/chunks.rs
+@@ -501,6 +501,9 @@ fn warm_pool() -> Option<&'static WarmPool> {
+                 std::thread::Builder::new()
+                     .name(format!("horizon-chunk-encode-{i}"))
+                     .spawn(move || {
++                        // The server waits for a batch, so no lower priority; but every
++                        // core again, not only the pinned server thread's.
++                        horizon_threads::spread_current();
+                         let mut done = 0;
+                         loop {
+                             let job = {
+diff --git a/crates/horizon-client/src/save.rs b/crates/horizon-client/src/save.rs
+index a504ae77..e4c24e78 100644
+--- a/crates/horizon-client/src/save.rs
++++ b/crates/horizon-client/src/save.rs
+@@ -2180,7 +2180,15 @@ fn share_out<R: Send>(
+     let mut done: Vec<(usize, R)> = std::thread::scope(|scope| {
+         let threads: Vec<_> = (1..helpers)
+             .filter(|_| start())
+-            .filter_map(|_| std::thread::Builder::new().spawn_scoped(scope, work).ok())
++            .filter_map(|_| {
++                // Helpers are spawned from a thread pinned to the fast cores; let
++                // them use every core so they do not crowd the server and render.
++                let helper = move || {
++                    horizon_threads::spread_current();
++                    work()
++                };
++                std::thread::Builder::new().spawn_scoped(scope, helper).ok()
++            })
+             .collect();
+         let mut done = work();
+         for t in threads {
+diff --git a/crates/horizon-threads/src/lib.rs b/crates/horizon-threads/src/lib.rs
+index d61ad799..82bccb43 100644
+--- a/crates/horizon-threads/src/lib.rs
++++ b/crates/horizon-threads/src/lib.rs
+@@ -153,6 +153,10 @@ fn favour() -> bool {
+     let Some(fast) = fast_cpus() else {
+         return false;
+     };
++    // Read before the first pin: the core count and the whole mask are the process's,
++    // not the pinned thread's.
++    let _ = worker_count();
++    let _ = full_mask();
+     // SAFETY: `set` is a live, zeroed local; pid 0 is the calling thread.
+     unsafe {
+         let mut set: libc::cpu_set_t = std::mem::zeroed();
+@@ -168,6 +172,44 @@ fn favour() -> bool {
+     false
+ }
+ 
++/// Every core the process may run on, as it was before any thread was pinned.
++#[cfg(target_os = "android")]
++fn full_mask() -> Option<libc::cpu_set_t> {
++    struct Mask(libc::cpu_set_t);
++    // SAFETY: a plain bit array, read only after it is set.
++    unsafe impl Sync for Mask {}
++    unsafe impl Send for Mask {}
++    static FULL: OnceLock<Option<Mask>> = OnceLock::new();
++    FULL.get_or_init(|| {
++        // SAFETY: `set` is a live, zeroed local of the size passed; pid 0 is the calling thread.
++        unsafe {
++            let mut set: libc::cpu_set_t = std::mem::zeroed();
++            (libc::sched_getaffinity(0, std::mem::size_of::<libc::cpu_set_t>(), &mut set) == 0)
++                .then_some(Mask(set))
++        }
++    })
++    .as_ref()
++    .map(|m| m.0)
++}
++
++/// A thread started by a pinned one inherits its cores (Linux copies the mask to a new
++/// thread): the job workers, the chunk encoders and the savers the render and server
++/// threads start would all crowd onto the big cores, the little ones idle, and the big
++/// cluster heats while frames wait behind the workers. A helper takes every core back.
++#[cfg(target_os = "android")]
++pub fn spread_current() -> bool {
++    let Some(set) = full_mask() else {
++        return false;
++    };
++    // SAFETY: `set` is a live local of the size passed; pid 0 is the calling thread.
++    unsafe { libc::sched_setaffinity(0, std::mem::size_of::<libc::cpu_set_t>(), &set) == 0 }
++}
++
++#[cfg(not(target_os = "android"))]
++pub fn spread_current() -> bool {
++    false
++}
++
+ /// The CPU time the calling thread has used, where only an OS call gives it
+ /// precisely. Windows counts it exactly only in cycles of the time-stamp
+ /// counter (`QueryThreadCycleTime`; `GetThreadTimes` moves in scheduler ticks
+@@ -230,6 +272,7 @@ pub fn put_helpers_behind() {
+ /// wants its core. A tick or a frame then gets a core when it starts instead
+ /// of waiting behind them. Nothing elsewhere. Whether the OS took it.
+ pub fn behind_server() -> bool {
++    spread_current();
+     HELPERS_BEHIND.load(Ordering::Relaxed) && behind()
+ }
+ 
+-- 
+2.49.0.windows.1
+

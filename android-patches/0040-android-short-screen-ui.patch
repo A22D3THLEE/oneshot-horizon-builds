@@ -1,0 +1,275 @@
+From 0465643b699dbe41da5003ac57c939e121ab0bbd Mon Sep 17 00:00:00 2001
+From: oneshot <oneshot@localhost>
+Date: Thu, 12 Nov 2026 19:00:47 +0300
+Subject: [PATCH] 0040 android: launcher fits a phone's landscape height
+
+The rail's tabs shrink to the height there is and the version line goes on
+short screens, so all seven tabs show; the catalog's header scrolls with the
+results there; the catalog and versions screens are full screen like the rest;
+sideways rows fade out where more is hidden.
+
+Co-Authored-By: Claude Opus 5.5 <noreply@anthropic.com>
+---
+ .../horizonlab/horizon/CatalogActivity.java   | 36 ++++++++++++---
+ .../horizonlab/horizon/ProfileActivity.java   | 44 ++++++++++++++-----
+ .../dev/horizonlab/horizon/SettingsPage.java  |  3 +-
+ .../java/dev/horizonlab/horizon/Ui.java       | 31 +++++++++++++
+ .../horizonlab/horizon/UpdateActivity.java    |  7 +++
+ 5 files changed, 100 insertions(+), 21 deletions(-)
+
+diff --git a/packaging/android/java/dev/horizonlab/horizon/CatalogActivity.java b/packaging/android/java/dev/horizonlab/horizon/CatalogActivity.java
+index 33ee20a9..a6508649 100644
+--- a/packaging/android/java/dev/horizonlab/horizon/CatalogActivity.java
++++ b/packaging/android/java/dev/horizonlab/horizon/CatalogActivity.java
+@@ -96,6 +96,14 @@ public class CatalogActivity extends Activity {
+         root.setBackgroundColor(Ui.BG);
+         root.setPadding(Ui.dp(this, 16), Ui.dp(this, 12), Ui.dp(this, 16), Ui.dp(this, 12));
+ 
++        // A phone in landscape: back, tabs and search took more than half the height and
++        // left a strip for the results. There they scroll with the results instead.
++        LinearLayout top = root;
++        if (Ui.shortScreen(this)) {
++            top = new LinearLayout(this);
++            top.setOrientation(LinearLayout.VERTICAL);
++        }
++
+         LinearLayout head = new LinearLayout(this);
+         head.setOrientation(LinearLayout.HORIZONTAL);
+         head.setGravity(Gravity.CENTER_VERTICAL);
+@@ -110,10 +118,9 @@ public class CatalogActivity extends Activity {
+         LinearLayout.LayoutParams tl = new LinearLayout.LayoutParams(0, -2, 1);
+         tl.leftMargin = p;
+         head.addView(title, tl);
+-        root.addView(head);
++        top.addView(head);
+ 
+-        HorizontalScrollView tabScroll = new HorizontalScrollView(this);
+-        tabScroll.setHorizontalScrollBarEnabled(false);
++        HorizontalScrollView tabScroll = Ui.hscroll(this);
+         LinearLayout tabRow = new LinearLayout(this);
+         tabRow.setOrientation(LinearLayout.HORIZONTAL);
+         String[] names = {Ui.t("Скины", "Skins"), Ui.t("Плащи", "Capes"),
+@@ -131,7 +138,7 @@ public class CatalogActivity extends Activity {
+             tabRow.addView(tabs[i], lp);
+         }
+         tabScroll.addView(tabRow);
+-        root.addView(tabScroll, Ui.gap(this, 10));
++        top.addView(tabScroll, Ui.gap(this, 10));
+ 
+         LinearLayout search = new LinearLayout(this);
+         search.setOrientation(LinearLayout.HORIZONTAL);
+@@ -161,16 +168,24 @@ public class CatalogActivity extends Activity {
+         LinearLayout.LayoutParams gl = new LinearLayout.LayoutParams(-2, -2);
+         gl.leftMargin = Ui.dp(this, 8);
+         search.addView(go, gl);
+-        root.addView(search, Ui.gap(this, 10));
++        top.addView(search, Ui.gap(this, 10));
+ 
+         status = Ui.text(this, "", 12, Ui.MUTED, false);
+-        root.addView(status, Ui.gap(this, 4));
++        top.addView(status, Ui.gap(this, 4));
+ 
+         ScrollView scroll = new ScrollView(this);
+         scroll.setVerticalScrollBarEnabled(false);
+         list = new LinearLayout(this);
+         list.setOrientation(LinearLayout.VERTICAL);
+-        scroll.addView(list);
++        if (top == root) {
++            scroll.addView(list);
++        } else {
++            LinearLayout body = new LinearLayout(this);
++            body.setOrientation(LinearLayout.VERTICAL);
++            body.addView(top);
++            body.addView(list, Ui.gap(this, 8));
++            scroll.addView(body);
++        }
+         root.addView(scroll, new LinearLayout.LayoutParams(-1, 0, 1));
+ 
+         more = Ui.button(this, Ui.t("Ещё", "More"), false);
+@@ -181,9 +196,16 @@ public class CatalogActivity extends Activity {
+         });
+         setContentView(root);
+         Ui.fitInsets(root);
++        Ui.hideBars(this);
+         selectTab(SKINS);
+     }
+ 
++    @Override
++    public void onWindowFocusChanged(boolean focus) {
++        super.onWindowFocusChanged(focus);
++        if (focus) Ui.hideBars(this);
++    }
++
+     @Override
+     protected void onDestroy() {
+         generation++;
+diff --git a/packaging/android/java/dev/horizonlab/horizon/ProfileActivity.java b/packaging/android/java/dev/horizonlab/horizon/ProfileActivity.java
+index 3b20ce93..a77b2b7b 100644
+--- a/packaging/android/java/dev/horizonlab/horizon/ProfileActivity.java
++++ b/packaging/android/java/dev/horizonlab/horizon/ProfileActivity.java
+@@ -90,9 +90,12 @@ public class ProfileActivity extends Activity implements View.OnClickListener {
+         root.setPadding(pad, pad, pad, pad);
+ 
+         // ---- The rail ----
++        // A phone in landscape is about 360-420 dp high: seven tabs at full height,
++        // the header and PLAY do not fit, and the last tabs were hidden below the fold.
++        final boolean compact = Ui.shortScreen(this);
+         LinearLayout rail = new LinearLayout(this);
+         rail.setOrientation(LinearLayout.VERTICAL);
+-        rail.setPadding(Ui.dp(this, 10), Ui.dp(this, 12), Ui.dp(this, 10), Ui.dp(this, 10));
++        rail.setPadding(Ui.dp(this, 10), Ui.dp(this, compact ? 8 : 12), Ui.dp(this, 10), Ui.dp(this, compact ? 8 : 10));
+         rail.setBackground(Ui.rounded(this, Ui.CARD, Ui.EDGE, 18));
+         TextView title = Ui.text(this, "HORIZON", 20, Ui.TEXT, true);
+         title.setLetterSpacing(0.22f);
+@@ -106,7 +109,8 @@ public class ProfileActivity extends Activity implements View.OnClickListener {
+         ver.setSingleLine(true);
+         ver.setEllipsize(android.text.TextUtils.TruncateAt.END);
+         ver.setPadding(Ui.dp(this, 8), Ui.dp(this, 2), 0, 0);
+-        rail.addView(ver);
++        // Short screen: the version stays in Settings → About, the tabs get its line.
++        if (!compact) rail.addView(ver);
+ 
+         String[] labels = {Ui.t("Главная", "Home"), Ui.t("Профиль", "Profile"), Ui.t("Друзья", "Friends"),
+             Ui.t("Миры", "Worlds"), Ui.t("Галерея", "Gallery"), Ui.t("Контент", "Content"), Ui.t("Настройки", "Settings")};
+@@ -128,12 +132,20 @@ public class ProfileActivity extends Activity implements View.OnClickListener {
+             tabs[i] = t;
+             nav.addView(t, Ui.gap(this, i == 0 ? 0 : 2));
+         }
+-        // A phone in landscape is about 360 dp high: the list scrolls, PLAY stays.
+-        ScrollView navScroll = new ScrollView(this);
++        // The tabs shrink to the height there is (down to 32 dp each); what still does not
++        // fit scrolls, PLAY stays, and the faded edge shows that there is more.
++        final ScrollView navScroll = new ScrollView(this);
+         navScroll.setVerticalScrollBarEnabled(false);
++        navScroll.setVerticalFadingEdgeEnabled(true);
++        navScroll.setFadingEdgeLength(Ui.dp(this, 28));
+         navScroll.addView(nav);
++        navScroll.addOnLayoutChangeListener(new View.OnLayoutChangeListener() {
++            public void onLayoutChange(View v, int l, int t, int r, int b, int ol, int ot, int or, int ob) {
++                if (b - t != ob - ot) fitTabs(navScroll, b - t);
++            }
++        });
+         LinearLayout.LayoutParams navLp = new LinearLayout.LayoutParams(-1, 0, 1);
+-        navLp.topMargin = Ui.dp(this, 10);
++        navLp.topMargin = Ui.dp(this, compact ? 4 : 10);
+         rail.addView(navScroll, navLp);
+ 
+         accountChip = Ui.text(this, "", 11, Ui.MUTED, false);
+@@ -143,7 +155,7 @@ public class ProfileActivity extends Activity implements View.OnClickListener {
+         play = Ui.button(this, Ui.t("ИГРАТЬ", "PLAY"), true);
+         play.setTextSize(19);
+         play.setLetterSpacing(0.1f);
+-        play.setMinHeight(Ui.dp(this, 56));
++        play.setMinHeight(Ui.dp(this, compact ? 48 : 56));
+         play.setOnClickListener(this);
+         rail.addView(play, Ui.gap(this, 4));
+         root.addView(rail, new LinearLayout.LayoutParams(Ui.dp(this, RAIL_DP), -1));
+@@ -609,13 +621,21 @@ public class ProfileActivity extends Activity implements View.OnClickListener {
+     }
+ 
+     private void hideBars() {
+-        if (android.os.Build.VERSION.SDK_INT >= 30) {
+-            android.view.WindowInsetsController c = getWindow().getInsetsController();
+-            if (c != null) {
+-                c.hide(android.view.WindowInsets.Type.systemBars());
+-                c.setSystemBarsBehavior(android.view.WindowInsetsController.BEHAVIOR_SHOW_TRANSIENT_BARS_BY_SWIPE);
++        Ui.hideBars(this);
++    }
++
++    /** Each tab as tall as `height` allows for all of them: 44 dp at most, 32 dp at least. */
++    private void fitTabs(View scroll, int height) {
++        int gap = Ui.dp(this, 2);
++        int each = (height - gap * (tabs.length - 1)) / tabs.length;
++        final int h = Math.max(Ui.dp(this, 32), Math.min(Ui.dp(this, 44), each));
++        if (tabs[0].getMinHeight() == h) return;
++        // Not inside the layout pass that reported the size.
++        scroll.post(new Runnable() {
++            public void run() {
++                for (TextView t : tabs) t.setMinHeight(h);
+             }
+-        }
++        });
+     }
+ 
+     String readName() {
+diff --git a/packaging/android/java/dev/horizonlab/horizon/SettingsPage.java b/packaging/android/java/dev/horizonlab/horizon/SettingsPage.java
+index b076e7a9..b79f18cc 100644
+--- a/packaging/android/java/dev/horizonlab/horizon/SettingsPage.java
++++ b/packaging/android/java/dev/horizonlab/horizon/SettingsPage.java
+@@ -51,8 +51,7 @@ final class SettingsPage extends Page {
+         LinearLayout acc = block(Ui.t("Акцент", "Accent"));
+         String cur = Ui.pref(a, "accent.txt");
+         if (cur.isEmpty()) cur = Ui.ACCENT_IDS[0];
+-        android.widget.HorizontalScrollView hs = new android.widget.HorizontalScrollView(a);
+-        hs.setHorizontalScrollBarEnabled(false);
++        android.widget.HorizontalScrollView hs = Ui.hscroll(a);
+         LinearLayout chips = Ui.row(a);
+         for (int i = 0; i < Ui.ACCENT_IDS.length; i++) {
+             final String id = Ui.ACCENT_IDS[i];
+diff --git a/packaging/android/java/dev/horizonlab/horizon/Ui.java b/packaging/android/java/dev/horizonlab/horizon/Ui.java
+index 50c3e10b..79185f85 100644
+--- a/packaging/android/java/dev/horizonlab/horizon/Ui.java
++++ b/packaging/android/java/dev/horizonlab/horizon/Ui.java
+@@ -139,6 +139,37 @@ final class Ui {
+         return (int) (m.heightPixels / m.density);
+     }
+ 
++    /**
++     * A phone in landscape (about 360-420 dp high): the screens drop what they can spare
++     * and let headers scroll away instead of keeping them fixed.
++     */
++    static boolean shortScreen(Context c) {
++        return heightDp(c) < 480;
++    }
++
++    /**
++     * A sideways-scrolling row whose ends fade out where more is hidden: on a narrow
++     * screen the last chips are cut off, and without the fade nothing tells that it scrolls.
++     */
++    static android.widget.HorizontalScrollView hscroll(Context c) {
++        android.widget.HorizontalScrollView h = new android.widget.HorizontalScrollView(c);
++        h.setHorizontalScrollBarEnabled(false);
++        h.setHorizontalFadingEdgeEnabled(true);
++        h.setFadingEdgeLength(dp(c, 36));
++        return h;
++    }
++
++    /** The launcher's screens are full-screen like the game: the bars come back on a swipe. */
++    static void hideBars(android.app.Activity a) {
++        if (android.os.Build.VERSION.SDK_INT >= 30) {
++            android.view.WindowInsetsController c = a.getWindow().getInsetsController();
++            if (c != null) {
++                c.hide(android.view.WindowInsets.Type.systemBars());
++                c.setSystemBarsBehavior(android.view.WindowInsetsController.BEHAVIOR_SHOW_TRANSIENT_BARS_BY_SWIPE);
++            }
++        }
++    }
++
+     /** A full-screen background with a centered card; returns the card to fill. */
+     static LinearLayout card(android.app.Activity a) {
+         FrameLayout root = new FrameLayout(a);
+diff --git a/packaging/android/java/dev/horizonlab/horizon/UpdateActivity.java b/packaging/android/java/dev/horizonlab/horizon/UpdateActivity.java
+index ffe6eb6d..779ed78a 100644
+--- a/packaging/android/java/dev/horizonlab/horizon/UpdateActivity.java
++++ b/packaging/android/java/dev/horizonlab/horizon/UpdateActivity.java
+@@ -110,10 +110,17 @@ public class UpdateActivity extends Activity {
+         root.addView(scroll, new LinearLayout.LayoutParams(-1, 0, 1));
+         setContentView(root);
+         Ui.fitInsets(root);
++        Ui.hideBars(this);
+         load(false);
+         onNewIntent(getIntent());
+     }
+ 
++    @Override
++    public void onWindowFocusChanged(boolean focus) {
++        super.onWindowFocusChanged(focus);
++        if (focus) Ui.hideBars(this);
++    }
++
+     static long versionCode(Context c) {
+         try {
+             PackageInfo p = c.getPackageManager().getPackageInfo(c.getPackageName(), 0);
+-- 
+2.49.0.windows.1
+

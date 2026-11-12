@@ -1,0 +1,139 @@
+From bd83dcfb81f363a7e34c49d5fe9b2f82ca7e13f4 Mon Sep 17 00:00:00 2001
+From: oneshot <oneshot@localhost>
+Date: Thu, 12 Nov 2026 17:54:01 +0300
+Subject: [PATCH] 0037 android: 30 fps under the pause menu, the screen refresh
+ rate follows the frame cap
+
+Co-Authored-By: Claude Opus 5.5 <noreply@anthropic.com>
+---
+ crates/horizon-client/src/game.rs         |  8 ++-
+ crates/horizon-client/src/game/options.rs | 10 ++++
+ crates/horizon-threads/src/lib.rs         | 72 +++++++++++++++++++++++
+ 3 files changed, 89 insertions(+), 1 deletion(-)
+
+diff --git a/crates/horizon-client/src/game.rs b/crates/horizon-client/src/game.rs
+index f3e03463..e1286fe7 100644
+--- a/crates/horizon-client/src/game.rs
++++ b/crates/horizon-client/src/game.rs
+@@ -20062,7 +20062,13 @@ impl Game<'_> {
+                     // The frame's own work, without the wait for the swapchain: the
+                     // sleep below and that wait are idle time the clocks needn't cover.
+                     let waited = self.renderer.as_ref().map_or(Duration::ZERO, |r| r.last_wait);
+-                    horizon_threads::frame_hint(now.elapsed().saturating_sub(waited), self.framerate_limit());
++                    let fps_cap = self.framerate_limit();
++                    horizon_threads::frame_hint(now.elapsed().saturating_sub(waited), fps_cap);
++                    #[cfg(target_os = "android")]
++                    match ANDROID_APP.get().and_then(|app| app.native_window()) {
++                        Some(window) => horizon_threads::screen_rate(window.ptr().as_ptr().cast(), fps_cap),
++                        None => horizon_threads::screen_rate(std::ptr::null_mut(), fps_cap),
++                    }
+                     self.limit_frame();
+                     self.pause = self.pauses_game();
+                     if let Some(server) = &self.integrated {
+diff --git a/crates/horizon-client/src/game/options.rs b/crates/horizon-client/src/game/options.rs
+index 2fe30df3..68db6857 100644
+--- a/crates/horizon-client/src/game/options.rs
++++ b/crates/horizon-client/src/game/options.rs
+@@ -675,6 +675,16 @@ impl Game<'_> {
+             .settings
+             .horizon
+             .battery_limit(limit, self.title.is_none(), self.focused);
++        // Android: the pause menu over a world needs no more than 30 frames a
++        // second, and a phone left paused cools down instead of heating up.
++        let limit = if cfg!(target_os = "android")
++            && self.title.is_none()
++            && self.screen == super::Screen::Paused
++        {
++            limit.min(30)
++        } else {
++            limit
++        };
+         // A native mod may only lower it (`native_framerate_limit`).
+         let mut hooked = limit;
+         self.native_framerate_limit(
+diff --git a/crates/horizon-threads/src/lib.rs b/crates/horizon-threads/src/lib.rs
+index 82bccb43..e6d0afed 100644
+--- a/crates/horizon-threads/src/lib.rs
++++ b/crates/horizon-threads/src/lib.rs
+@@ -839,6 +839,78 @@ pub fn frame_hint(work: std::time::Duration, fps: i32) {
+     let _ = (work, fps);
+ }
+ 
++/// Android 11+ (`ANativeWindow_setFrameRate`): tells the compositor the frame rate the
++/// game is capped at, so a 120/144 Hz panel can drop to a matching lower refresh rate
++/// (less power, less heat) instead of running at its highest one. Called every frame;
++/// it reaches the system only when the cap or the window changes. A cap of 260 and up
++/// (unlimited) clears the preference. Nothing elsewhere, or where the API isn't.
++pub fn screen_rate(window: *mut std::ffi::c_void, fps: i32) {
++    #[cfg(target_os = "android")]
++    screen::set(window, fps);
++    #[cfg(not(target_os = "android"))]
++    let _ = (window, fps);
++}
++
++#[cfg(target_os = "android")]
++mod screen {
++    use std::ffi::c_void;
++    use std::sync::{Mutex, OnceLock};
++    use std::time::{Duration, Instant};
++
++    type SetFrameRate = unsafe extern "C" fn(*mut c_void, f32, i8) -> i32;
++
++    fn function() -> Option<SetFrameRate> {
++        static FUNCTION: OnceLock<Option<SetFrameRate>> = OnceLock::new();
++        *FUNCTION.get_or_init(|| {
++            // SAFETY: dlopen/dlsym with NUL-terminated names; the symbol, when there,
++            // has the NDK's signature above.
++            unsafe {
++                let lib = libc::dlopen(c"libandroid.so".as_ptr(), libc::RTLD_NOW);
++                if lib.is_null() {
++                    return None;
++                }
++                let f = libc::dlsym(lib, c"ANativeWindow_setFrameRate".as_ptr());
++                if f.is_null() {
++                    None
++                } else {
++                    Some(std::mem::transmute::<*mut libc::c_void, SetFrameRate>(f))
++                }
++            }
++        })
++    }
++
++    pub(super) fn set(window: *mut c_void, fps: i32) {
++        // The last window, cap and time it was sent. The vote belongs to the
++        // surface: after the app comes back a new window can sit at the old
++        // address, so the same cap is sent again every few seconds as well, and
++        // no window forgets what was sent.
++        static LAST: Mutex<(usize, i32, Option<Instant>)> = Mutex::new((0, i32::MIN, None));
++        let Ok(mut last) = LAST.lock() else {
++            return;
++        };
++        if window.is_null() {
++            *last = (0, i32::MIN, None);
++            return;
++        }
++        let fresh = last
++            .2
++            .is_some_and(|sent| sent.elapsed() < Duration::from_secs(3));
++        if (last.0, last.1) == (window as usize, fps) && fresh {
++            return;
++        }
++        *last = (window as usize, fps, Some(Instant::now()));
++        let Some(set_frame_rate) = function() else {
++            return;
++        };
++        let rate = if (1..260).contains(&fps) { fps as f32 } else { 0.0 };
++        // SAFETY: the caller holds a reference to the live window for the call;
++        // compatibility 0 is ANATIVEWINDOW_FRAME_RATE_COMPATIBILITY_DEFAULT.
++        unsafe {
++            set_frame_rate(window, rate, 0);
++        }
++    }
++}
++
+ #[cfg(target_os = "android")]
+ mod adpf {
+     use std::sync::OnceLock;
+-- 
+2.49.0.windows.1
+

@@ -1,0 +1,271 @@
+From 16615be6322650d346ca97739fd5f07e247db3c6 Mon Sep 17 00:00:00 2001
+From: oneshot <oneshot@localhost>
+Date: Fri, 13 Nov 2026 00:42:34 +0300
+Subject: [PATCH] android: pace chunk arrival to what the device takes in
+
+ChunkBatchReceived answered a fixed 64 chunks a tick, so the server sent a
+whole view in half a second; and once the received backlog was 50 ms old
+(two frames at 30 fps) poll_remote inserted all of it in one frame. On a
+Snapdragon 695 that was the 200-500 ms frames after a world opens.
+
+- The reply is ChunkBatchSizeCalculator's: the window thread's time per
+  inserted column, averaged over the batches, gives the chunks a tick that
+  fit 2.5 ms a tick while playing (7 ms behind the loading screen).
+- An overdue backlog gets 4 ms of chunk packets a frame instead of no
+  limit; the loading screen gets 8 ms.
+
+Co-Authored-By: Claude Opus 5.5 <noreply@anthropic.com>
+---
+ crates/horizon-client/src/game/remote.rs      | 141 ++++++++++++++++--
+ .../horizon-client/src/game/remote_chunks.rs  |   8 +-
+ 2 files changed, 132 insertions(+), 17 deletions(-)
+
+diff --git a/crates/horizon-client/src/game/remote.rs b/crates/horizon-client/src/game/remote.rs
+index 6fbfde7f..f194c735 100644
+--- a/crates/horizon-client/src/game/remote.rs
++++ b/crates/horizon-client/src/game/remote.rs
+@@ -766,6 +766,12 @@ pub(super) struct Remote {
+     /// the oldest of them first waited (`poll_remote`).
+     backlog: VecDeque<Received>,
+     backlog_since: Option<Instant>,
++    /// The window thread's and the decoder's time on the columns of the
++    /// batch being received (since its `ChunkBatchStart`), and the rates
++    /// each keeps up with, which the client answers its end with.
++    batch_nanos: Option<(Duration, Duration)>,
++    chunk_pace: ChunkPace,
++    decode_pace: ChunkPace,
+     /// `ClientboundTransferPacket`'s target: when the connection ends the
+     /// game connects here, the stored cookies carried over (`TransferState`).
+     transfer: Option<String>,
+@@ -783,10 +789,74 @@ pub(super) struct Remote {
+ /// time the player crossed a chunk border at 32 chunks; they decode on the
+ /// chunk decoder's thread now, and the frame only inserts them.
+ const CHUNK_PACKETS_PER_FRAME: Duration = Duration::from_millis(1);
+-/// Events that have waited this long are all handled in the next frame,
+-/// whatever inserting their columns costs, up to a column still decoding:
+-/// the packets after a slow machine's chunks don't wait on its frames.
++/// Events that have waited this long get `OVERDUE_CHUNK_BUDGET` of chunk
++/// packets in the next frame instead of `CHUNK_PACKETS_PER_FRAME`, up to a
++/// column still decoding: the packets after a slow machine's chunks don't
++/// wait long on its frames. Not the whole backlog at once: on a phone at
++/// 30 fps every arriving backlog is overdue after two frames, and inserting
++/// all of it was a 200-500 ms frame.
+ const BACKLOG_LIMIT: Duration = Duration::from_millis(50);
++/// The chunk packets of a frame whose backlog is overdue.
++const OVERDUE_CHUNK_BUDGET: Duration = Duration::from_millis(4);
++/// The chunk packets of a frame behind the level loading screen, which
++/// draws little and takes no input.
++const LOADING_CHUNK_BUDGET: Duration = Duration::from_millis(8);
++
++/// ChunkBatchReceived's rate (ChunkBatchSizeCalculator), from the
++/// window thread's time inserting a batch's columns (`ChunkBatchStart` to
++/// `ChunkBatchFinished`), and the decoder's thread's time decoding them,
++/// whichever keeps up with fewer. A fixed
++/// ceiling of 64 chunks a tick let the server send a whole view (hundreds
++/// of columns) in half a second, faster than a phone takes them in; the
++/// reply keeps a tick's chunks to `PLAY_NANOS` of this thread
++/// (`LOADING_NANOS` behind the loading screen), what the frames' chunk
++/// budgets take in at 30 fps.
++#[derive(Clone, Copy, Debug)]
++pub(super) struct ChunkPace {
++    nanos_per_chunk: f64,
++    samples: u32,
++}
++
++impl ChunkPace {
++    /// A tick's chunks while the player plays: 50 ms a second at 20 ticks.
++    pub(super) const PLAY_NANOS: f64 = 2_500_000.0;
++    /// A tick's chunks behind the level loading screen.
++    pub(super) const LOADING_NANOS: f64 = 7_000_000.0;
++    /// A tick's chunks on the decoder's thread, which decodes nothing else:
++    /// half of the tick, so a column waits for it rarely.
++    pub(super) const DECODER_NANOS: f64 = 25_000_000.0;
++    /// The first guess, before any batch was measured: 5 chunks a tick
++    /// while playing, 14 while loading.
++    const START_NANOS: f64 = 500_000.0;
++    /// The batches the average weighs at most.
++    const MAX_SAMPLES: u32 = 49;
++    const MAX_RATE: f32 = 64.0;
++    const MIN_RATE: f32 = 1.0;
++
++    pub(super) const fn new() -> Self {
++        Self { nanos_per_chunk: Self::START_NANOS, samples: 1 }
++    }
++
++    /// A batch of `size` chunks took `nanos`. One odd batch (a frame
++    /// stalled by something else) moves the average at most threefold.
++    pub(super) fn batch(&mut self, size: i32, nanos: f64) {
++        if size <= 0 || !nanos.is_finite() || nanos < 0.0 {
++            return;
++        }
++        let avg = self.nanos_per_chunk;
++        let per = (nanos / f64::from(size)).clamp(avg / 3.0, avg * 3.0);
++        let n = f64::from(self.samples);
++        self.nanos_per_chunk = (avg * n + per) / (n + 1.0);
++        self.samples = (self.samples + 1).min(Self::MAX_SAMPLES);
++    }
++
++    /// The chunks a tick to ask the server for, for `tick_nanos` of this
++    /// thread a tick.
++    pub(super) fn chunks_per_tick(&self, tick_nanos: f64) -> f32 {
++        let rate = tick_nanos / self.nanos_per_chunk.max(1_000.0);
++        (rate as f32).clamp(Self::MIN_RATE, Self::MAX_RATE)
++    }
++}
+ /// The open menu name of a server's horse inventory, then its chest's
+ /// columns (the packet names no `MenuType`).
+ const MOUNT_MENU: &str = "horizon:mount";
+@@ -1234,6 +1304,9 @@ impl Game<'_> {
+             chunk_center: (0, 0),
+             backlog: VecDeque::new(),
+             backlog_since: None,
++            batch_nanos: None,
++            chunk_pace: ChunkPace::new(),
++            decode_pace: ChunkPace::new(),
+             server_links: Vec::new(),
+             debug_query: Default::default(),
+             transfer: None,
+@@ -1927,9 +2000,10 @@ impl Game<'_> {
+ 
+     /// Process what the network thread received (once per frame, like the
+     /// client's packet processor), in order. Chunk packets get
+-    /// `CHUNK_PACKETS_PER_FRAME`: once a frame has spent it, the events from
+-    /// the next chunk packet on wait for the next frame, unless they have
+-    /// already waited `BACKLOG_LIMIT`. A chunk packet still decoding holds
++    /// `CHUNK_PACKETS_PER_FRAME` (`OVERDUE_CHUNK_BUDGET` once they have
++    /// waited `BACKLOG_LIMIT`, `LOADING_CHUNK_BUDGET` behind the loading
++    /// screen): once a frame has spent it, the events from the next chunk
++    /// packet on wait for the next frame. A chunk packet still decoding holds
+     /// back what follows it.
+     pub(super) fn poll_remote(&mut self) -> Result<()> {
+         let Some(r) = self.remote.as_mut() else {
+@@ -1952,6 +2026,13 @@ impl Game<'_> {
+         let overdue = r
+             .backlog_since
+             .is_some_and(|since| since.elapsed() >= BACKLOG_LIMIT);
++        let budget = if r.level_load.is_active() {
++            LOADING_CHUNK_BUDGET
++        } else if overdue {
++            OVERDUE_CHUNK_BUDGET
++        } else {
++            CHUNK_PACKETS_PER_FRAME
++        };
+         let mut chunks = Duration::ZERO;
+         // A run of ForgetLevelChunk (thousands when the server's view moves far: a
+         // teleport at 32 chunks) is forgotten at once, before whatever follows it.
+@@ -1966,7 +2047,7 @@ impl Game<'_> {
+             }
+             self.forget_remote_columns(&mut forgotten);
+             let chunk = matches!(item, Received::Chunk(_));
+-            if chunk && !overdue && chunks >= CHUNK_PACKETS_PER_FRAME {
++            if chunk && chunks >= budget {
+                 events.push_front(item);
+                 break;
+             }
+@@ -1980,7 +2061,14 @@ impl Game<'_> {
+                         break;
+                     };
+                     let (packet, column) = match next {
+-                        Next::Ready(decoded) => decoded,
++                        Next::Ready((packet, column, decoding)) => {
++                            if let Some(r) = self.remote.as_mut()
++                                && let Some((_, decode)) = r.batch_nanos.as_mut()
++                            {
++                                *decode += decoding;
++                            }
++                            (packet, column)
++                        }
+                         Next::Decoding => {
+                             events.push_front(Received::Chunk(format));
+                             break;
+@@ -1994,7 +2082,11 @@ impl Game<'_> {
+                     if let C::LevelChunkWithLight(p) = *packet {
+                         self.remote_chunk(&p, Some((&format, column)));
+                     }
+-                    chunks += started.map_or(Duration::ZERO, |t| t.elapsed());
++                    let spent = started.map_or(Duration::ZERO, |t| t.elapsed());
++                    chunks += spent;
++                    if let Some((insert, _)) = self.remote.as_mut().and_then(|r| r.batch_nanos.as_mut()) {
++                        *insert += spent;
++                    }
+                     continue;
+                 }
+             };
+@@ -3515,11 +3607,32 @@ impl Game<'_> {
+             C::ForgetLevelChunk(p) => {
+                 self.forget_remote_columns(&mut [(p.pos[0], p.pos[1])].into_iter().collect());
+             }
+-            C::ChunkBatchFinished(_) => {
+-                // ChunkBatchSizeCalculator's ceiling; meshing runs on workers.
+-                self.send(S::ChunkBatchReceived(play::ChunkBatchReceived {
+-                    chunks_per_tick: 64.0,
+-                }));
++            C::ChunkBatchStart(_) => {
++                if let Some(r) = self.remote.as_mut() {
++                    r.batch_nanos = Some((Duration::ZERO, Duration::ZERO));
++                }
++            }
++            C::ChunkBatchFinished(p) => {
++                // ChunkBatchSizeCalculator: the rate this client keeps up with.
++                let chunks_per_tick = self.remote.as_mut().map_or(1.0, |r| {
++                    // A batch whose columns were not measured (decoded in the frame, with
++                    // no decoder thread) says nothing of the pace.
++                    if let Some((insert, decode)) = r.batch_nanos.take()
++                        && !insert.is_zero()
++                    {
++                        r.chunk_pace.batch(p.size, insert.as_nanos() as f64);
++                        r.decode_pace.batch(p.size, decode.as_nanos() as f64);
++                    }
++                    let tick = if r.level_load.is_active() {
++                        ChunkPace::LOADING_NANOS
++                    } else {
++                        ChunkPace::PLAY_NANOS
++                    };
++                    // The decoder has a thread of its own: half of each tick.
++                    let decoder = r.decode_pace.chunks_per_tick(ChunkPace::DECODER_NANOS);
++                    r.chunk_pace.chunks_per_tick(tick).min(decoder)
++                });
++                self.send(S::ChunkBatchReceived(play::ChunkBatchReceived { chunks_per_tick }));
+             }
+             C::BlockUpdate(p) => self.server_block(p.pos, p.state),
+             C::AddTransientBlock(p) => self.add_transient_block(p.pos, p.state),
+diff --git a/crates/horizon-client/src/game/remote_chunks.rs b/crates/horizon-client/src/game/remote_chunks.rs
+index 58f0f956..286cc2d7 100644
+--- a/crates/horizon-client/src/game/remote_chunks.rs
++++ b/crates/horizon-client/src/game/remote_chunks.rs
+@@ -184,7 +184,8 @@ impl ChunkFormat {
+     }
+ }
+ 
+-type Decoded = (Box<C>, Result<Chunk, String>);
++/// A packet, its column, and the decoder thread's time on it.
++type Decoded = (Box<C>, Result<Chunk, String>, std::time::Duration);
+ 
+ /// One thread that decodes chunk packets in the order they arrived; its
+ /// results come back in that order, one per `submit`.
+@@ -205,11 +206,12 @@ impl ChunkDecoder {
+                 // thread's own work.
+                 horizon_threads::favour_current();
+                 for (format, packet) in todo {
++                    let started = std::time::Instant::now();
+                     let column = match &*packet {
+                         C::LevelChunkWithLight(p) => format.column(p),
+                         _ => Err("not a chunk packet".into()),
+                     };
+-                    if finished.send((packet, column)).is_err() {
++                    if finished.send((packet, column, started.elapsed())).is_err() {
+                         break;
+                     }
+                 }
+@@ -413,7 +415,7 @@ mod tests {
+             assert!(decoder.submit(format.clone(), packet(x, 1 + x)).is_none());
+         }
+         for x in 0..20 {
+-            let (packet, column) = loop {
++            let (packet, column, _) = loop {
+                 match decoder.next() {
+                     Next::Ready(decoded) => break decoded,
+                     Next::Decoding => std::thread::yield_now(),
+-- 
+2.49.0.windows.1
+
