@@ -1,0 +1,94 @@
+From bf01d453bed4417e01a8abd2cd967d497730343b Mon Sep 17 00:00:00 2001
+From: oneshot <oneshot@localhost>
+Date: Thu, 12 Nov 2026 12:26:18 +0300
+Subject: [PATCH] 0034 touch: taps never raise the shield, weapon taps always
+ hit, view turns while breaking
+
+Co-Authored-By: Claude Fable 5.2 <noreply@anthropic.com>
+---
+ crates/horizon-client/src/game/remote.rs |  4 ++++
+ crates/horizon-client/src/game/shield.rs |  2 +-
+ crates/horizon-client/src/game/touch.rs  | 23 ++++++++++++++++++++---
+ 3 files changed, 25 insertions(+), 4 deletions(-)
+
+diff --git a/crates/horizon-client/src/game/remote.rs b/crates/horizon-client/src/game/remote.rs
+index ac0c3d6d..16ac1fe7 100644
+--- a/crates/horizon-client/src/game/remote.rs
++++ b/crates/horizon-client/src/game/remote.rs
+@@ -8740,6 +8740,10 @@ impl Game<'_> {
+         if self.native_input.claimant(&held.item).is_some() {
+             return false;
+         }
++        // Touch: a shield is raised by sneaking only, so no use is sent for it.
++        if self.touch_shield_barred(&held) {
++            return false;
++        }
+         let seq = self.next_sequence();
+         self.send(S::UseItem(play::UseItem {
+             hand: hand_id(hand),
+diff --git a/crates/horizon-client/src/game/shield.rs b/crates/horizon-client/src/game/shield.rs
+index 2e6d89c3..d299c64e 100644
+--- a/crates/horizon-client/src/game/shield.rs
++++ b/crates/horizon-client/src/game/shield.rs
+@@ -43,7 +43,7 @@ impl Game<'_> {
+         let Some(stack) = self.stack_in(slot) else {
+             return false;
+         };
+-        if self.blocks_attacks(stack).is_none() {
++        if self.blocks_attacks(stack).is_none() || self.touch_shield_barred(stack) {
+             return false;
+         }
+         if self.shield_cooldown == 0 {
+diff --git a/crates/horizon-client/src/game/touch.rs b/crates/horizon-client/src/game/touch.rs
+index 2856650a..94f501d3 100644
+--- a/crates/horizon-client/src/game/touch.rs
++++ b/crates/horizon-client/src/game/touch.rs
+@@ -1328,6 +1328,16 @@ impl Game<'_> {
+         self.send_creative_slots();
+     }
+ 
++    /// On touch a shield is raised by sneaking only (Bedrock): any other use of
++    /// the player's own (a tap that missed a mob, a tap on a block) leaves it down,
++    /// so taps with a sword beside it only ever hit. Not for a guest's use.
++    pub(super) fn touch_shield_barred(&self, stack: &horizon_client::items::ItemStack) -> bool {
++        &*stack.item == "minecraft:shield"
++            && self.guest_use.is_none()
++            && self.touch_controls_shown()
++            && !self.touch.shield_up
++    }
++
+     fn touch_controls_shown(&self) -> bool {
+         cfg!(target_os = "android") && self.player.is_some() && !self.pad_in_menu() && !self.touch.hardware
+     }
+@@ -2648,10 +2658,13 @@ impl Game<'_> {
+                 Some(Finger::Look { last, start, since, moved, attacking })
+                     if attacking && self.touch.layout.aim == Aim::Touch =>
+                 {
+-                    // Breaking: the target follows the finger, the view stays.
++                    // Breaking or hitting (Bedrock): the finger still turns the view,
++                    // and the target is what is under it.
++                    let (dx, dy) = (pos[0] - last[0], pos[1] - last[1]);
+                     self.touch.fingers.insert(id, Finger::Look { last: pos, start: pos, since, moved, attacking });
++                    self.touch_look(dx, dy);
+                     self.touch.aim_at = self.touch_ndc(pos);
+-                    let _ = (last, start);
++                    let _ = start;
+                 }
+                 Some(Finger::Look { last, start, since, moved, attacking }) => {
+                     let (dx, dy) = (pos[0] - last[0], pos[1] - last[1]);
+@@ -2852,7 +2865,11 @@ impl Game<'_> {
+                         self.touch.aim_at = self.touch_ndc(pos);
+                         self.touch.aim_frames = 4;
+                     }
+-                    let i = if self.pick_entity_hit().is_some() { 1 } else { 0 };
++                    // A weapon in hand swings at the air too: every tap is a hit,
++                    // unless it is on a block (a door, a chest), which is used.
++                    let weapon = self.inventory[self.selected].is_some()
++                        && self.touch_main_free(self.inventory[self.selected].as_ref());
++                    let i = if self.pick_entity_hit().is_some() || weapon && self.pick().is_none() { 1 } else { 0 };
+                     let resting = self.touch.shield_up
+                         || self.touch.shield_down_at.elapsed().as_millis() < SHIELD_REST_MS;
+                     if i == 1 && resting {
+-- 
+2.49.0.windows.1
+
