@@ -1,0 +1,667 @@
+From 8abc1cc8c1ac5dc28029ea4d84e0d33d793e2372 Mon Sep 17 00:00:00 2001
+From: oneshot <oneshot@localhost>
+Date: Thu, 12 Nov 2026 04:08:18 +0300
+Subject: [PATCH] 0033 touch: shield only while sneaking, split-stack slider,
+ action button labels
+
+---
+ .../assets/horizon/lang/en_us.json            |  20 +
+ .../assets/horizon/lang/ru_ru.json            |  20 +
+ crates/horizon-client/src/game/touch.rs       | 435 ++++++++++++++++--
+ 3 files changed, 443 insertions(+), 32 deletions(-)
+
+diff --git a/crates/horizon-client/assets/horizon/lang/en_us.json b/crates/horizon-client/assets/horizon/lang/en_us.json
+index d5ee53a4..15fa238e 100644
+--- a/crates/horizon-client/assets/horizon/lang/en_us.json
++++ b/crates/horizon-client/assets/horizon/lang/en_us.json
+@@ -1,4 +1,24 @@
+ {
++  "horizon.touch.action.fish": "Fish",
++  "horizon.touch.action.reel": "Reel In",
++  "horizon.touch.action.leash": "Leash",
++  "horizon.touch.action.unleash": "Unleash",
++  "horizon.touch.action.tie": "Tie",
++  "horizon.touch.action.name": "Name",
++  "horizon.touch.action.shear": "Shear",
++  "horizon.touch.action.milk": "Milk",
++  "horizon.touch.action.stew": "Fill Bowl",
++  "horizon.touch.action.bucket": "Scoop",
++  "horizon.touch.action.saddle": "Saddle",
++  "horizon.touch.action.dye": "Dye",
++  "horizon.touch.action.tame": "Tame",
++  "horizon.touch.action.feed": "Feed",
++  "horizon.touch.action.sit": "Sit",
++  "horizon.touch.action.stand": "Stand",
++  "horizon.touch.action.repair": "Repair",
++  "horizon.touch.action.ride": "Ride",
++  "horizon.touch.action.trade": "Trade",
++  "horizon.touch.action.open": "Open",
+   "horizon.extras.header.world": "World",
+   "horizon.extras.pregen": "Chunk pregeneration",
+   "horizon.extras.pregen.tooltip": "Enables /pregen in your single-player and LAN worlds. With cheats enabled, use /pregen start to generate an area before exploring it. Does not enable the command on servers you join.",
+diff --git a/crates/horizon-client/assets/horizon/lang/ru_ru.json b/crates/horizon-client/assets/horizon/lang/ru_ru.json
+index c374a43e..04736b02 100644
+--- a/crates/horizon-client/assets/horizon/lang/ru_ru.json
++++ b/crates/horizon-client/assets/horizon/lang/ru_ru.json
+@@ -1,4 +1,24 @@
+ {
++  "horizon.touch.action.fish": "Ловить рыбу",
++  "horizon.touch.action.reel": "Вытащить",
++  "horizon.touch.action.leash": "Привязать",
++  "horizon.touch.action.unleash": "Отвязать",
++  "horizon.touch.action.tie": "Привязать",
++  "horizon.touch.action.name": "Назвать",
++  "horizon.touch.action.shear": "Подстричь",
++  "horizon.touch.action.milk": "Подоить",
++  "horizon.touch.action.stew": "Набрать суп",
++  "horizon.touch.action.bucket": "Поймать",
++  "horizon.touch.action.saddle": "Надеть седло",
++  "horizon.touch.action.dye": "Покрасить",
++  "horizon.touch.action.tame": "Приручить",
++  "horizon.touch.action.feed": "Покормить",
++  "horizon.touch.action.sit": "Сидеть",
++  "horizon.touch.action.stand": "Встать",
++  "horizon.touch.action.repair": "Починить",
++  "horizon.touch.action.ride": "Сесть",
++  "horizon.touch.action.trade": "Торговать",
++  "horizon.touch.action.open": "Открыть",
+   "horizon.options.controller": "Геймпад",
+   "horizon.options.vibration": "Вибрация",
+   "horizon.options.adaptive_triggers": "Адаптивные триггеры",
+diff --git a/crates/horizon-client/src/game/touch.rs b/crates/horizon-client/src/game/touch.rs
+index 86e6e162..2856650a 100644
+--- a/crates/horizon-client/src/game/touch.rs
++++ b/crates/horizon-client/src/game/touch.rs
+@@ -94,18 +94,24 @@ enum Finger {
+ 
+ /// How long a finger stays on a hotbar slot to drop its stack.
+ const DROP_MS: u128 = 500;
+-
+-/// The entities the interact button is shown for: those a use rides, trades
+-/// with or opens, by their id's path.
+-fn interactive(path: &str) -> bool {
+-    matches!(
+-        path,
+-        "villager" | "wandering_trader" | "horse" | "donkey" | "mule" | "skeleton_horse"
+-            | "zombie_horse" | "camel" | "camel_husk" | "llama" | "trader_llama" | "pig"
+-            | "strider" | "happy_ghast" | "nautilus" | "zombie_nautilus" | "minecart"
+-    ) || path.ends_with("_boat")
+-        || path.ends_with("_raft")
+-        || path.ends_with("_minecart")
++/// How long a lowered shield stays down before a hit: two ticks, so the tick that
++/// lets it go (which drains clicks) is past.
++const SHIELD_REST_MS: u128 = 120;
++/// The count bar's width in GUI pixels.
++const SPLIT_W: f32 = 70.0;
++
++/// What a plain use does to an entity, by its id's path, for the action button:
++/// rides, trades with or opens it.
++fn interactive(path: &str) -> Option<&'static str> {
++    match path {
++        "villager" | "wandering_trader" => Some("trade"),
++        "chest_minecart" | "hopper_minecart" => Some("open"),
++        "horse" | "donkey" | "mule" | "skeleton_horse" | "zombie_horse" | "camel" | "camel_husk"
++        | "llama" | "trader_llama" | "pig" | "strider" | "happy_ghast" | "nautilus"
++        | "zombie_nautilus" | "minecart" => Some("ride"),
++        _ if path.ends_with("_boat") || path.ends_with("_raft") => Some("ride"),
++        _ => None,
++    }
+ }
+ 
+ /// A ring of dots filling clockwise from the top: `frac` of it bright, the rest dim.
+@@ -655,12 +661,24 @@ pub(super) struct Touches {
+     /// When a finger held on an entity last hit it (Bedrock attacks again and again
+     /// while the finger stays on the mob).
+     last_hit: Option<Instant>,
++    /// The shield is held up by sneaking (Bedrock), and when it last went down: a
++    /// hit while it is up (or the tick it is let go) is drained, as vanilla drains
++    /// attack clicks while an item is used, so hits wait until it has been down a while.
++    shield_up: bool,
++    shield_down_at: Instant,
++    /// A tap's hit put off until the shield is down: when it was asked for and the
++    /// point it aims at.
++    pending_hit: Option<(Instant, Option<[f32; 2]>)>,
+     /// The menu finger over a screen with slots: what it turned out to be, where
+     /// (window px) and when it went down, and the slot it went down on.
+     menu: MenuTouch,
+     menu_start: [f64; 2],
+     menu_since: Instant,
+     menu_slot: Option<usize>,
++    /// Where the menu finger is now (window px), and where it stood when a split
++    /// began: the count follows how far it went sideways since.
++    menu_pos: [f64; 2],
++    split_x0: f64,
+ }
+ 
+ /// A finger on a screen with slots (Bedrock's inventory): a tap moves a stack across
+@@ -676,6 +694,9 @@ enum MenuTouch {
+     Drag,
+     /// Not over a slot (buttons, tabs, the scrollbar): the mouse as before.
+     Legacy,
++    /// Held still on a stack (Bedrock): a bar picks how many of `max` to take, the
++    /// finger sliding sideways; letting go takes `n` into the hand.
++    Split { n: u32, max: u32 },
+ }
+ 
+ impl Default for Touches {
+@@ -712,10 +733,15 @@ impl Default for Touches {
+             scroll_acc: 0.0,
+             scrolled: false,
+             last_hit: None,
++            shield_up: false,
++            shield_down_at: Instant::now(),
++            pending_hit: None,
+             menu: MenuTouch::Legacy,
+             menu_start: [0.0; 2],
+             menu_since: Instant::now(),
+             menu_slot: None,
++            menu_pos: [0.0; 2],
++            split_x0: 0.0,
+             buttons: if cfg!(target_os = "android") { load_buttons() } else { Vec::new() },
+             selected_button: None,
+         }
+@@ -1225,6 +1251,58 @@ impl Game<'_> {
+         matches!(self.screen, super::Screen::Inventory | super::Screen::Creative) && !self.dialog_open()
+     }
+ 
++    /// The menu finger held still on a stack of more than one for a hold: the count
++    /// bar opens, halfway (Bedrock). Not on the creative grid, a result slot or with
++    /// a stack already in hand.
++    fn touch_split_begin(&mut self) {
++        let hold = u128::from(self.touch.layout.hold_ms);
++        if self.touch.menu != MenuTouch::Pending
++            || self.touch.menu_since.elapsed().as_millis() < hold
++            || self.carried.is_some()
++            || !self.touch_slot_screen()
++        {
++            return;
++        }
++        let Some(i) = self.touch.menu_slot else { return };
++        // Only slots that take the extra back: the inventory, the crafting grid and
++        // a container's own slots (not a furnace's output, a crafter's result, a
++        // station or a mod's screen, whose outputs refuse it).
++        let kind = self.container_kind();
++        let output = match kind {
++            Some(super::BlockEntity::Furnace(_)) => i == 302,
++            Some(super::BlockEntity::Crafter(_)) => i == 309,
++            _ => false,
++        };
++        let plain = i < 36 || (100..109).contains(&i) || (300..500).contains(&i) && !output;
++        if !plain || self.native_screen_slots().is_some() || (self.creative_tab_open() && i < 9) {
++            return;
++        }
++        let max = self.slot_view(i).map_or(0, |s| s.count);
++        if max > 1 {
++            self.touch.split_x0 = self.touch.menu_pos[0];
++            self.touch.menu = MenuTouch::Split { n: max.div_ceil(2), max };
++        }
++    }
++
++    /// The count bar over the finger while a split is picked.
++    fn draw_touch_split(&self, batch: &mut HudBatch, scale: f32) {
++        let MenuTouch::Split { n, max } = self.touch.menu else { return };
++        let atlas = &self.gui.atlas;
++        let p = self.touch.menu_pos;
++        let (fx, fy) = ((p[0] / f64::from(scale)) as f32, (p[1] / f64::from(scale)) as f32);
++        let (w, h) = (SPLIT_W, 10.0);
++        let x = (fx - w / 2.0).clamp(2.0, (batch.width - w - 2.0).max(2.0)).round();
++        let y = (fy - 34.0).max(2.0).round();
++        batch.fill(atlas, x - 1.0, y - 1.0, w + 2.0, h + 2.0, rgba(16, 16, 16, 235));
++        batch.fill(atlas, x, y, w, h, rgba(70, 70, 70, 235));
++        let filled = (w * n as f32 / max as f32).round();
++        batch.fill(atlas, x, y, filled, h, rgba(76, 175, 80, 255));
++        batch.fill(atlas, x, y, filled, 1.0, rgba(129, 199, 132, 255));
++        let label = format!("{n}/{max}");
++        let tw = HudBatch::text_width(atlas, &label);
++        batch.text(atlas, &label, (x + (w - tw) / 2.0).round(), y + 1.0, 0xFFFF_FFFF, true);
++    }
++
+     /// The slot under a point in GUI pixels.
+     fn touch_slot_under(&self, p: [f32; 2]) -> Option<usize> {
+         let batch = self.gui_scale()?;
+@@ -1301,6 +1379,7 @@ impl Game<'_> {
+ 
+     /// Every finger lifted at once (the app went to the background): nothing stays held.
+     pub(super) fn touch_release_all(&mut self) {
++        self.touch.pending_hit = None;
+         let held: Vec<usize> = self.touch.fingers.values().filter_map(|f| if let Finger::Custom(i) = f { Some(*i) } else { None }).collect();
+         for i in held {
+             self.touch_custom(i, false);
+@@ -1356,6 +1435,9 @@ impl Game<'_> {
+             square(batch, atlas, c, r, false, 1.0);
+             icon(batch, atlas, Id::Edit, c, r, INK);
+         }
++        if let Some((_, scale)) = self.touch_gui() {
++            self.draw_touch_split(batch, scale);
++        }
+         if !self.touch_controls_shown() {
+             return;
+         }
+@@ -1588,6 +1670,10 @@ impl Game<'_> {
+     /// let go, a finger held still starts breaking, the soft keyboard follows
+     /// text focus and its text goes to the focused field.
+     pub(super) fn touch_frame(&mut self) {
++        if self.touch.menu == MenuTouch::Pending {
++            // A finger held still sends no events: the bar comes up from here.
++            self.touch_split_begin();
++        }
+         for i in 0..2 {
+             if self.touch.trigger_release[i] > 0 {
+                 self.touch.trigger_release[i] -= 1;
+@@ -1701,10 +1787,44 @@ impl Game<'_> {
+         if !touch_aim || using && !attack && view_aims {
+             self.touch.aim_at = None;
+         }
+-        // Bedrock's shield: sneaking with a shield in the off hand (beside a weapon
+-        // or an empty hand) holds it up.
+-        if !using && !attack && self.touch.sneaking && self.touch_shield_ready() {
++        if self.screen != super::Screen::Playing {
++            // A menu came up: a waiting hit is dropped, not sent to the menu.
++            self.touch.pending_hit = None;
++        }
++        // A tap's hit that waited for the shield to go down.
++        if let Some((at, aim)) = self.touch.pending_hit
++            && !self.touch.shield_up
++            && at.elapsed().as_millis() >= SHIELD_REST_MS
++            && self.touch.shield_down_at.elapsed().as_millis() >= SHIELD_REST_MS
++        {
++            self.touch.pending_hit = None;
++            if aim.is_some() {
++                self.touch.aim_at = aim;
++                self.touch.aim_frames = 4;
++            }
++            self.pad.injected.triggers[1] = 1.0;
++            self.touch.trigger_release[1] = 3;
++        }
++        // Bedrock's shield: only sneaking holds it up (in either hand, the main hand
++        // free of a use of its own), never a finger held on the world, so a sword
++        // beside it only ever hits. It goes down for a hit and while one waits.
++        let shield = !using
++            && !attack
++            && self.touch.sneaking
++            && !held[1]
++            && self.touch.pending_hit.is_none()
++            && self.touch.trigger_release[1] == 0
++            && self.touch_shield_ready();
++        if shield {
+             held[0] = true;
++        } else if self.touch.shield_up {
++            self.touch.shield_down_at = Instant::now();
++        }
++        self.touch.shield_up = shield;
++        let shield_rested = self.touch.shield_down_at.elapsed().as_millis() >= SHIELD_REST_MS;
++        if held[1] && !shield_rested {
++            // The Attack button held: its press waits until the shield is down a while.
++            held[1] = false;
+         }
+         // A finger held on an entity hits it again and again, as Bedrock, rather than
+         // holding the attack down (which hits once): a hit each time the weapon is
+@@ -1713,7 +1833,7 @@ impl Game<'_> {
+             held[1] = false;
+             let charged = self.legacy_rules() || self.hand_strength.scale(0.0, self.main_hand_attack_speed()) >= 0.95;
+             let spaced = self.touch.last_hit.is_none_or(|t| t.elapsed().as_millis() >= 250);
+-            if charged && spaced && self.touch.trigger_release[1] == 0 && self.pad.injected.triggers[1] == 0.0 {
++            if charged && spaced && shield_rested && self.touch.trigger_release[1] == 0 && self.pad.injected.triggers[1] == 0.0 {
+                 self.pad.injected.triggers[1] = 1.0;
+                 self.touch.trigger_release[1] = 2;
+                 self.touch.last_hit = Some(Instant::now());
+@@ -1761,13 +1881,14 @@ impl Game<'_> {
+         main.is_none_or(|s| s.item.ends_with("_sword") || s.item.ends_with("_axe") || &*s.item == "minecraft:mace")
+     }
+ 
+-    /// A shield in the off hand that a use now raises: playing, and the main hand
+-    /// free of a use of its own.
++    /// A shield that a use now raises: playing, and in the main hand, or in the off
++    /// hand with the main hand free of a use of its own.
+     fn touch_shield_ready(&self) -> bool {
++        let shield = |s: Option<&horizon_client::items::ItemStack>| s.is_some_and(|s| &*s.item == "minecraft:shield");
++        let main = self.inventory[self.selected].as_ref();
+         self.screen == super::Screen::Playing
+             && !self.spectator()
+-            && self.offhand.as_ref().is_some_and(|s| &*s.item == "minecraft:shield")
+-            && self.touch_main_free(self.inventory[self.selected].as_ref())
++            && (shield(main) || shield(self.offhand.as_ref()) && self.touch_main_free(main))
+     }
+ 
+     /// What is under the finger at `start` (window px), or under the crosshair when
+@@ -1804,6 +1925,8 @@ impl Game<'_> {
+             return false;
+         }
+         match &*stack.item {
++            // Raised by sneaking only (Bedrock): a held finger hits and breaks.
++            "minecraft:shield" => return false,
+             "minecraft:bow" => return self.get_projectile(stack).is_some(),
+             "minecraft:crossbow" => {
+                 let loaded = stack.data().is_some_and(|d| !d.charged.is_empty());
+@@ -1814,21 +1937,202 @@ impl Game<'_> {
+         self.use_duration(stack) > 0
+     }
+ 
+-    /// The name of the entity under the crosshair that a use rides, trades with or
+-    /// opens, for the interact button; none while riding, in menus or in the editor.
++    /// The action button's label (Bedrock): what a use does now with the held item
++    /// and the target, as a verb (fish, leash, unleash, shear, ride...); a tap on it
++    /// is a plain use. None in menus or in the editor, or when a use does nothing.
+     fn touch_interact_target(&self) -> Option<String> {
+         if !self.touch_controls_shown()
+             || self.touch.editing
+             || self.screen != super::Screen::Playing
+             || self.spectator()
+-            || self.riding.is_some()
+         {
+             return None;
+         }
+-        let id = self.pick_entity_hit()??;
+-        let kind = self.target_type(self.level_entity(id)?);
+-        let path = kind.strip_prefix("minecraft:")?;
+-        interactive(path).then(|| super::screen_info::tr(&format!("entity.minecraft.{path}"), &[]))
++        self.touch_action()
++            .map(|k| super::screen_info::tr(&format!("horizon.touch.action.{k}"), &[]))
++    }
++
++    fn touch_action(&self) -> Option<&'static str> {
++        // The raised shield holds the use down: a tap would not use again.
++        if self.touch.shield_up {
++            return None;
++        }
++        let main = self.inventory[self.selected].as_ref();
++        let item = main.map_or("", |s| &*s.item);
++        let rod = |s: Option<&horizon_client::items::ItemStack>| s.is_some_and(|s| &*s.item == "minecraft:fishing_rod");
++        // A use acts on the entity first (`interactOn`), the item only if it did nothing.
++        if let Some(id) = self.pick_entity_hit().flatten() {
++            if let Some(m) = self.mobs.iter().find(|m| m.id as i32 == id && !m.removed) {
++                // "" is a use the entity takes but that does nothing to show.
++                if let Some(k) = self.touch_mob_action(m, item, main) {
++                    return (!k.is_empty()).then_some(k);
++                }
++            } else if let Some(b) = self.boats.iter().find(|b| b.id as i32 == id) {
++                use horizon_client::mobs::leash::Holder;
++                if b.leash == Some(Holder::Player) && b.leash_player.is_none_or(|p| p == self.acting_uuid()) {
++                    return Some("unleash");
++                }
++                if item == "minecraft:shears" && b.leash.is_some() {
++                    return Some("unleash");
++                }
++                if item == "minecraft:lead" && b.leash != Some(Holder::Player) {
++                    return Some("leash");
++                }
++                if self.riding.is_none() {
++                    return Some("ride");
++                }
++            } else if self.riding.is_none()
++                && let Some(t) = self.level_entity(id)
++            {
++                // Not simulated here (a server's entity): by its kind alone, and a
++                // mount only with an empty hand (an item may be fed or put on it).
++                let kind = self.target_type(t);
++                if let Some(path) = kind.strip_prefix("minecraft:")
++                    && let Some(k) = interactive(path)
++                    && (k != "ride" || main.is_none() || path.ends_with("_boat") || path.ends_with("_raft") || path == "minecart")
++                {
++                    return Some(k);
++                }
++            }
++        }
++        // Uses of the item itself, with nothing to act on. A fence ties the lead
++        // first (`LeashFenceKnotEntity`), whatever the hand holds.
++        if self.touch_fence_aimed() && self.touch_has_leashed() {
++            return Some("tie");
++        }
++        if rod(main) || main.is_none() && rod(self.offhand.as_ref()) {
++            return Some(if self.hook.is_some() { "reel" } else { "fish" });
++        }
++        None
++    }
++
++    /// A fence under the crosshair (a lead's knot goes on it).
++    fn touch_fence_aimed(&self) -> bool {
++        self.pick().is_some_and(|hit| {
++            let name = &self.res.facts().get(self.world.block(hit.pos[0], hit.pos[1], hit.pos[2])).name;
++            self.res.items().block_tags.get("minecraft:fences").is_some_and(|s| s.contains(&**name))
++        })
++    }
++
++    /// Anything on the player's lead.
++    fn touch_has_leashed(&self) -> bool {
++        use horizon_client::mobs::leash::Holder;
++        let acting = self.acting_uuid();
++        !self.player_leashed(self.player_center()).is_empty()
++            || self.boats.iter().any(|b| b.leash == Some(Holder::Player) && b.leash_player.is_none_or(|p| p == acting))
++    }
++
++    /// What a use does to a simulated mob with this item in the main hand, in the
++    /// order the mob takes it; `Some("")` when the mob takes the use but shows
++    /// nothing worth a label (the item is then not used either), None when the
++    /// use passes on to the item. Only cases that are sure get a label.
++    fn touch_mob_action(
++        &self,
++        m: &horizon_client::mobs::Mob,
++        item: &str,
++        main: Option<&horizon_client::items::ItemStack>,
++    ) -> Option<&'static str> {
++        use horizon_client::mobs::{Species as S, leash::Holder};
++        if !m.alive() {
++            return None;
++        }
++        let acting = self.acting_uuid();
++        let (sp, baby, x) = (m.species(), m.is_baby(), &m.extra);
++        // Mob.interact: a named name tag, then the lead (on it, or shears through
++        // any lead on or from it), then the mob's own use.
++        if item == "minecraft:name_tag" && main.is_some_and(|s| s.custom_name().is_some()) {
++            return Some("name");
++        }
++        if x.leash == Some(Holder::Player) && x.leash_player.is_none_or(|p| p == acting) {
++            return Some("unleash");
++        }
++        if item == "minecraft:shears"
++            && (x.leash.is_some() || self.mobs.iter().any(|o| !o.removed && o.extra.leash == Some(Holder::Mob(m.id))))
++        {
++            return Some("unleash");
++        }
++        if item == "minecraft:lead" && horizon_client::mobs::leash::can_be_leashed(m) {
++            return Some("leash");
++        }
++        let empty = main.is_none();
++        let food = !empty && m.kind.food.iter().any(|f| f.as_str() == item);
++        let full = m.health >= m.attrs.max_health;
++        let takes = food && horizon_client::mobs::ai::takes_food(m);
++        let mine = x.tame && x.owner == Some(acting);
++        match sp {
++            S::Sheep if !x.sheared && !baby && item == "minecraft:shears" => return Some("shear"),
++            S::Sheep if !x.sheared => {
++                let dye = item.strip_prefix("minecraft:").and_then(|i| i.strip_suffix("_dye"));
++                let at = dye.and_then(|d| horizon_client::mobs::render::DYE_NAMES.iter().position(|n| *n == d));
++                if at.is_some_and(|i| i != usize::from(x.color)) {
++                    return Some("dye");
++                }
++            }
++            S::Mooshroom if !baby && item == "minecraft:shears" => return Some("shear"),
++            S::Mooshroom if !baby && item == "minecraft:bowl" => return Some("stew"),
++            S::SnowGolem | S::Bogged if !x.sheared && item == "minecraft:shears" => return Some("shear"),
++            S::Cow | S::Mooshroom | S::Goat if !baby && item == "minecraft:bucket" => return Some("milk"),
++            S::Cod | S::Salmon | S::TropicalFish | S::Pufferfish | S::Axolotl | S::Tadpole
++                if item == "minecraft:water_bucket" =>
++            {
++                return Some("bucket");
++            }
++            S::IronGolem if item == "minecraft:iron_ingot" && !full => return Some("repair"),
++            // Pets: only the plain cases (an empty hand, their own food); their
++            // other items (dye, armour, shears) do things of their own.
++            S::Wolf | S::Cat if mine => {
++                if takes || food && !full {
++                    return Some("feed");
++                }
++                return Some(if empty || food {
++                    if x.sitting { "stand" } else { "sit" }
++                } else {
++                    ""
++                });
++            }
++            S::Parrot if mine => {
++                // A cookie poisons it; a parrot in the air does not sit.
++                if item == "minecraft:cookie" || !m.on_ground {
++                    return Some("");
++                }
++                return Some(if x.sitting { "stand" } else { "sit" });
++            }
++            S::Wolf if !x.tame && item == "minecraft:bone" && !horizon_client::mobs::tame::angry(m) => {
++                return Some("tame");
++            }
++            S::Cat if !x.tame && food => return Some("tame"),
++            S::Parrot if !x.tame && item.ends_with("_seeds") => return Some("tame"),
++            S::Parrot if item == "minecraft:cookie" => return Some(""),
++            _ => {}
++        }
++        if self.riding.is_none() && !baby {
++            let path = m.kind.id.strip_prefix("minecraft:").unwrap_or(&m.kind.id);
++            match interactive(path) {
++                Some("trade") => return Some("trade"),
++                Some("ride") => {
++                    // A mount only takes an empty hand for a ride: an item may be
++                    // fed to it, put on it or make it buck.
++                    let rides = match sp {
++                        S::Pig | S::Strider | S::Camel => x.saddled,
++                        S::HappyGhast => x.body.is_some(),
++                        S::SkeletonHorse | S::ZombieHorse | S::Nautilus | S::ZombieNautilus => x.tame,
++                        _ => true,
++                    };
++                    if empty && rides {
++                        return Some("ride");
++                    }
++                    if matches!(sp, S::Horse | S::Donkey | S::Mule | S::Llama | S::TraderLlama) && !x.tame && !food && !empty {
++                        // An untamed horse bucks at an item it does not eat.
++                        return Some("");
++                    }
++                }
++                _ => {}
++            }
++        }
++        if takes && m.kind.flags.animal && !(sp == S::HappyGhast && !baby) {
++            return Some("feed");
++        }
++        None
+     }
+ 
+     /// The interact button above the hotbar (centre, half width, half height), while shown.
+@@ -2154,6 +2458,7 @@ impl Game<'_> {
+                     let slot = self.touch_slot_screen().then(|| self.touch_slot_under(snapped)).flatten();
+                     self.touch.menu_slot = slot;
+                     self.touch.menu_start = at;
++                    self.touch.menu_pos = at;
+                     self.touch.menu_since = Instant::now();
+                     send(self, cursor(device_id, at));
+                     if slot.is_some() {
+@@ -2262,6 +2567,18 @@ impl Game<'_> {
+                         // The slot screen went away under the finger: it clicks nothing more.
+                         self.touch.menu = MenuTouch::Scroll;
+                     }
++                    self.touch.menu_pos = pos;
++                    if self.touch.menu == MenuTouch::Pending {
++                        // Held long enough before it moved: the count bar, not a drag.
++                        self.touch_split_begin();
++                    }
++                    if let MenuTouch::Split { max, .. } = self.touch.menu {
++                        let s = f64::from(scale);
++                        let step = f64::from((SPLIT_W / max as f32).clamp(1.5, 16.0));
++                        let slid = ((pos[0] - self.touch.split_x0) / s / step).round() as i64;
++                        let n = (i64::from(max.div_ceil(2)) + slid).clamp(1, i64::from(max)) as u32;
++                        self.touch.menu = MenuTouch::Split { n, max };
++                    }
+                     if self.touch.menu == MenuTouch::Pending {
+                         let s = f64::from(scale);
+                         let start = self.touch.menu_start;
+@@ -2431,6 +2748,37 @@ impl Game<'_> {
+                                 tap(self, start);
+                             }
+                         }
++                        MenuTouch::Split { .. } if cancelled => {}
++                        MenuTouch::Split { n, max } => {
++                            // The whole stack up, then one at a time back down (or half
++                            // up first when that is fewer clicks), as a mouse would.
++                            let rtap = |game: &mut Self, at: [f64; 2]| {
++                                game.last_inv_click = None;
++                                send(game, cursor(device_id, at));
++                                send(game, click_with(device_id, ElementState::Pressed, MouseButton::Right));
++                                send(game, click_with(device_id, ElementState::Released, MouseButton::Right));
++                                game.last_inv_click = None;
++                            };
++                            let half = max.div_ceil(2);
++                            let back = if n >= half && n != half {
++                                tap(self, start);
++                                max - n
++                            } else {
++                                rtap(self, start);
++                                half - n
++                            };
++                            for _ in 0..back {
++                                let had = self.carried.as_ref().map_or(0, |c| c.count);
++                                if had == 0 {
++                                    break;
++                                }
++                                rtap(self, start);
++                                // A slot that takes nothing back (an output): stop.
++                                if self.carried.as_ref().map_or(0, |c| c.count) >= had {
++                                    break;
++                                }
++                            }
++                        }
+                         MenuTouch::Pending if cancelled => {}
+                         MenuTouch::Pending => {
+                             let held = self.touch.menu_since.elapsed().as_millis() >= hold;
+@@ -2485,9 +2833,17 @@ impl Game<'_> {
+                 Some(Finger::DragCustom(..)) => save_buttons(&self.touch.buttons),
+                 Some(Finger::Trigger { i, since, .. }) if since.elapsed().as_millis() < hold => {
+                     // A short tap: keep it down a few frames so a tick sees
+-                    // one hit (or one use).
+-                    self.pad.injected.triggers[i] = 1.0;
+-                    self.touch.trigger_release[i] = 3;
++                    // one hit (or one use). A hit waits for a raised shield to rest.
++                    let resting = self.touch.shield_up
++                        || self.touch.shield_down_at.elapsed().as_millis() < SHIELD_REST_MS;
++                    if i == 1 && resting {
++                        if self.touch.pending_hit.is_none() {
++                            self.touch.pending_hit = Some((Instant::now(), None));
++                        }
++                    } else {
++                        self.pad.injected.triggers[i] = 1.0;
++                        self.touch.trigger_release[i] = 3;
++                    }
+                 }
+                 Some(Finger::Look { moved: false, attacking: false, .. }) if touch.phase == TouchPhase::Ended => {
+                     // A tap: attack the entity under the crosshair (Bedrock),
+@@ -2497,8 +2853,19 @@ impl Game<'_> {
+                         self.touch.aim_frames = 4;
+                     }
+                     let i = if self.pick_entity_hit().is_some() { 1 } else { 0 };
+-                    self.pad.injected.triggers[i] = 1.0;
+-                    self.touch.trigger_release[i] = 3;
++                    let resting = self.touch.shield_up
++                        || self.touch.shield_down_at.elapsed().as_millis() < SHIELD_REST_MS;
++                    if i == 1 && resting {
++                        // The raised shield goes down first: a hit while it is up is lost.
++                        // A hit already waiting keeps its time (taps do not push it back).
++                        match &mut self.touch.pending_hit {
++                            Some((_, aim)) => *aim = self.touch.aim_at,
++                            None => self.touch.pending_hit = Some((Instant::now(), self.touch.aim_at)),
++                        }
++                    } else {
++                        self.pad.injected.triggers[i] = 1.0;
++                        self.touch.trigger_release[i] = 3;
++                    }
+                 }
+                 _ => {}
+                 }
+@@ -2729,6 +3096,10 @@ fn cursor(device_id: DeviceId, p: [f64; 2]) -> WindowEvent {
+     }
+ }
+ 
++fn click_with(device_id: DeviceId, state: ElementState, button: MouseButton) -> WindowEvent {
++    WindowEvent::MouseInput { device_id, state, button }
++}
++
+ fn click(device_id: DeviceId, state: ElementState) -> WindowEvent {
+     WindowEvent::MouseInput {
+         device_id,
+-- 
+2.49.0.windows.1
+
