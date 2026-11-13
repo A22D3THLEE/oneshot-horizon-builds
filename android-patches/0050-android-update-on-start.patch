@@ -13,7 +13,7 @@ index 4a848fc..dfd04a2 100644
              b.append(t).append(' ');
          }
 diff --git a/packaging/android/java/dev/horizonlab/horizon/ProfileActivity.java b/packaging/android/java/dev/horizonlab/horizon/ProfileActivity.java
-index c3dc6c8..ed75baa 100644
+index c3dc6c8..a086e5f 100644
 --- a/packaging/android/java/dev/horizonlab/horizon/ProfileActivity.java
 +++ b/packaging/android/java/dev/horizonlab/horizon/ProfileActivity.java
 @@ -72,6 +72,8 @@ public class ProfileActivity extends Activity implements View.OnClickListener {
@@ -67,18 +67,15 @@ index c3dc6c8..ed75baa 100644
                          updateReady = true;
                          versions.setText(Ui.t("Доступно обновление: ", "Update available: ") + r.name);
                          versions.setBackground(Ui.rounded(ProfileActivity.this, Ui.GREEN, 0, 12));
-@@ -482,6 +496,38 @@ public class ProfileActivity extends Activity implements View.OnClickListener {
+@@ -482,6 +496,35 @@ public class ProfileActivity extends Activity implements View.OnClickListener {
          if (join == null) join = Ui.field(this, "");
      }
  
 +    /**
-+     * A new version is out: its name and what is new since this one, once per version (the
-+     * versions button stays green until it is installed).
++     * A new version is out: its name and what is new since this one, on every start like the PC
++     * launcher (the versions button stays green until it is installed).
 +     */
 +    private void offerUpdate(final UpdateActivity.Release r, List<String> changes) {
-+        String code = String.valueOf(r.code);
-+        if (code.equals(Ui.pref(this, "update-offered"))) return;
-+        Ui.setPref(this, "update-offered", code);
 +        LinearLayout box = new LinearLayout(this);
 +        box.setOrientation(LinearLayout.VERTICAL);
 +        int p = Ui.dp(this, 20);
@@ -106,7 +103,7 @@ index c3dc6c8..ed75baa 100644
      // ---- First start, a crash, a link --------------------------------------------------------
  
      /** The last game ended without a clean exit: offer to start again or to send the log. */
-@@ -517,6 +563,7 @@ public class ProfileActivity extends Activity implements View.OnClickListener {
+@@ -517,6 +560,7 @@ public class ProfileActivity extends Activity implements View.OnClickListener {
      private void welcome() {
          final File done = new File(getFilesDir(), "welcome.done");
          if (done.isFile() || !readName().isEmpty()) return;
