@@ -1,8 +1,8 @@
 diff --git a/crates/horizon-client/assets/horizon/lang/en_us.json b/crates/horizon-client/assets/horizon/lang/en_us.json
-index 74669835..5cbabb63 100644
+index 6b7d1b1..8be75cb 100644
 --- a/crates/horizon-client/assets/horizon/lang/en_us.json
 +++ b/crates/horizon-client/assets/horizon/lang/en_us.json
-@@ -454,8 +454,9 @@
+@@ -580,8 +580,9 @@
    "horizon.friends.troubleshooting": "Troubleshooting...",
    "horizon.friends.stopped": "Stopped sharing the invite code.",
    "horizon.friends.short_code_changed": "Someone kept trying a wrong short code, so it changed.",
@@ -14,7 +14,7 @@ index 74669835..5cbabb63 100644
    "horizon.friends.share_failed": "Couldn't share the world: %s",
    "horizon.friends.finding_route": "Finding how friends can reach you…",
 diff --git a/crates/horizon-client/src/game/friends.rs b/crates/horizon-client/src/game/friends.rs
-index 59713aaa..331584e6 100644
+index 9d895f5..c696c59 100644
 --- a/crates/horizon-client/src/game/friends.rs
 +++ b/crates/horizon-client/src/game/friends.rs
 @@ -23,6 +23,8 @@ pub(super) struct Sharing {
@@ -90,10 +90,10 @@ index 59713aaa..331584e6 100644
                      sharing.notice = Some(text.clone());
                      stopped = Some(text);
 diff --git a/crates/horizon-friends/src/guest.rs b/crates/horizon-friends/src/guest.rs
-index 492f4d48..3060ec10 100644
+index bb817d8..4a3ad1b 100644
 --- a/crates/horizon-friends/src/guest.rs
 +++ b/crates/horizon-friends/src/guest.rs
-@@ -226,7 +226,9 @@ fn join_relay(config: &GuestConfig, relay_url: &str, code: &Code) -> Result<Tunn
+@@ -242,7 +242,9 @@ fn join_relay(config: &GuestConfig, relay_url: &str, code: &Code) -> Result<Tunn
                  ErrorCode::HostUnreachable => JoinError::HostUnreachable,
                  ErrorCode::Full => JoinError::Full,
                  ErrorCode::RateLimited => JoinError::RateLimited,
@@ -105,7 +105,7 @@ index 492f4d48..3060ec10 100644
          }
          other => return Err(JoinError::Failed(format!("unexpected answer {other:?}"))),
 diff --git a/crates/horizon-friends/src/host.rs b/crates/horizon-friends/src/host.rs
-index 12380e06..fbdb3c25 100644
+index a76debd..f7d8dec 100644
 --- a/crates/horizon-friends/src/host.rs
 +++ b/crates/horizon-friends/src/host.rs
 @@ -10,15 +10,17 @@ use crate::{
@@ -184,7 +184,7 @@ index 12380e06..fbdb3c25 100644
          });
          let mut threads = Vec::new();
          let s = shared.clone();
-@@ -527,6 +553,14 @@ fn run_relay(shared: Arc<Shared>, relay: String) {
+@@ -567,6 +593,14 @@ fn run_relay(shared: Arc<Shared>, relay: String) {
                          }
                      }
                      Next::Stop => {
@@ -199,7 +199,7 @@ index 12380e06..fbdb3c25 100644
                          shared.publish(None);
                          shared.emit(HostEvent::RelayStopped);
                          break;
-@@ -557,25 +591,81 @@ fn register(shared: &Arc<Shared>, relay_url: &str) -> io::Result<()> {
+@@ -597,25 +631,81 @@ fn register(shared: &Arc<Shared>, relay_url: &str) -> io::Result<()> {
      // the attach connections, whose observed address is the one that counts.
      let (mut control, relay) = connect_relay(relay_url, None)?;
      control.set_read_timeout(Some(Duration::from_secs(70)))?;
@@ -286,7 +286,7 @@ index 12380e06..fbdb3c25 100644
      *shared.control.lock().unwrap() = Some(control.try_clone()?);
      if shared.stopped() {
          let _ = control.shutdown(Shutdown::Both);
-@@ -673,8 +763,18 @@ fn serve_relayed(
+@@ -713,8 +803,18 @@ fn serve_relayed(
          // reads the guest's, so a peer that checks it against its guess and
          // hangs up has had its guess as well.
          Err(_) => {
@@ -308,7 +308,7 @@ index 12380e06..fbdb3c25 100644
                  // Retire the short code: dropping the control connection
 diff --git a/crates/horizon-friends/src/identity.rs b/crates/horizon-friends/src/identity.rs
 new file mode 100644
-index 00000000..f33681b6
+index 0000000..f33681b
 --- /dev/null
 +++ b/crates/horizon-friends/src/identity.rs
 @@ -0,0 +1,249 @@
@@ -562,11 +562,11 @@ index 00000000..f33681b6
 +    }
 +}
 diff --git a/crates/horizon-friends/src/lib.rs b/crates/horizon-friends/src/lib.rs
-index a355122d..207175e6 100644
+index aefa238..5bcc834 100644
 --- a/crates/horizon-friends/src/lib.rs
 +++ b/crates/horizon-friends/src/lib.rs
-@@ -13,6 +13,7 @@ pub mod crypto;
- pub mod direct;
+@@ -15,6 +15,7 @@ pub mod direct;
+ pub mod game;
  pub mod guest;
  pub mod host;
 +pub mod identity;
@@ -574,7 +574,7 @@ index a355122d..207175e6 100644
  pub mod portmap;
  pub mod reach;
 diff --git a/crates/horizon-friends/src/wire.rs b/crates/horizon-friends/src/wire.rs
-index 5991bdf2..9504ed82 100644
+index 5991bdf..9504ed8 100644
 --- a/crates/horizon-friends/src/wire.rs
 +++ b/crates/horizon-friends/src/wire.rs
 @@ -19,6 +19,18 @@ pub enum ToRelay {
