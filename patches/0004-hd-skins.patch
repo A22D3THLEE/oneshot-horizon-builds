@@ -1,0 +1,462 @@
+diff --git a/crates/horizon-client-render/src/hud.rs b/crates/horizon-client-render/src/hud.rs
+index 3c5f071..ba824f2 100644
+--- a/crates/horizon-client-render/src/hud.rs
++++ b/crates/horizon-client-render/src/hud.rs
+@@ -150,6 +150,12 @@ pub const MOD_IMAGE_SIZE: u32 = 1024;
+ /// (`skins::SkinSlots`): skins drawn in the last frame keep theirs, and a
+ /// skin past them shows the default skin until a slot frees up.
+ pub const SKIN_SLOTS: usize = 128;
++/// Atlas slots for HD skins and capes (OneShot), [`HD_SKIN_SIZE`] a side:
++/// a 128x128 skin, or a cape larger than 64x32, takes one of these instead
++/// (`skins::SkinSlots::place_sized`).
++pub const HD_SKIN_SLOTS: usize = 16;
++/// The side of an HD skin slot: twice the 64 of a standard one.
++pub const HD_SKIN_SIZE: u32 = 128;
+ /// Reused by the visible rows of the classic world selector.
+ pub const WORLD_ICON_SLOTS: usize = 32;
+ /// Atlas slots for the pack icons on the pack screen, one per icon drawn
+@@ -932,6 +938,9 @@ impl HudAtlas {
+         for i in 0..SKIN_SLOTS {
+             images.push((format!("horizon/skin{i}"), 64, 64, Vec::new()));
+         }
++        for i in 0..HD_SKIN_SLOTS {
++            images.push((format!("horizon/skin-hd{i}"), HD_SKIN_SIZE, HD_SKIN_SIZE, Vec::new()));
++        }
+         for i in 0..TRIM_SLOTS {
+             images.push((format!("horizon/trim{i}"), trim.0, trim.1, Vec::new()));
+         }
+diff --git a/crates/horizon-client-render/src/skins.rs b/crates/horizon-client-render/src/skins.rs
+index 4fd2bb7..4bd2813 100644
+--- a/crates/horizon-client-render/src/skins.rs
++++ b/crates/horizon-client-render/src/skins.rs
+@@ -721,20 +721,22 @@ pub fn cape(textures: &Textures) -> Option<String> {
+         .map(|hash| cape_location(&hash))
+ }
+ 
+-/// A cape in a 64x64 skin slot: the 64x32 picture (or the older 22x17,
+-/// which has the same layout) in its top half. Vanilla draws a cape of any
+-/// size; a larger one is scaled down to 64x32 here.
++/// A cape in a skin slot: the 64x32 picture (or the older 22x17, which has
++/// the same layout) in the top half of a 64x64 one. Vanilla draws a cape of
++/// any size; a larger one (an HD cape) is scaled to 128x64 in the top half of
++/// a 128x128 slot (`hud::HD_SKIN_SIZE`).
+ pub fn process_cape(width: u32, height: u32, rgba: &[u8]) -> Option<Vec<u8>> {
+     let (w, h) = (width as usize, height as usize);
+     if w == 0 || h == 0 || rgba.len() < w * h * 4 {
+         return None;
+     }
+-    let mut img = vec![0u8; 64 * 64 * 4];
+-    let (fit_w, fit_h) = if w <= 64 && h <= 32 { (w, h) } else { (64, 32) };
++    let hd = crate::hud::HD_SKIN_SIZE as usize;
++    let (side, fit_w, fit_h) = if w <= 64 && h <= 32 { (64, w, h) } else { (hd, hd, hd / 2) };
++    let mut img = vec![0u8; side * side * 4];
+     for y in 0..fit_h {
+         for x in 0..fit_w {
+             let (sx, sy) = (x * w / fit_w, y * h / fit_h);
+-            let (s, d) = ((sy * w + sx) * 4, (y * 64 + x) * 4);
++            let (s, d) = ((sy * w + sx) * 4, (y * side + x) * 4);
+             img[d..d + 4].copy_from_slice(&rgba[s..s + 4]);
+         }
+     }
+@@ -776,7 +778,7 @@ pub fn offline_skin() -> Option<&'static (Vec<u8>, bool)> {
+ fn read_offline_skin(path: &std::path::Path, model: &str) -> Result<(Vec<u8>, bool), String> {
+     let bytes = std::fs::read(path).map_err(|e| e.to_string())?;
+     let (w, h, rgba) = crate::hud::decode_bytes(&bytes).map_err(|e| e.to_string())?;
+-    let skin = process_legacy_skin(w, h, &rgba).ok_or("not a 64x64 or 64x32 skin")?;
++    let skin = process_legacy_skin(w, h, &rgba).ok_or("not a 64x64, 64x32 or 128x128 skin")?;
+     Ok((skin, model == "slim"))
+ }
+ 
+@@ -846,17 +848,21 @@ pub fn lookup(
+ }
+ 
+ /// `SkinTextureDownloader.processLegacySkin` on RGBA pixels: 64x32 skins
+-/// get the 64x64 layout, and the opaque parts lose their alpha. `None` for
+-/// any other size (the download fails).
++/// get the 64x64 layout, and the opaque parts lose their alpha. A 128x128
++/// (HD, OneShot) skin keeps its size, with the same parts opaque at twice
++/// the scale. `None` for any other size (the download fails).
+ pub fn process_legacy_skin(width: u32, height: u32, rgba: &[u8]) -> Option<Vec<u8>> {
+-    if width != 64 || height != 32 && height != 64 {
++    let hd = width == crate::hud::HD_SKIN_SIZE && height == width;
++    if !hd && (width != 64 || height != 32 && height != 64) {
+         return None;
+     }
+     let legacy = height == 32;
+-    let mut img = vec![0u8; 64 * 64 * 4];
++    let side = width as i32;
++    let k = side / 64;
++    let mut img = vec![0u8; (side * side * 4) as usize];
+     let n = rgba.len().min(img.len());
+     img[..n].copy_from_slice(&rgba[..n]);
+-    let at = |x: i32, y: i32| ((y * 64 + x) * 4) as usize;
++    let at = |x: i32, y: i32| ((y * side + x) * 4) as usize;
+     if legacy {
+         let rects = [
+             (4, 16, 16, 32, 4, 4),
+@@ -889,7 +895,7 @@ pub fn process_legacy_skin(width: u32, height: u32, rgba: &[u8]) -> Option<Vec<u
+             }
+         }
+     };
+-    no_alpha(&mut img, 0, 0, 32, 16);
++    no_alpha(&mut img, 0, 0, 32 * k, 16 * k);
+     if legacy {
+         // doNotchTransparencyHack: a fully opaque hat layer is cleared.
+         let opaque = (32..64).all(|x| (0..32).all(|y| img[at(x, y) + 3] >= 128));
+@@ -901,8 +907,8 @@ pub fn process_legacy_skin(width: u32, height: u32, rgba: &[u8]) -> Option<Vec<u
+             }
+         }
+     }
+-    no_alpha(&mut img, 0, 16, 64, 32);
+-    no_alpha(&mut img, 16, 48, 48, 64);
++    no_alpha(&mut img, 0, 16 * k, 64 * k, 32 * k);
++    no_alpha(&mut img, 16 * k, 48 * k, 48 * k, 64 * k);
+     Some(img)
+ }
+ 
+@@ -1270,6 +1276,8 @@ impl Downloader {
+ /// for a frame and heads swapped textures as the slots went round.
+ pub struct SkinSlots {
+     capacity: usize,
++    /// HD slots (`hud::HD_SKIN_SLOTS`), numbered after the standard ones.
++    hd_capacity: usize,
+     /// Stored locations and their slot, the least recently drawn first.
+     slots: Vec<(String, usize)>,
+     /// Drawn in the last frame, or stored since: kept from eviction.
+@@ -1277,12 +1285,26 @@ pub struct SkinSlots {
+ }
+ impl SkinSlots {
+     pub fn new(capacity: usize) -> Self {
++        Self::with_hd(capacity, 0)
++    }
++    /// `capacity` 64x64 slots and `hd_capacity` HD ones (OneShot).
++    pub fn with_hd(capacity: usize, hd_capacity: usize) -> Self {
+         Self {
+             capacity,
++            hd_capacity,
+             slots: Vec::new(),
+             kept: Default::default(),
+         }
+     }
++    /// The atlas sprite of a slot `place` gave: `horizon/skin<n>`, or
++    /// `horizon/skin-hd<n>` for an HD one.
++    pub fn sprite(&self, slot: usize) -> String {
++        if slot < self.capacity {
++            format!("horizon/skin{slot}")
++        } else {
++            format!("horizon/skin-hd{}", slot - self.capacity)
++        }
++    }
+     /// The atlas was replaced (a resource pack reload): every slot is blank,
+     /// so no skin counts as stored and each uploads again.
+     pub fn forget(&mut self) {
+@@ -1308,18 +1330,36 @@ impl SkinSlots {
+     /// drawn one not kept, with the location it held. `None` while every
+     /// slot is kept.
+     pub fn place(&mut self, location: String) -> Option<(usize, Option<String>)> {
+-        if let Some((_, slot)) = self.slots.iter().find(|(l, _)| *l == location) {
+-            return Some((*slot, None));
+-        }
+-        let (slot, evicted) = if self.slots.len() < self.capacity {
+-            (self.slots.len(), None)
++        self.place_sized(location, false)
++    }
++    /// `place` in the pool for the picture's size: the HD slots when `hd`
++    /// (a 128x128 picture), else the 64x64 ones. A location stored in the
++    /// other pool leaves it, so it never holds two slots.
++    pub fn place_sized(&mut self, location: String, hd: bool) -> Option<(usize, Option<String>)> {
++        let pool = if hd {
++            self.capacity..self.capacity + self.hd_capacity
+         } else {
+-            let i = self
+-                .slots
+-                .iter()
+-                .position(|(l, _)| !self.kept.contains(l))?;
+-            let (old, slot) = self.slots.remove(i);
+-            (slot, Some(old))
++            0..self.capacity
++        };
++        if let Some(i) = self.slots.iter().position(|(l, _)| *l == location) {
++            if pool.contains(&self.slots[i].1) {
++                return Some((self.slots[i].1, None));
++            }
++            self.slots.remove(i);
++        }
++        let free = pool
++            .clone()
++            .find(|s| !self.slots.iter().any(|(_, taken)| taken == s));
++        let (slot, evicted) = match free {
++            Some(slot) => (slot, None),
++            None => {
++                let i = self
++                    .slots
++                    .iter()
++                    .position(|(l, s)| pool.contains(s) && !self.kept.contains(l))?;
++                let (old, slot) = self.slots.remove(i);
++                (slot, Some(old))
++            }
+         };
+         self.kept.insert(location.clone());
+         self.slots.push((location, slot));
+@@ -1766,7 +1806,48 @@ mod tests {
+         assert_eq!(d.take_ready(), vec![("skins/def".to_owned(), vec![4])]);
+     }
+ 
+-    /// A cape fills the top half of a 64x64 slot; a larger one is scaled to 64x32.
++    /// A 128x128 skin keeps its size, its base layer opaque at twice the scale;
++    /// other sizes than 64x64, 64x32 and 128x128 still fail.
++    #[test]
++    fn hd_skins_keep_their_size() {
++        let at = |x: usize, y: usize| (y * 128 + x) * 4;
++        let skin = super::process_legacy_skin(128, 128, &[0; 128 * 128 * 4]).unwrap();
++        assert_eq!(skin.len(), 128 * 128 * 4);
++        assert_eq!(skin[at(63, 31) + 3], 255);
++        assert_eq!(skin[at(64, 0) + 3], 0);
++        assert_eq!(skin[at(127, 63) + 3], 255);
++        assert_eq!(skin[at(95, 127) + 3], 255);
++        assert_eq!(skin[at(96, 127) + 3], 0);
++        assert!(super::process_legacy_skin(128, 64, &[0; 128 * 64 * 4]).is_none());
++        assert!(super::process_legacy_skin(256, 256, &[0; 256 * 256 * 4]).is_none());
++        assert_eq!(super::process_legacy_skin(64, 64, &[0; 64 * 64 * 4]).unwrap().len(), 64 * 64 * 4);
++    }
++
++    /// HD pictures take HD slots, standard ones the 64x64 slots, and a
++    /// location that changes size moves between them.
++    #[test]
++    fn hd_pictures_take_hd_slots() {
++        let mut slots = super::SkinSlots::with_hd(2, 1);
++        assert_eq!(slots.place_sized("a".into(), true), Some((2, None)));
++        assert_eq!(slots.sprite(2), "horizon/skin-hd0");
++        assert_eq!(slots.place_sized("b".into(), false), Some((0, None)));
++        assert_eq!(slots.sprite(0), "horizon/skin0");
++        // The one HD slot is kept this frame: another HD picture waits.
++        assert_eq!(slots.place_sized("c".into(), true), None);
++        slots.next_frame(Default::default());
++        assert_eq!(slots.place_sized("c".into(), true), Some((2, Some("a".into()))));
++        assert!(!slots.contains("a"));
++        // "b" turns HD: it leaves its 64x64 slot, which is free again.
++        slots.next_frame(Default::default());
++        assert_eq!(slots.place_sized("b".into(), true), Some((2, Some("c".into()))));
++        assert_eq!(slots.place_sized("d".into(), false), Some((0, None)));
++        // Without HD slots an HD picture is never stored.
++        let mut plain = super::SkinSlots::new(2);
++        assert_eq!(plain.place_sized("a".into(), true), None);
++    }
++
++    /// A cape fills the top half of a 64x64 slot; a larger one is scaled to
++    /// 128x64 in an HD slot.
+     #[test]
+     fn capes_fill_the_top_half_of_a_slot() {
+         let at = |x: usize, y: usize| (y * 64 + x) * 4;
+@@ -1774,11 +1855,18 @@ mod tests {
+         assert_eq!(legacy.len(), 64 * 64 * 4);
+         assert_eq!(legacy[at(21, 16)], 7);
+         assert_eq!(legacy[at(22, 16)], 0);
++        let at_hd = |x: usize, y: usize| (y * 128 + x) * 4;
+         let mut hd = vec![0u8; 128 * 64 * 4];
+         hd[(62 * 128 + 126) * 4] = 9;
+         let hd = super::process_cape(128, 64, &hd).unwrap();
+-        assert_eq!(hd[at(63, 31)], 9);
+-        assert_eq!(hd[at(0, 32)], 0);
++        assert_eq!(hd.len(), 128 * 128 * 4);
++        assert_eq!(hd[at_hd(126, 62)], 9);
++        assert_eq!(hd[at_hd(0, 64)], 0);
++        let mut big = vec![0u8; 512 * 256 * 4];
++        big[(255 * 512 + 511) * 4] = 5;
++        let big = super::process_cape(512, 256, &big).unwrap();
++        assert_eq!(big.len(), 128 * 128 * 4);
++        assert_eq!(big[at_hd(127, 63)], 5);
+         assert!(super::process_cape(64, 32, &[0; 4]).is_none());
+         let textures = super::Textures {
+             cape: Some("http://textures.minecraft.net/texture/abc".into()),
+diff --git a/crates/horizon-client/src/game.rs b/crates/horizon-client/src/game.rs
+index a95d377..75f8c49 100644
+--- a/crates/horizon-client/src/game.rs
++++ b/crates/horizon-client/src/game.rs
+@@ -11726,7 +11726,10 @@ impl<'a> Game<'a> {
+                 downloads
+             }),
+             skin_profiles: RefCell::new(horizon_client::skins::Resolver::new()),
+-            skin_slots: horizon_client::skins::SkinSlots::new(horizon_client::hud::SKIN_SLOTS),
++            skin_slots: horizon_client::skins::SkinSlots::with_hd(
++                horizon_client::hud::SKIN_SLOTS,
++                horizon_client::hud::HD_SKIN_SLOTS,
++            ),
+             cosmetics: Default::default(),
+             skin_3d: Default::default(),
+             trim_slots: Default::default(),
+diff --git a/crates/horizon-client/src/game/native_client_services.rs b/crates/horizon-client/src/game/native_client_services.rs
+index 2b98efa..a554299 100644
+--- a/crates/horizon-client/src/game/native_client_services.rs
++++ b/crates/horizon-client/src/game/native_client_services.rs
+@@ -310,9 +310,12 @@ impl Game<'_> {
+             return None;
+         }
+         if let Some(rgba) = self.skin_downloads.borrow().image(texture) {
++            // A 128x128 picture is an HD skin or cape (OneShot).
++            let hd = horizon_client::hud::HD_SKIN_SIZE;
++            let side = if rgba.len() == (hd * hd * 4) as usize { hd } else { SKIN_SIDE };
+             return Some(TexturePixels {
+-                width: SKIN_SIDE,
+-                height: SKIN_SIDE,
++                width: side,
++                height: side,
+                 rgba: rgba.to_vec(),
+             });
+         }
+diff --git a/crates/horizon-client/src/game/remote.rs b/crates/horizon-client/src/game/remote.rs
+index 697a958..be6e60c 100644
+--- a/crates/horizon-client/src/game/remote.rs
++++ b/crates/horizon-client/src/game/remote.rs
+@@ -5549,11 +5549,15 @@ impl Game<'_> {
+             .cloned()
+             .unwrap_or_else(|| kind.model.clone());
+         let image = self.skin_downloads.borrow().image(skin)?.to_vec();
++        // An HD skin has twice the texels a side, each half as deep, so the
++        // slabs stay cubes.
++        let hd_side = horizon_client::hud::HD_SKIN_SIZE as usize;
++        let size = if image.len() == hd_side * hd_side * 4 { hd_side } else { skin_layers::SIZE };
+         let model = std::sync::Arc::new(skin_layers::extrude(
+             &base,
+             &image,
+-            skin_layers::SIZE,
+-            skin_layers::DEPTH,
++            size,
++            skin_layers::DEPTH * skin_layers::SIZE as f32 / size as f32,
+         )?);
+         self.skin_3d.borrow_mut().insert(key, model.clone());
+         Some(model)
+@@ -5850,7 +5854,11 @@ impl Game<'_> {
+         self.skin_downloads
+             .borrow_mut()
+             .remember_image(&location, &rgba);
+-        let Some((slot, evicted)) = self.skin_slots.place(location.clone()) else {
++        // A 128x128 picture (an HD skin or cape, OneShot) takes an HD slot.
++        let hd_side = horizon_client::hud::HD_SKIN_SIZE;
++        let hd = rgba.len() == (hd_side * hd_side * 4) as usize;
++        let side = if hd { hd_side } else { 64 };
++        let Some((slot, evicted)) = self.skin_slots.place_sized(location.clone(), hd) else {
+             return;
+         };
+         if let Some(old) = evicted {
+@@ -5860,7 +5868,7 @@ impl Game<'_> {
+             .gui
+             .atlas
+             .sprites
+-            .get(&format!("horizon/skin{slot}"))
++            .get(&self.skin_slots.sprite(slot))
+             .copied()
+         else {
+             return;
+@@ -5869,11 +5877,11 @@ impl Game<'_> {
+         self.map_patches.push(horizon_client::font::Patch {
+             x: (rect.u0 * w).round() as u32,
+             y: (rect.v0 * h).round() as u32,
+-            width: 64,
+-            height: 64,
++            width: side,
++            height: side,
+             rgba,
+         });
+-        // A cape is a 64x32 texture in the top half of the slot (skins::process_cape).
++        // A cape is a 64x32 (HD: 128x64) texture in the top half of the slot (skins::process_cape).
+         if location.starts_with("capes/") {
+             rect.v1 = (rect.v0 + rect.v1) / 2.0;
+         }
+diff --git a/crates/horizon-client/src/mobs/skin_layers.rs b/crates/horizon-client/src/mobs/skin_layers.rs
+index e0ab663..062915b 100644
+--- a/crates/horizon-client/src/mobs/skin_layers.rs
++++ b/crates/horizon-client/src/mobs/skin_layers.rs
+@@ -27,7 +27,8 @@ pub const OUTER_PARTS: [&str; 6] = [
+ ];
+ 
+ /// The size of a prepared skin image: `resample_64` always hands out this
+-/// many texels a side, wide and legacy skins alike.
++/// many texels a side, wide and legacy skins alike. An HD skin (OneShot)
++/// has `hud::HD_SKIN_SIZE`, passed to `extrude` as its `size`.
+ pub const SIZE: usize = 64;
+ 
+ /// How far a texel is pushed out, in model units (1 = 1/16 block = one skin
+@@ -80,7 +81,9 @@ fn extrude_polygon(
+         });
+     let texels_u = ((u1 - u0) * size as f32).round() as i32;
+     let texels_v = ((v1 - v0) * size as f32).round() as i32;
+-    if texels_u <= 0 || texels_v <= 0 || texels_u > 32 || texels_v > 32 {
++    // A face spans at most half the skin a side (32 texels of 64).
++    let most = (size / 2) as i32;
++    if texels_u <= 0 || texels_v <= 0 || texels_u > most || texels_v > most {
+         return vec![polygon.clone()];
+     }
+     let (Some(a), Some(b), Some(c)) = (
+diff --git a/crates/horizon-client/src/skin_share.rs b/crates/horizon-client/src/skin_share.rs
+index caa9cde..f399ff9 100644
+--- a/crates/horizon-client/src/skin_share.rs
++++ b/crates/horizon-client/src/skin_share.rs
+@@ -34,8 +34,8 @@ const MAX_VALUE: usize = 8192;
+ const MAX_SIGNATURE: usize = 1024;
+ /// A profile property's value is a protocol string of at most 32767 characters.
+ const MAX_PICTURES: usize = 32_000;
+-/// A skin PNG is at most 64x64, a cape at most 512x256 (HD capes); larger files are not sent.
+-const MAX_SKIN_PNG: usize = 16 * 1024;
++/// A skin PNG is at most 128x128 (HD skins), a cape at most 512x256 (HD capes); larger files are not sent.
++const MAX_SKIN_PNG: usize = 22 * 1024;
+ const MAX_CAPE_PNG: usize = 8 * 1024;
+ const PICTURES_LINE: &str = "oneshot-skin ";
+ 
+@@ -133,10 +133,20 @@ fn pictures_from_launcher() -> Option<String> {
+         json["cape"] = base64_encode(cape).into();
+     }
+     let text = json.to_string();
++    if text.len() <= MAX_PICTURES {
++        return Some(text);
++    }
++    // An HD skin and a cape together can be too long for the property: the
++    // skin goes alone.
++    if skin.is_none() {
++        return None;
++    }
++    json.as_object_mut()?.remove("cape");
++    let text = json.to_string();
+     (text.len() <= MAX_PICTURES).then_some(text)
+ }
+ 
+-/// A player's skin and cape pictures from a [`PROPERTY`] value: the skin as 64x64 RGBA laid out for the atlas
++/// A player's skin and cape pictures from a [`PROPERTY`] value: the skin as 64x64 (HD: 128x128) RGBA laid out for the atlas
+ /// (64x32 skins get the 64x64 layout), whether it is slim, and the cape laid out as a cape slot.
+ pub struct Pictures {
+     pub skin: Option<Vec<u8>>,
+@@ -145,7 +155,7 @@ pub struct Pictures {
+ }
+ 
+ impl Pictures {
+-    /// Only what decodes as it should: a skin of 64x64 or 64x32, a cape no larger than 512x256. Anything else in
++    /// Only what decodes as it should: a skin of 64x64, 64x32 or 128x128, a cape no larger than 512x256. Anything else in
+     /// the value is ignored; nothing in it can make the client allocate more than those pictures need.
+     pub fn read(value: &str) -> Option<Self> {
+         if value.len() > MAX_PICTURES {
+@@ -276,6 +286,13 @@ mod tests {
+         assert_eq!(pictures.cape.unwrap().len(), 64 * 64 * 4);
+     }
+ 
++    #[test]
++    fn hd_capes_take_an_hd_slot() {
++        let json = serde_json::json!({ "cape": base64_encode(&png(256, 128)) }).to_string();
++        let pictures = Pictures::read(&json).unwrap();
++        assert_eq!(pictures.cape.unwrap().len(), 128 * 128 * 4);
++    }
++
+     #[test]
+     fn a_server_from_before_reads_only_the_signed_lines() {
+         // What an older server's `split` sees of a new answer with a signed property.
+@@ -289,7 +306,10 @@ mod tests {
+     fn refuses_pictures_that_are_too_large_or_not_skins() {
+         let skin = |png: Vec<u8>| serde_json::json!({ "skin": base64_encode(&png) }).to_string();
+         assert!(Pictures::read(&skin(png(64, 64))).is_some());
+-        assert!(Pictures::read(&skin(png(128, 128))).is_none());
++        // HD (128x128) skins go through; 256x256 is no skin size.
++        let hd = Pictures::read(&skin(png(128, 128))).unwrap();
++        assert_eq!(hd.skin.unwrap().len(), 128 * 128 * 4);
++        assert!(Pictures::read(&skin(png(256, 256))).is_none());
+         assert!(Pictures::read(&skin(png(1024, 1024))).is_none());
+         assert!(Pictures::read(r#"{"skin":"not base64!"}"#).is_none());
+         assert!(Pictures::read("not json").is_none());
