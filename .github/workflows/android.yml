@@ -36,6 +36,8 @@ concurrency:
   cancel-in-progress: true
 env:
   PORT: Rayan-XOO/horizon
+  # Data packs (horizon-derived.zip) per port commit: a repository of their own, apart from the builds.
+  DATA: A22D3THLEE/oneshot-horizon-data
   # android-port 0.4.5: upstream horizon-rust/horizon 9319ad4 (2026-11-07) plus the Android layer.
   PORT_PINNED: ca93b0b765d3d2749a7b467051c31c43fcce2cf4
 
@@ -99,6 +101,20 @@ jobs:
           echo "VERSION_CODE=$code" >> "$GITHUB_ENV"
           echo "VERSION_NAME=$name" >> "$GITHUB_ENV"
           echo "version: $name ($code)"
+      - name: The Horizon data pack
+        run: |
+          set -euo pipefail
+          # The first run downloads horizon-derived.zip (what only Java can make from the game) from the release
+          # oneshot-horizon-data publishes for this port commit. Without one the setup screen asks for the file.
+          sha=$(git -C src rev-parse HEAD)
+          url="https://github.com/$DATA/releases/download/derived-${sha:0:12}/horizon-derived.zip"
+          if curl -fsSL -r 0-0 -o /dev/null "$url"; then
+            echo "HORIZON_DERIVED_URL=$url" >> "$GITHUB_ENV"
+            echo "data pack: $url" | tee -a "$GITHUB_STEP_SUMMARY"
+          else
+            echo "::warning::no data pack for ${sha:0:12} in $DATA (run its workflow first): this APK will ask for horizon-derived.zip"
+            echo "data pack: none for ${sha:0:12}" >> "$GITHUB_STEP_SUMMARY"
+          fi
       - uses: actions/setup-java@v4
         with:
           distribution: temurin
