@@ -1,0 +1,32 @@
+From 492f77f57ad6e5bd288b948a1f3a26f46cfba6b1 Mon Sep 17 00:00:00 2001
+From: oneshot <oneshot@localhost>
+Date: Fri, 13 Nov 2026 14:25:12 +0300
+Subject: [PATCH] 0045 android: world list opens without the keyboard
+
+The singleplayer list focused its search box on open, as on desktop, and on
+a touch screen that raised the system keyboard over half the worlds. On
+Android the search now waits for a tap on the box.
+
+Co-Authored-By: Claude Opus 5.5 <noreply@anthropic.com>
+---
+ crates/horizon-client/src/title.rs | 4 +++-
+ 1 file changed, 3 insertions(+), 1 deletion(-)
+
+diff --git a/crates/horizon-client/src/title.rs b/crates/horizon-client/src/title.rs
+index d8fede20..96d74629 100644
+--- a/crates/horizon-client/src/title.rs
++++ b/crates/horizon-client/src/title.rs
+@@ -815,7 +815,9 @@ impl Title {
+     /// Vanilla bypasses the selector when there are no saves.
+     pub fn enter_singleplayer(&mut self) {
+         self.search.clear();
+-        self.search_focused = true;
++        // On a touch screen a focused box raises the system keyboard over half the
++        // list: the search waits for a tap there instead.
++        self.search_focused = !cfg!(target_os = "android");
+         self.scroll.set(crate::ui::Scroll::default());
+         let worlds = list_worlds(&self.saves);
+         self.create_return_to_main = worlds.is_empty();
+-- 
+2.49.0.windows.1
+
