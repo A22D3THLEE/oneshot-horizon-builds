@@ -1,0 +1,444 @@
+From 68622bc8fb9e2c4fd042542a35009ef4fb5a95ae Mon Sep 17 00:00:00 2001
+From: oneshot <oneshot@localhost>
+Date: Fri, 13 Nov 2026 14:59:47 +0300
+Subject: [PATCH] android: translucent controls; the keyboard only after a tap
+ on a field
+
+The joystick, D-pad and right-hand buttons draw at 60% outside the editor.
+A text field that took the focus by itself no longer raises the soft keyboard:
+only a press on a field (EditBox/TextField click, the book page) does. The
+in-game chat still raises it when it opens. winit's IME stays off on Android,
+the sink is not focusable once hidden, and launcher fields and dialogs wait
+for a tap too.
+
+Co-Authored-By: Claude Opus 5.5 <noreply@anthropic.com>
+---
+ .../horizon-client-render/src/screen_draw.rs  |  1 +
+ crates/horizon-client-render/src/ui.rs        | 18 +++++-
+ crates/horizon-client/src/game/books.rs       |  2 +
+ crates/horizon-client/src/game/ime.rs         |  4 +-
+ crates/horizon-client/src/game/touch.rs       | 56 +++++++++++++------
+ packaging/android/AndroidManifest.xml         |  6 +-
+ .../horizonlab/horizon/CatalogActivity.java   |  3 +-
+ .../horizonlab/horizon/HorizonActivity.java   |  6 +-
+ .../horizonlab/horizon/ProfileActivity.java   |  6 +-
+ .../java/dev/horizonlab/horizon/Ui.java       | 28 ++++++++++
+ .../dev/horizonlab/horizon/WorldsPage.java    |  8 +--
+ 11 files changed, 107 insertions(+), 31 deletions(-)
+
+diff --git a/crates/horizon-client-render/src/screen_draw.rs b/crates/horizon-client-render/src/screen_draw.rs
+index 6176b589..73b6e0ab 100644
+--- a/crates/horizon-client-render/src/screen_draw.rs
++++ b/crates/horizon-client-render/src/screen_draw.rs
+@@ -846,6 +846,7 @@ impl TextField {
+     }
+     /// `onClick`: the cursor where the mouse is (`findClickedPositionInText`).
+     pub fn click(&mut self, m: &Measure, x: f64, extend: bool) {
++        crate::ui::mark_field_tap();
+         let pos = (x.floor() as i32 - self.text_x()).min(self.inner_width());
+         let rest = sub(&self.value, self.display, chars(&self.value));
+         let at = self.display + m.plain(&rest, pos, false);
+diff --git a/crates/horizon-client-render/src/ui.rs b/crates/horizon-client-render/src/ui.rs
+index 2c0818bf..faa91490 100644
+--- a/crates/horizon-client-render/src/ui.rs
++++ b/crates/horizon-client-render/src/ui.rs
+@@ -8,10 +8,25 @@ use crate::{
+ use std::{
+     collections::HashMap,
+     path::{Path, PathBuf},
+-    sync::RwLock,
++    sync::{
++        RwLock,
++        atomic::{AtomicBool, Ordering},
++    },
+     time::Instant,
+ };
+ 
++/// A press landed on a text field since the last `take_field_tap`: on a touch
++/// screen only that brings the soft keyboard up, never a field focused by itself.
++static FIELD_TAP: AtomicBool = AtomicBool::new(false);
++/// A press put the cursor in a text field.
++pub fn mark_field_tap() {
++    FIELD_TAP.store(true, Ordering::Relaxed);
++}
++/// Whether a text field was pressed since the last call.
++pub fn take_field_tap() -> bool {
++    FIELD_TAP.swap(false, Ordering::Relaxed)
++}
++
+ /// `GuiSpriteScaling.NineSlice`: the sprite's size in GUI pixels, whatever
+ /// its texture's resolution, its borders (left, top, right, bottom) in the
+ /// same units, and whether the edges and centre stretch rather than tile.
+@@ -1517,6 +1532,7 @@ impl EditBox {
+     /// EditBox.onClick: the cursor to the pointer, extending the selection
+     /// with Shift; a double click selects the word under it (`selectWord`).
+     pub fn click(&mut self, atlas: &HudAtlas, x: f32, shift: bool, double: bool) {
++        mark_field_tap();
+         let pos = self.position_at(atlas, x);
+         if double {
+             let (start, end) = (
+diff --git a/crates/horizon-client/src/game/books.rs b/crates/horizon-client/src/game/books.rs
+index 3f67345a..d24c9002 100644
+--- a/crates/horizon-client/src/game/books.rs
++++ b/crates/horizon-client/src/game/books.rs
+@@ -698,6 +698,7 @@ impl Game<'_> {
+     }
+     /// A click on the centred title (`EditBox.onClick`).
+     fn book_title_click(&mut self, field_x: f32, mx: f32) {
++        horizon_client_render::ui::mark_field_tap();
+         let shift = self.has_shift_down();
+         let Some(BookScreen::Edit {
+             title, title_edit, ..
+@@ -713,6 +714,7 @@ impl Game<'_> {
+     /// A click on the open page (`MultiLineEditBox.onClick`): a double click
+     /// selects the word before the cursor and leaves the cursor where it is.
+     fn book_page_click(&mut self, origin_x: f32, origin_y: f32, mx: f32, my: f32, double: bool) {
++        horizon_client_render::ui::mark_field_tap();
+         if double {
+             if let Some(BookScreen::Edit { page_edit, .. }) = self.book.as_mut() {
+                 page_edit.select_word_at_cursor();
+diff --git a/crates/horizon-client/src/game/ime.rs b/crates/horizon-client/src/game/ime.rs
+index 3d3599e0..1faa3885 100644
+--- a/crates/horizon-client/src/game/ime.rs
++++ b/crates/horizon-client/src/game/ime.rs
+@@ -44,7 +44,9 @@ impl Game<'_> {
+ 
+     /// Allow the input method only while a text box has focus.
+     pub(super) fn sync_ime(&mut self) {
+-        let want = self.text_field_focused();
++        // On Android winit's IME would raise the soft keyboard whenever a field has
++        // the focus; there it comes up only after a tap on the field (touch_ime).
++        let want = self.text_field_focused() && !cfg!(target_os = "android");
+         if want != self.ime_allowed
+             && let Some(window) = &self.window
+         {
+diff --git a/crates/horizon-client/src/game/touch.rs b/crates/horizon-client/src/game/touch.rs
+index 1e8c96fb..fbbb8204 100644
+--- a/crates/horizon-client/src/game/touch.rs
++++ b/crates/horizon-client/src/game/touch.rs
+@@ -644,8 +644,11 @@ pub(super) struct Touches {
+     last_stick_start: Option<Instant>,
+     /// The soft keyboard was asked for.
+     ime_shown: bool,
+-    /// A menu tap since the last frame: ask for the keyboard again if a field wants it.
++    /// A tap on a text field since the last frame: ask for the keyboard again.
+     ime_retap: bool,
++    /// The focused field was tapped: the keyboard never comes up for a field that
++    /// took the focus by itself (a screen opening, a chat after going to bed).
++    ime_tapped: bool,
+     /// A controller, keyboard or mouse plays: the controls are hidden until a touch.
+     pub(super) hardware: bool,
+     /// A mouse has been used: the pointer is captured while playing.
+@@ -728,6 +731,7 @@ impl Default for Touches {
+             last_stick_start: None,
+             ime_shown: false,
+             ime_retap: false,
++            ime_tapped: false,
+             hardware: false,
+             mouse: false,
+             pointer_captured: None,
+@@ -769,6 +773,10 @@ const MIN_DP: f32 = 24.0;
+ /// buttons outside the editor: they are tapped seldom and sit over the view.
+ const TOP_ROW_ALPHA: f32 = 0.5;
+ 
++/// How opaque the joystick, the D-pad and the buttons on the right are outside the
++/// editor: the view shows through them instead of a third of the screen being covered.
++const CONTROLS_ALPHA: f32 = 0.6;
++
+ /// The screen's density in dpi, 0 where it is not known (not Android).
+ #[cfg(target_os = "android")]
+ fn screen_dpi() -> u32 {
+@@ -1477,7 +1485,7 @@ impl Game<'_> {
+         use super::Screen;
+         matches!(self.screen, Screen::Chat | Screen::CommandBlock)
+             || self.sign_edit.is_some()
+-            || self.book.is_some()
++            || matches!(self.book, Some(super::books::BookScreen::Edit { .. }))
+             || (self.screen == Screen::Creative && self.creative_screen.tab().search)
+             || self.recipe_search_focused()
+             || self.station_typing()
+@@ -1564,12 +1572,13 @@ impl Game<'_> {
+         for (i, b) in t.buttons.iter().enumerate() {
+             let (c, r) = gui.custom(b);
+             let down = t.fingers.values().any(|f| matches!(f, Finger::Custom(j) if *j == i));
+-            square(batch, atlas, c, r, down, t.layout.opacity);
++            let a = if t.editing { t.layout.opacity } else { t.layout.opacity * CONTROLS_ALPHA };
++            square(batch, atlas, c, r, down, a);
+             if t.editing && t.selected_button == Some(i) {
+                 outline(batch, atlas, c, r + 1.0, 1.0, 0xFFFF_FF55);
+             }
+             let tw = HudBatch::text_width(atlas, &b.label);
+-            batch.text(atlas, &b.label, (c[0] - tw / 2.0).round(), (c[1] - 3.5).round(), fade(0xFFFF_FFFF, t.layout.opacity), true);
++            batch.text(atlas, &b.label, (c[0] - tw / 2.0).round(), (c[1] - 3.5).round(), fade(0xFFFF_FFFF, a), true);
+         }
+         let layout = &t.layout;
+         let editing = t.editing;
+@@ -1604,9 +1613,10 @@ impl Game<'_> {
+             && let Some(label) = &t.interact
+             && let Some((c, rx, ry)) = self.touch_interact_rect(&gui)
+         {
+-            rect(batch, atlas, c, rx, ry, false, layout.opacity);
++            let a = layout.opacity * CONTROLS_ALPHA;
++            rect(batch, atlas, c, rx, ry, false, a);
+             let tw = HudBatch::text_width(atlas, label);
+-            batch.text(atlas, label, (c[0] - tw / 2.0).round(), (c[1] - 3.5).round(), fade(0xFFFF_FFFF, layout.opacity), true);
++            batch.text(atlas, label, (c[0] - tw / 2.0).round(), (c[1] - 3.5).round(), fade(0xFFFF_FFFF, a), true);
+         }
+         for id in IDS {
+             let spec = layout.spec(id);
+@@ -1617,8 +1627,8 @@ impl Game<'_> {
+             if !spec.visible {
+                 a *= 0.35;
+             }
+-            if !editing && matches!(id, Id::Chat | Id::Pause | Id::F5 | Id::Edit) {
+-                a *= TOP_ROW_ALPHA;
++            if !editing {
++                a *= if matches!(id, Id::Chat | Id::Pause | Id::F5 | Id::Edit) { TOP_ROW_ALPHA } else { CONTROLS_ALPHA };
+             }
+             if swapped_out(layout, id, self.touch_flying(), editing) {
+                 continue;
+@@ -2288,7 +2298,17 @@ impl Game<'_> {
+             || (self.screen == super::Screen::WorldOptions
+                 && self.world_options.as_ref().and_then(|o| o.rules.as_ref()).is_some_and(|r| r.typing()))
+             || (self.screen != super::Screen::Options
+-                && self.title.as_mut().is_some_and(|t| t.focused_field().is_some()));
++                && self.title.as_mut().is_some_and(|t| t.focused_field().is_some() || t.has_caret_field()));
++        if horizon_client_render::ui::take_field_tap() {
++            self.touch.ime_tapped = true;
++            self.touch.ime_retap = true;
++        }
++        if !want {
++            self.touch.ime_tapped = false;
++        }
++        // The in-game chat keeps raising the keyboard when it opens; any other field
++        // waits for a tap on it.
++        let want = want && (self.touch.ime_tapped || self.screen == super::Screen::Chat);
+         if want != self.touch.ime_shown || (want && self.touch.ime_retap) {
+             self.touch.ime_shown = want;
+             android_ime::show(want);
+@@ -2309,8 +2329,6 @@ impl Game<'_> {
+             EditAction::AddButton => {
+                 self.touch.editing = false;
+                 self.open_chat_method("/button add ");
+-                #[cfg(target_os = "android")]
+-                super::android_ime::show(true);
+                 return;
+             }
+             EditAction::RemoveButton => {
+@@ -2495,10 +2513,15 @@ impl Game<'_> {
+             Id::Pause => pad(self, Button::Start),
+             // Straight to the chat screen: the pad's chat binding (DPadUp by
+             // default, DPadRight in some layouts) is not a fixed button.
+-            Id::Chat | Id::Keyboard => {
++            Id::Chat => {
++                self.open_chat_method("");
++                Finger::Done
++            }
++            // The keyboard button asks for the keyboard itself.
++            Id::Keyboard => {
+                 self.open_chat_method("");
+-                #[cfg(target_os = "android")]
+-                super::android_ime::show(true);
++                self.touch.ime_tapped = true;
++                self.touch.ime_retap = true;
+                 Finger::Done
+             }
+             Id::Inventory => pad(self, Button::North),
+@@ -2607,9 +2630,8 @@ impl Game<'_> {
+                         self.touch.menu = MenuTouch::Legacy;
+                         send(self, click(device_id, ElementState::Pressed));
+                     }
+-                    // Asked again on the next frame: a tap on a text field brings the
+-                    // keyboard back after the system's back gesture hid it.
+-                    self.touch.ime_retap = true;
++                    // A tap on a text field marks it (ui::mark_field_tap): touch_ime then
++                    // brings the keyboard up, or back after the system's back gesture hid it.
+                     Finger::Pointer
+                 } else if self.touch.editing {
+                     if let Some(action) = gui.panel_hit(p) {
+diff --git a/packaging/android/AndroidManifest.xml b/packaging/android/AndroidManifest.xml
+index 281f0383..0d4d9d45 100644
+--- a/packaging/android/AndroidManifest.xml
++++ b/packaging/android/AndroidManifest.xml
+@@ -48,7 +48,7 @@
+             android:exported="false"
+             android:screenOrientation="sensorLandscape"
+             android:launchMode="singleTask"
+-            android:windowSoftInputMode="adjustNothing|stateHidden"
++            android:windowSoftInputMode="adjustNothing|stateAlwaysHidden"
+             android:configChanges="orientation|screenSize|screenLayout|keyboardHidden|keyboard|navigation|uiMode|density|smallestScreenSize|fontScale|locale|layoutDirection|touchscreen|mcc|mnc|colorMode|fontWeightAdjustment|grammaticalGender">
+             <meta-data android:name="android.app.lib_name" android:value="horizon" />
+         </activity>
+@@ -58,14 +58,14 @@
+             android:theme="@style/HorizonProfile"
+             android:screenOrientation="sensorLandscape"
+             android:configChanges="orientation|screenSize|screenLayout|keyboardHidden|keyboard|navigation|uiMode|smallestScreenSize"
+-            android:windowSoftInputMode="adjustResize|stateHidden" />
++            android:windowSoftInputMode="adjustResize|stateAlwaysHidden" />
+         <activity
+             android:name=".CatalogActivity"
+             android:exported="false"
+             android:theme="@style/HorizonProfile"
+             android:screenOrientation="sensorLandscape"
+             android:configChanges="orientation|screenSize|screenLayout|keyboardHidden|keyboard|navigation|uiMode"
+-            android:windowSoftInputMode="adjustResize|stateHidden" />
++            android:windowSoftInputMode="adjustResize|stateAlwaysHidden" />
+         <activity
+             android:name=".UpdateActivity"
+             android:exported="false"
+diff --git a/packaging/android/java/dev/horizonlab/horizon/CatalogActivity.java b/packaging/android/java/dev/horizonlab/horizon/CatalogActivity.java
+index a6508649..1b7651cc 100644
+--- a/packaging/android/java/dev/horizonlab/horizon/CatalogActivity.java
++++ b/packaging/android/java/dev/horizonlab/horizon/CatalogActivity.java
+@@ -83,7 +83,7 @@ public class CatalogActivity extends Activity {
+         super.onCreate(state);
+         dir = new File(SetupActivity.home(this));
+         getWindow().setSoftInputMode(WindowManager.LayoutParams.SOFT_INPUT_ADJUST_RESIZE
+-                | WindowManager.LayoutParams.SOFT_INPUT_STATE_HIDDEN);
++                | WindowManager.LayoutParams.SOFT_INPUT_STATE_ALWAYS_HIDDEN);
+         int p = Ui.dp(this, 12);
+         pool.execute(new Runnable() {
+             public void run() {
+@@ -144,6 +144,7 @@ public class CatalogActivity extends Activity {
+         search.setOrientation(LinearLayout.HORIZONTAL);
+         query = new EditText(this);
+         query.setSingleLine(true);
++        Ui.tapKeyboard(query);
+         query.setTextColor(Ui.TEXT);
+         query.setHintTextColor(Ui.MUTED);
+         query.setTextSize(15);
+diff --git a/packaging/android/java/dev/horizonlab/horizon/HorizonActivity.java b/packaging/android/java/dev/horizonlab/horizon/HorizonActivity.java
+index 25a9021b..bebd89d8 100644
+--- a/packaging/android/java/dev/horizonlab/horizon/HorizonActivity.java
++++ b/packaging/android/java/dev/horizonlab/horizon/HorizonActivity.java
+@@ -467,9 +467,13 @@ public class HorizonActivity extends NativeActivity {
+                     sink.setFocusableInTouchMode(true);
+                     sink.requestFocus();
+                     imm.restartInput(sink);
+-                    imm.showSoftInput(sink, InputMethodManager.SHOW_FORCED);
++                    imm.showSoftInput(sink, 0);
+                 } else {
+                     imm.hideSoftInputFromWindow(sink.getWindowToken(), 0);
++                    // Not focusable once hidden: back in the window the focus would land on the
++                    // sink again, and the system would bring the keyboard back with no tap.
++                    sink.setFocusableInTouchMode(false);
++                    sink.setFocusable(false);
+                     sink.clearFocus();
+                 }
+             }
+diff --git a/packaging/android/java/dev/horizonlab/horizon/ProfileActivity.java b/packaging/android/java/dev/horizonlab/horizon/ProfileActivity.java
+index a77b2b7b..62f3f769 100644
+--- a/packaging/android/java/dev/horizonlab/horizon/ProfileActivity.java
++++ b/packaging/android/java/dev/horizonlab/horizon/ProfileActivity.java
+@@ -81,7 +81,7 @@ public class ProfileActivity extends Activity implements View.OnClickListener {
+         // Resize, not pan: the keyboard takes most of a phone's landscape height, and the
+         // scrolling page keeps the focused field in view above it.
+         getWindow().setSoftInputMode(WindowManager.LayoutParams.SOFT_INPUT_ADJUST_RESIZE
+-                | WindowManager.LayoutParams.SOFT_INPUT_STATE_HIDDEN);
++                | WindowManager.LayoutParams.SOFT_INPUT_STATE_ALWAYS_HIDDEN);
+ 
+         LinearLayout root = new LinearLayout(this);
+         root.setOrientation(LinearLayout.HORIZONTAL);
+@@ -526,7 +526,7 @@ public class ProfileActivity extends Activity implements View.OnClickListener {
+         final EditText n = Ui.field(this, "Steve_123");
+         n.setFilters(new InputFilter[] {new InputFilter.LengthFilter(16)});
+         box.addView(n, Ui.gap(this, 8));
+-        new AlertDialog.Builder(this)
++        Ui.show(new AlertDialog.Builder(this)
+                 .setTitle(Ui.t("Добро пожаловать в Oneshot", "Welcome to Oneshot"))
+                 .setView(box)
+                 .setCancelable(false)
+@@ -548,7 +548,7 @@ public class ProfileActivity extends Activity implements View.OnClickListener {
+                         recreate();
+                     }
+                 })
+-                .show();
++                );
+     }
+ 
+     private void welcomeDone(File done, String n) {
+diff --git a/packaging/android/java/dev/horizonlab/horizon/Ui.java b/packaging/android/java/dev/horizonlab/horizon/Ui.java
+index 79185f85..60d17deb 100644
+--- a/packaging/android/java/dev/horizonlab/horizon/Ui.java
++++ b/packaging/android/java/dev/horizonlab/horizon/Ui.java
+@@ -321,9 +321,37 @@ final class Ui {
+         e.setBackground(rounded(c, HIGH, EDGE, 10));
+         e.setImeOptions(android.view.inputmethod.EditorInfo.IME_ACTION_DONE
+                 | android.view.inputmethod.EditorInfo.IME_FLAG_NO_EXTRACT_UI);
++        tapKeyboard(e);
+         return e;
+     }
+ 
++    /** The keyboard comes up only when a finger lifts off the field, never on focus alone. */
++    static void tapKeyboard(final android.widget.EditText e) {
++        e.setShowSoftInputOnFocus(false);
++        e.setOnTouchListener(new View.OnTouchListener() {
++            public boolean onTouch(View v, android.view.MotionEvent ev) {
++                if (ev.getAction() == android.view.MotionEvent.ACTION_UP) {
++                    v.requestFocus();
++                    android.view.inputmethod.InputMethodManager imm = (android.view.inputmethod.InputMethodManager)
++                            v.getContext().getSystemService(Context.INPUT_METHOD_SERVICE);
++                    if (imm != null) imm.showSoftInput(v, 0);
++                }
++                return false;
++            }
++        });
++    }
++
++    /** Shows a dialog that holds a text field without raising the keyboard by itself. */
++    static android.app.AlertDialog show(android.app.AlertDialog.Builder b) {
++        android.app.AlertDialog d = b.create();
++        if (d.getWindow() != null) {
++            d.getWindow().setSoftInputMode(android.view.WindowManager.LayoutParams.SOFT_INPUT_STATE_ALWAYS_HIDDEN
++                    | android.view.WindowManager.LayoutParams.SOFT_INPUT_ADJUST_RESIZE);
++        }
++        d.show();
++        return d;
++    }
++
+     /** 3 h 25 min, 12 min, < 1 min. */
+     static String duration(long ms) {
+         long min = ms / 60000;
+diff --git a/packaging/android/java/dev/horizonlab/horizon/WorldsPage.java b/packaging/android/java/dev/horizonlab/horizon/WorldsPage.java
+index 72d98f05..4a70c681 100644
+--- a/packaging/android/java/dev/horizonlab/horizon/WorldsPage.java
++++ b/packaging/android/java/dev/horizonlab/horizon/WorldsPage.java
+@@ -379,7 +379,7 @@ final class WorldsPage extends Page {
+         field.setText(folderName(name));
+         box.addView(field);
+         note(box, Ui.t("Сид: ", "Seed: ") + seed);
+-        new AlertDialog.Builder(a)
++        Ui.show(new AlertDialog.Builder(a)
+                 .setTitle(Ui.t("Новый мир по сиду", "New world from a seed"))
+                 .setView(box)
+                 .setPositiveButton(Ui.t("Создать и играть", "Create and play"), new DialogInterface.OnClickListener() {
+@@ -389,7 +389,7 @@ final class WorldsPage extends Page {
+                     }
+                 })
+                 .setNegativeButton(Ui.t("Отмена", "Cancel"), null)
+-                .show();
++                );
+     }
+ 
+     /** A folder name the game accepts (android_main.rs): no slashes, no leading dot. */
+@@ -488,7 +488,7 @@ final class WorldsPage extends Page {
+         final EditText seed = Ui.field(a, Ui.t("Сид", "Seed"));
+         box.addView(name);
+         box.addView(seed, Ui.gap(a, 8));
+-        new AlertDialog.Builder(a)
++        Ui.show(new AlertDialog.Builder(a)
+                 .setTitle(Ui.t("Свой сид", "Your seed"))
+                 .setView(box)
+                 .setPositiveButton(Ui.t("Сохранить", "Save"), new DialogInterface.OnClickListener() {
+@@ -504,7 +504,7 @@ final class WorldsPage extends Page {
+                     }
+                 })
+                 .setNegativeButton(Ui.t("Отмена", "Cancel"), null)
+-                .show();
++                );
+     }
+ 
+     // ---- The team's catalog: seeds.json and maps.json -----------------------------------------
+-- 
+2.49.0.windows.1
+

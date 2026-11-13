@@ -1,0 +1,57 @@
+From 93305ec9fd30e8cc60689a855fa175ac2feeaff0 Mon Sep 17 00:00:00 2001
+From: oneshot <oneshot@localhost>
+Date: Fri, 13 Nov 2026 14:59:46 +0300
+Subject: [PATCH] android: no crash dialog after an update replaced the running
+ game
+
+Co-Authored-By: Claude Opus 5.5 <noreply@anthropic.com>
+---
+ .../java/dev/horizonlab/horizon/PlayStats.java | 18 +++++++++++++++---
+ 1 file changed, 15 insertions(+), 3 deletions(-)
+
+diff --git a/packaging/android/java/dev/horizonlab/horizon/PlayStats.java b/packaging/android/java/dev/horizonlab/horizon/PlayStats.java
+index c5ca6394..dced94eb 100644
+--- a/packaging/android/java/dev/horizonlab/horizon/PlayStats.java
++++ b/packaging/android/java/dev/horizonlab/horizon/PlayStats.java
+@@ -14,7 +14,8 @@ import java.util.Map;
+  * Oneshot: play time, as the PC launcher keeps it (PlayStats.cs). The game screen writes the
+  * running session to session.txt (start, a heartbeat every minute, paused or not, a clean end);
+  * the launcher folds a finished one into play-stats.txt. A session that stopped without a clean
+- * end while the game was in front is a crash: the launcher then offers the crash screen.
++ * end while the game was in front is a crash: the launcher then offers the crash screen. A
++ * session cut short by installing an update over the running game is not one.
+  *
+  * play-stats.txt: key=value lines, total / sessions / longest / last / friends (ms or epoch ms),
+  * d.yyyy-MM-dd (ms that day) and v.<version> (ms on that app version).
+@@ -116,7 +117,8 @@ final class PlayStats {
+ 
+     /**
+      * A finished session into the totals. True when it ended in a crash: no clean end while the
+-     * game was in front (a game the system closed in the background is no crash).
++     * game was in front (a game the system closed in the background, or an update replaced, is
++     * no crash).
+      */
+     static synchronized boolean fold(Context c) {
+         if (alive) return false;
+@@ -137,7 +139,17 @@ final class PlayStats {
+         String v = "v." + (s.get("version") == null ? "?" : s.get("version"));
+         t.put(v, "" + (num(t, v) + played));
+         write(stats(c), t);
+-        return !"1".equals(s.get("clean")) && !"1".equals(s.get("paused")) && start > 0;
++        // An update installed since the session began killed the game to replace it: no crash.
++        return !"1".equals(s.get("clean")) && !"1".equals(s.get("paused")) && start > 0 && updated(c) < start;
++    }
++
++    /** When this package was last installed or updated (epoch ms), 0 when unknown. */
++    private static long updated(Context c) {
++        try {
++            return c.getPackageManager().getPackageInfo(c.getPackageName(), 0).lastUpdateTime;
++        } catch (Exception e) {
++            return 0;
++        }
+     }
+ 
+     static Map<String, String> totals(Context c) {
+-- 
+2.49.0.windows.1
+
