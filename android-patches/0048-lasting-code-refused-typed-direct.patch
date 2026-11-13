@@ -1,0 +1,287 @@
+From f8abf84ea16d508cc81851ef22861613dcfc34f3 Mon Sep 17 00:00:00 2001
+From: oneshot <oneshot@localhost>
+Date: Fri, 13 Nov 2026 18:01:03 +0300
+Subject: [PATCH] friends: say when the relay refuses the lasting code; typed
+ and Direct-only codes work
+
+- The host notes in friends-kept.txt (ok/refused) whether the relay served the
+  lasting nameplate, and the game status says so (horizon.friends.kept_refused);
+  the Android launcher shows it on the friends page.
+- A guest in Direct only still joins a short code through the relay.
+- friend: is matched without regard to case.
+- A code typed by hand in the launcher is saved as friend:CODE, as Paste does.
+
+Co-Authored-By: Claude Opus 5.5 <noreply@anthropic.com>
+---
+ .../assets/horizon/lang/en_us.json            |  1 +
+ .../assets/horizon/lang/ru_ru.json            |  1 +
+ crates/horizon-client/src/game/friends.rs     |  3 ++
+ .../src/game/native_client_services.rs        |  2 +-
+ crates/horizon-client/src/multiplayer.rs      |  7 +++--
+ crates/horizon-client/src/net.rs              | 13 +++++++--
+ crates/horizon-friends/src/guest.rs           | 12 ++++++++
+ crates/horizon-friends/src/host.rs            | 29 +++++++++++++++++++
+ .../dev/horizonlab/horizon/FriendsPage.java   | 16 ++++++++++
+ .../horizonlab/horizon/ProfileActivity.java   |  3 ++
+ .../dev/horizonlab/horizon/SetupActivity.java |  3 +-
+ 11 files changed, 84 insertions(+), 6 deletions(-)
+
+diff --git a/crates/horizon-client/assets/horizon/lang/en_us.json b/crates/horizon-client/assets/horizon/lang/en_us.json
+index 15fa238e..006c2d06 100644
+--- a/crates/horizon-client/assets/horizon/lang/en_us.json
++++ b/crates/horizon-client/assets/horizon/lang/en_us.json
+@@ -407,6 +407,7 @@
+   "horizon.friends.stopped": "Stopped sharing the invite code.",
+   "horizon.friends.short_code_changed": "Someone kept trying a wrong short code, so it changed.",
+   "horizon.friends.short_code_renamed": "The Oneshot server gave you another short code: send your friends the new one.",
++  "horizon.friends.kept_refused": "The relay didn't take your lasting code, so friends need this session's code.",
+   "horizon.friends.code_changed": "The invite code changed: send your friends the new one.",
+   "horizon.friends.wrong_code": "Someone tried a wrong code.",
+   "horizon.friends.relay_stopped": "Too many wrong short codes, so the relay is off until you share again; your short code will change then. Friends can still join with the full code.",
+diff --git a/crates/horizon-client/assets/horizon/lang/ru_ru.json b/crates/horizon-client/assets/horizon/lang/ru_ru.json
+index 04736b02..ef06c6dc 100644
+--- a/crates/horizon-client/assets/horizon/lang/ru_ru.json
++++ b/crates/horizon-client/assets/horizon/lang/ru_ru.json
+@@ -279,6 +279,7 @@
+   "horizon.friends.stopped": "Доступ по коду приглашения закрыт.",
+   "horizon.friends.short_code_changed": "Кто-то подбирал короткий код, поэтому он сменился.",
+   "horizon.friends.short_code_renamed": "Сервер Oneshot выдал другой короткий код: отправьте друзьям новый.",
++  "horizon.friends.kept_refused": "Сервер не принял ваш постоянный код: сейчас друзьям нужен код этого сеанса.",
+   "horizon.friends.code_changed": "Код приглашения сменился: отправьте друзьям новый.",
+   "horizon.friends.wrong_code": "Кто-то ввёл неверный код.",
+   "horizon.friends.relay_stopped": "Слишком много неверных коротких кодов: сервер Oneshot выключен до следующего открытия, и тогда короткий код сменится. Полный код по-прежнему работает.",
+diff --git a/crates/horizon-client/src/game/friends.rs b/crates/horizon-client/src/game/friends.rs
+index f54662a0..846603c5 100644
+--- a/crates/horizon-client/src/game/friends.rs
++++ b/crates/horizon-client/src/game/friends.rs
+@@ -470,6 +470,9 @@ fn localized_summary(summary: &str) -> String {
+ /// The relay's problem (horizon-friends' "Couldn't reach the relay ADDR: ERROR")
+ /// in the game's language; the system's error text stays as it is.
+ fn localized_relay_problem(problem: &str) -> String {
++    if problem == horizon_friends::host::KEPT_REFUSED {
++        return lang::get_or("horizon.friends.kept_refused", problem);
++    }
+     match problem
+         .strip_prefix("Couldn't reach the relay ")
+         .and_then(|r| r.split_once(": "))
+diff --git a/crates/horizon-client/src/game/native_client_services.rs b/crates/horizon-client/src/game/native_client_services.rs
+index 7103d29c..fc301eac 100644
+--- a/crates/horizon-client/src/game/native_client_services.rs
++++ b/crates/horizon-client/src/game/native_client_services.rs
+@@ -89,7 +89,7 @@ pub enum NativeWorldId {
+ impl NativeWorldId {
+     /// `save` is set for single player's world joined through memory.
+     fn of(save: Option<&str>, address: &str) -> Self {
+-        match (save, address.strip_prefix(FRIEND)) {
++        match (save, crate::net::friend_code(address)) {
+             (Some(folder), _) => Self::Singleplayer(folder.to_owned()),
+             (None, Some(code)) => Self::Server(format!("{FRIEND}{}", invite_public_part(code))),
+             (None, None) => Self::Server(address.to_owned()),
+diff --git a/crates/horizon-client/src/multiplayer.rs b/crates/horizon-client/src/multiplayer.rs
+index 0c321e6f..223aeec6 100644
+--- a/crates/horizon-client/src/multiplayer.rs
++++ b/crates/horizon-client/src/multiplayer.rs
+@@ -1761,9 +1761,12 @@ impl Screen {
+                 };
+             }
+             (Self::Friend { code, relay, .. }, Some(56)) => {
+-                if horizon_friends::invite::parse(code).is_some() {
++                // The launcher copies codes as "friend:CODE": the prefix is no part of the code.
++                let bare = code.trim();
++                let bare = crate::net::friend_code(bare).unwrap_or(bare);
++                if horizon_friends::invite::parse(bare).is_some() {
+                     crate::net::save_friends_relay(relay.trim());
+-                    let code: String = code.chars().filter(|c| !c.is_whitespace()).collect();
++                    let code: String = bare.chars().filter(|c| !c.is_whitespace()).collect();
+                     return Outcome::Connect {
+                         address: format!("{}{code}", crate::net::FRIEND),
+                         lan: false,
+diff --git a/crates/horizon-client/src/net.rs b/crates/horizon-client/src/net.rs
+index 03f33779..15587548 100644
+--- a/crates/horizon-client/src/net.rs
++++ b/crates/horizon-client/src/net.rs
+@@ -419,10 +419,19 @@ impl Drop for Session {
+ /// client reaches on a loopback port, so everything after is a plain join.
+ pub const FRIEND: &str = horizon_friends::ADDRESS_PREFIX;
+ 
++/// The invite code in a friend's address: after "friend:" in any case (a phone keyboard
++/// capitalises the first letter of what is typed).
++pub fn friend_code(address: &str) -> Option<&str> {
++    address
++        .get(..FRIEND.len())
++        .filter(|p| p.eq_ignore_ascii_case(FRIEND))
++        .map(|_| &address[FRIEND.len()..])
++}
++
+ /// An address as players and logs see it: a friend's invite code stays
+ /// out of it (its secret is in there).
+ pub fn shown_address(address: &str) -> String {
+-    match address.strip_prefix(FRIEND) {
++    match friend_code(address) {
+         Some(code) => match horizon_friends::invite::parse(code) {
+             Some(horizon_friends::invite::Parsed::Short(c)) => {
+                 format!("Friend's world ({}-****)", c.nameplate)
+@@ -656,7 +665,7 @@ fn run(
+     let (host, port, mut c) = if let Some(pipe) = local {
+         (address.to_owned(), 0, Connection::local(pipe))
+     } else {
+-        let (host, port) = match address.strip_prefix(FRIEND) {
++        let (host, port) = match friend_code(address) {
+             Some(code) => join_friend(code, lang, send)?,
+             None => {
+                 let Some(target) = parse_address(address) else {
+diff --git a/crates/horizon-friends/src/guest.rs b/crates/horizon-friends/src/guest.rs
+index 3060ec10..19eea60c 100644
+--- a/crates/horizon-friends/src/guest.rs
++++ b/crates/horizon-friends/src/guest.rs
+@@ -114,6 +114,18 @@ pub fn join(config: &GuestConfig) -> Result<Tunnel, JoinError> {
+     match crate::invite::parse_detailed(&config.code).map_err(JoinError::BadCode)? {
+         Parsed::Short(code) => {
+             let relay = config.relay.as_deref().ok_or(JoinError::NeedsRelay)?;
++            if config.path == PathMode::DirectOnly {
++                // A short code is reached through the relay only: "direct only" would refuse the
++                // very stream it needs. The direct race still runs and wins when it can.
++                let auto = GuestConfig {
++                    code: config.code.clone(),
++                    relay: config.relay.clone(),
++                    protocol: config.protocol,
++                    game: config.game.clone(),
++                    path: PathMode::Auto,
++                };
++                return join_relay(&auto, relay, &code);
++            }
+             join_relay(config, relay, &code)
+         }
+         Parsed::Long(invite) => {
+diff --git a/crates/horizon-friends/src/host.rs b/crates/horizon-friends/src/host.rs
+index fbdb3c25..0147bba5 100644
+--- a/crates/horizon-friends/src/host.rs
++++ b/crates/horizon-friends/src/host.rs
+@@ -32,6 +32,11 @@ use std::{
+ 
+ /// Wrong short codes tried at the relay before the host retires it.
+ pub const MAX_WRONG: u32 = 5;
++
++/// The relay problem shown while the relay serves another short code than the player's lasting one
++/// (a relay from before kept codes, or no room there): friends need this session's code.
++pub const KEPT_REFUSED: &str = "The relay didn't take your lasting code, so friends need this session's code.";
++
+ /// Wrong short codes over one sharing session before the host leaves the
+ /// relay for good (the full code keeps working directly). Each short code
+ /// has a fresh 20-bit secret, so this caps a relay's chance of guessing one
+@@ -584,6 +589,27 @@ fn run_relay(shared: Arc<Shared>, relay: String) {
+     }
+ }
+ 
++/// Whether the relay serves the player's lasting code: said in the status and, for the launcher,
++/// in friends-kept.txt next to the identity ("ok" or "refused"). Nothing without an identity.
++fn note_kept(shared: &Shared, served: &str) {
++    let kept = shared
++        .identity
++        .lock()
++        .unwrap()
++        .as_ref()
++        .map(|(path, id)| (path.with_file_name("friends-kept.txt"), id.code.nameplate == served));
++    let Some((file, ok)) = kept else {
++        return;
++    };
++    if let Err(e) = std::fs::write(&file, if ok { "ok\n" } else { "refused\n" }) {
++        eprintln!("horizon-friends: {}: {e}", file.display());
++    }
++    if !ok {
++        eprintln!("horizon-friends: the relay didn't take the lasting code, serving {served}");
++        shared.state.lock().unwrap().relay_problem = Some(KEPT_REFUSED.to_owned());
++    }
++}
++
+ fn register(shared: &Arc<Shared>, relay_url: &str) -> io::Result<()> {
+     let config = &shared.config;
+     let port = Some(shared.state.lock().unwrap().port);
+@@ -627,6 +653,7 @@ fn register(shared: &Arc<Shared>, relay_url: &str) -> io::Result<()> {
+             ..
+         } if kept.is_some() => {
+             // A relay from before kept codes: a new one each time, as it was.
++            eprintln!("horizon-friends: the relay refused the lasting code (bad_request)");
+             let _ = control.shutdown(Shutdown::Both);
+             shared.claims.store(false, Ordering::Relaxed);
+             return register(shared, relay_url);
+@@ -636,6 +663,7 @@ fn register(shared: &Arc<Shared>, relay_url: &str) -> io::Result<()> {
+             ..
+         } if kept.is_some() => {
+             // No room for one more kept code there: a fresh one this time.
++            eprintln!("horizon-friends: the relay has no room for the lasting code (full)");
+             let _ = control.shutdown(Shutdown::Both);
+             shared.claims.store(false, Ordering::Relaxed);
+             let result = register(shared, relay_url);
+@@ -671,6 +699,7 @@ fn register(shared: &Arc<Shared>, relay_url: &str) -> io::Result<()> {
+         let _ = control.shutdown(Shutdown::Both);
+         return Ok(());
+     }
++    note_kept(shared, &code.nameplate);
+     shared.guesses.lock().unwrap().registered();
+     shared.publish(Some(code.clone()));
+     loop {
+diff --git a/packaging/android/java/dev/horizonlab/horizon/FriendsPage.java b/packaging/android/java/dev/horizonlab/horizon/FriendsPage.java
+index 80c5d1a8..915f7b5f 100644
+--- a/packaging/android/java/dev/horizonlab/horizon/FriendsPage.java
++++ b/packaging/android/java/dev/horizonlab/horizon/FriendsPage.java
+@@ -238,12 +238,28 @@ final class FriendsPage extends Page {
+         keptNote.setText(!server
+                 ? Ui.t("Работает через сервер Oneshot, а он сейчас выключен (relay.txt или «Только напрямую»). Пока друзьям нужен полный код выше.",
+                         "Works through the Oneshot server, which is off now (relay.txt or Direct only). Until then friends need the full code above.")
++                : keptRefused()
++                ? Ui.t("В прошлый раз сервер Oneshot не принял этот код и выдал другой: пока друзьям нужен код из игры. "
++                        + "Обычно это значит, что на сервере старая версия relay.",
++                        "Last time the Oneshot server didn't take this code and gave another one: until then friends need the code from the game. "
++                        + "Usually the server runs an older relay.")
+                 : Ui.t("Один и тот же при каждом открытии мира для друзей: отправьте его один раз. Друг подключится, пока вы раздаёте мир. "
+                         + "Если код попал не к тем людям — перевыпустите его.",
+                         "The same every time you share the world: send it once. A friend gets in while you are sharing. "
+                         + "If the code reached the wrong people, reissue it."));
+     }
+ 
++    /** The game's word on the last sharing (friends-kept.txt, horizon-friends host.rs): the relay served another code. */
++    private boolean keptRefused() {
++        try {
++            java.io.File f = new java.io.File(SetupActivity.home(a), "friends-kept.txt");
++            return f.isFile() && new String(java.nio.file.Files.readAllBytes(f.toPath()), java.nio.charset.StandardCharsets.UTF_8)
++                    .trim().equals("refused");
++        } catch (Exception e) {
++            return false;
++        }
++    }
++
+     private void confirmReissue() {
+         new android.app.AlertDialog.Builder(a)
+                 .setTitle(Ui.t("Перевыпустить код?", "Reissue the code?"))
+diff --git a/packaging/android/java/dev/horizonlab/horizon/ProfileActivity.java b/packaging/android/java/dev/horizonlab/horizon/ProfileActivity.java
+index 62f3f769..55b3767b 100644
+--- a/packaging/android/java/dev/horizonlab/horizon/ProfileActivity.java
++++ b/packaging/android/java/dev/horizonlab/horizon/ProfileActivity.java
+@@ -731,6 +731,9 @@ public class ProfileActivity extends Activity implements View.OnClickListener {
+     /** join.txt is read once by the game at start (android_main.rs) and deleted; join-last.txt keeps the field. */
+     private void saveJoin() {
+         String code = join.getText().toString().trim().replaceAll("\\s+", "");
++        // Typed by hand (K7QM-3XPD, Friend:...): the same friend:CODE that Paste gives.
++        String c = Net.normalize(code);
++        if (c != null) code = "friend:" + c;
+         try {
+             new File(dir, "join.txt").delete();
+             File last = new File(dir, "join-last.txt");
+diff --git a/packaging/android/java/dev/horizonlab/horizon/SetupActivity.java b/packaging/android/java/dev/horizonlab/horizon/SetupActivity.java
+index 55b5b588..9b1d7698 100644
+--- a/packaging/android/java/dev/horizonlab/horizon/SetupActivity.java
++++ b/packaging/android/java/dev/horizonlab/horizon/SetupActivity.java
+@@ -66,7 +66,8 @@ public class SetupActivity extends Activity
+         android.net.Uri link = getIntent() == null ? null : getIntent().getData();
+         if (link != null && "oneshot".equals(link.getScheme())) {
+             String raw = link.getFragment() != null ? link.getFragment() : link.getPath();
+-            String c = Net.normalize(raw == null ? "" : raw.replace("/", ""));
++            // A link's code is a code even without its dash: marked as one for normalize.
++            String c = Net.normalize(raw == null ? "" : "friend:" + raw.replace("/", ""));
+             if (c != null) {
+                 try {
+                     ProfileActivity.write(new File(home, "join-pending.txt"), c.getBytes(java.nio.charset.StandardCharsets.UTF_8));
+-- 
+2.49.0.windows.1
+
