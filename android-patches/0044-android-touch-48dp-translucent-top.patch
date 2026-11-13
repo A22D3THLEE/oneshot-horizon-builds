@@ -1,0 +1,53 @@
+From d8ca3c07dcb7f5e11c08d08b566fd815f5f85c89 Mon Sep 17 00:00:00 2001
+From: oneshot <oneshot@localhost>
+Date: Fri, 13 Nov 2026 13:56:45 +0300
+Subject: [PATCH] 0044 android: touch buttons at least 48 dp, translucent top
+ row
+
+Buttons now grow to a 24 dp half-size (Android's 48 dp touch target)
+instead of 18 dp. The top row (chat, pause, camera, layout) is drawn at
+half the other buttons' opacity outside the layout editor, so the bigger
+tiles do not cover the view.
+
+Co-Authored-By: Claude Opus 5.5 <noreply@anthropic.com>
+---
+ crates/horizon-client/src/game/touch.rs | 16 ++++++++++++----
+ 1 file changed, 12 insertions(+), 4 deletions(-)
+
+diff --git a/crates/horizon-client/src/game/touch.rs b/crates/horizon-client/src/game/touch.rs
+index 25bb7cfa..1e8c96fb 100644
+--- a/crates/horizon-client/src/game/touch.rs
++++ b/crates/horizon-client/src/game/touch.rs
+@@ -759,10 +759,15 @@ const SWIPE_STEP: f32 = 18.0;
+ /// How far from a slot (GUI px) a dropped stack still lands in it.
+ const SNAP: f32 = 30.0;
+ 
+-/// The smallest a button's half-size is drawn and hit, in dp (a 36 dp tile, about
+-/// 6 mm). A phone's GUI is a third of a tablet's in dp: at GUI scale 4 on a 440 dpi
+-/// screen Bedrock's top tiles came out 14 dp across, too small for a thumb.
+-const MIN_DP: f32 = 18.0;
++/// The smallest a button's half-size is drawn and hit, in dp (a 48 dp tile, about
++/// 7.5 mm, Android's touch target). A phone's GUI is a third of a tablet's in dp: at
++/// GUI scale 4 on a 440 dpi screen Bedrock's top tiles came out 14 dp across, too
++/// small for a thumb.
++const MIN_DP: f32 = 24.0;
++
++/// How opaque the top row (chat, pause, camera, layout) is next to the other
++/// buttons outside the editor: they are tapped seldom and sit over the view.
++const TOP_ROW_ALPHA: f32 = 0.5;
+ 
+ /// The screen's density in dpi, 0 where it is not known (not Android).
+ #[cfg(target_os = "android")]
+@@ -1612,6 +1617,9 @@ impl Game<'_> {
+             if !spec.visible {
+                 a *= 0.35;
+             }
++            if !editing && matches!(id, Id::Chat | Id::Pause | Id::F5 | Id::Edit) {
++                a *= TOP_ROW_ALPHA;
++            }
+             if swapped_out(layout, id, self.touch_flying(), editing) {
+                 continue;
+             }
+-- 
+2.49.0.windows.1
+
