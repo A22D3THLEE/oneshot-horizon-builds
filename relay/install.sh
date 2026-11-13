@@ -38,7 +38,9 @@ RestartSec=5
 WantedBy=multi-user.target
 UNIT
 systemctl daemon-reload
-systemctl enable --now horizon-relay
+systemctl enable horizon-relay
+# restart, not just start: re-running the installer must swap a running old binary for the new one
+systemctl restart horizon-relay
 if [ "${OPEN_FIREWALL:-0}" = 1 ] && command -v ufw >/dev/null; then ufw allow "$PORT"/tcp; fi
 sleep 1
 systemctl is-active horizon-relay
