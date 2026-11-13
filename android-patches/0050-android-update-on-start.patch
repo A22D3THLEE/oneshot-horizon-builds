@@ -1,0 +1,165 @@
+diff --git a/packaging/android/java/dev/horizonlab/horizon/HomePage.java b/packaging/android/java/dev/horizonlab/horizon/HomePage.java
+index 4a848fc..dfd04a2 100644
+--- a/packaging/android/java/dev/horizonlab/horizon/HomePage.java
++++ b/packaging/android/java/dev/horizonlab/horizon/HomePage.java
+@@ -177,7 +177,8 @@ final class HomePage extends Page {
+         StringBuilder b = new StringBuilder();
+         for (String l : body.replace("\r", "").split("\n")) {
+             String t = l.trim();
+-            if (t.isEmpty() || t.startsWith("OneShot for Android")) continue;
++            if (t.isEmpty() || t.startsWith("OneShot for Android") || t.matches("(?i)(Что нового|What's new):?")) continue;
++            if (t.startsWith("- ")) t = "•" + t.substring(1);
+             if (t.matches("(?i)(versionCode|versionName|sha256|port commit|patches)\\s*:.*")) continue;
+             b.append(t).append(' ');
+         }
+diff --git a/packaging/android/java/dev/horizonlab/horizon/ProfileActivity.java b/packaging/android/java/dev/horizonlab/horizon/ProfileActivity.java
+index c3dc6c8..ed75baa 100644
+--- a/packaging/android/java/dev/horizonlab/horizon/ProfileActivity.java
++++ b/packaging/android/java/dev/horizonlab/horizon/ProfileActivity.java
+@@ -72,6 +72,8 @@ public class ProfileActivity extends Activity implements View.OnClickListener {
+     private final List<TextView> relayLabels = new ArrayList<>();
+     private long relayMs = Long.MIN_VALUE;
+     private boolean updateReady;
++    /** A dialog of the start (a crash, the welcome) is up: the update offer waits for the next start. */
++    private boolean startDialog;
+ 
+     @Override
+     protected void onCreate(Bundle state) {
+@@ -198,11 +200,14 @@ public class ProfileActivity extends Activity implements View.OnClickListener {
+         refreshAccount();
+         updateModel();
+         showPreview();
+-        checkUpdate();
++        checkUpdate(state == null);
+         show(state == null ? HOME : state.getInt("page", HOME));
+ 
+         if (state == null) {
+-            if (PlayStats.fold(this)) crashDialog();
++            if (PlayStats.fold(this)) {
++                startDialog = true;
++                crashDialog();
++            }
+             else welcome();
+         }
+     }
+@@ -267,14 +272,23 @@ public class ProfileActivity extends Activity implements View.OnClickListener {
+         t.setTextColor(relayMs >= 0 ? Ui.GOOD : relayMs == -1 ? Ui.BAD : Ui.MUTED);
+     }
+ 
+-    private void checkUpdate() {
++    private void checkUpdate(final boolean offer) {
+         new Thread(new Runnable() {
+             public void run() {
+                 final UpdateActivity.Release r = UpdateActivity.newer(ProfileActivity.this);
+                 if (r == null) return;
++                List<String> news;
++                try {
++                    news = UpdateActivity.changesSince(UpdateActivity.releases(ProfileActivity.this, false),
++                            UpdateActivity.versionCode(ProfileActivity.this), 12);
++                } catch (Exception e) {
++                    news = UpdateActivity.changes(r);
++                }
++                final List<String> changes = news;
+                 runOnUiThread(new Runnable() {
+                     public void run() {
+                         if (isFinishing()) return;
++                        if (offer && !startDialog) offerUpdate(r, changes);
+                         updateReady = true;
+                         versions.setText(Ui.t("Доступно обновление: ", "Update available: ") + r.name);
+                         versions.setBackground(Ui.rounded(ProfileActivity.this, Ui.GREEN, 0, 12));
+@@ -482,6 +496,38 @@ public class ProfileActivity extends Activity implements View.OnClickListener {
+         if (join == null) join = Ui.field(this, "");
+     }
+ 
++    /**
++     * A new version is out: its name and what is new since this one, once per version (the
++     * versions button stays green until it is installed).
++     */
++    private void offerUpdate(final UpdateActivity.Release r, List<String> changes) {
++        String code = String.valueOf(r.code);
++        if (code.equals(Ui.pref(this, "update-offered"))) return;
++        Ui.setPref(this, "update-offered", code);
++        LinearLayout box = new LinearLayout(this);
++        box.setOrientation(LinearLayout.VERTICAL);
++        int p = Ui.dp(this, 20);
++        box.setPadding(p, Ui.dp(this, 4), p, 0);
++        box.addView(Ui.text(this, Ui.t("У вас ", "You have ") + UpdateActivity.versionName(this)
++                + Ui.t(". Миры и настройки останутся на месте.", ". The worlds and settings stay."), 13, Ui.MUTED, false));
++        if (!changes.isEmpty()) {
++            box.addView(Ui.text(this, Ui.t("Что нового:", "What's new:"), 14, Ui.TEXT, true), Ui.gap(this, 10));
++            for (String c : changes) box.addView(Ui.text(this, "•  " + c, 14, Ui.TEXT, false), Ui.gap(this, 4));
++        }
++        ScrollView sv = new ScrollView(this);
++        sv.addView(box);
++        new AlertDialog.Builder(this)
++                .setTitle(Ui.t("Доступно обновление ", "Update available: ") + r.name)
++                .setView(sv)
++                .setPositiveButton(Ui.t("Обновить", "Update"), new DialogInterface.OnClickListener() {
++                    public void onClick(DialogInterface d, int w) {
++                        startActivity(new Intent(ProfileActivity.this, UpdateActivity.class));
++                    }
++                })
++                .setNegativeButton(Ui.t("Позже", "Later"), null)
++                .show();
++    }
++
+     // ---- First start, a crash, a link --------------------------------------------------------
+ 
+     /** The last game ended without a clean exit: offer to start again or to send the log. */
+@@ -517,6 +563,7 @@ public class ProfileActivity extends Activity implements View.OnClickListener {
+     private void welcome() {
+         final File done = new File(getFilesDir(), "welcome.done");
+         if (done.isFile() || !readName().isEmpty()) return;
++        startDialog = true;
+         LinearLayout box = new LinearLayout(this);
+         box.setOrientation(LinearLayout.VERTICAL);
+         int p = Ui.dp(this, 20);
+diff --git a/packaging/android/java/dev/horizonlab/horizon/UpdateActivity.java b/packaging/android/java/dev/horizonlab/horizon/UpdateActivity.java
+index 779ed78..52042d6 100644
+--- a/packaging/android/java/dev/horizonlab/horizon/UpdateActivity.java
++++ b/packaging/android/java/dev/horizonlab/horizon/UpdateActivity.java
+@@ -188,6 +188,34 @@ public class UpdateActivity extends Activity {
+         return out;
+     }
+ 
++    /**
++     * A release's list of changes: the "- " lines of its notes (android.yml writes them under
++     * "Что нового:" from docs/android-changes.md), without the markdown marks.
++     */
++    static List<String> changes(Release r) {
++        List<String> out = new ArrayList<String>();
++        for (String l : r.notes.replace("\r", "").split("\n")) {
++            String t = l.trim();
++            if (!t.startsWith("- ") && !t.startsWith("* ")) continue;
++            t = t.substring(2).replaceAll("[*`]", "").trim();
++            if (!t.isEmpty()) out.add(t);
++        }
++        return out;
++    }
++
++    /** The changes of every release newer than this build, newest first and each once; at most `max`. */
++    static List<String> changesSince(List<Release> all, long mine, int max) {
++        java.util.LinkedHashSet<String> seen = new java.util.LinkedHashSet<String>();
++        for (Release r : all) if (r.code > mine) seen.addAll(changes(r));
++        List<String> out = new ArrayList<String>(seen);
++        if (out.size() > max) {
++            int more = out.size() - (max - 1);
++            out = new ArrayList<String>(out.subList(0, max - 1));
++            out.add(Ui.t("…и ещё " + more, "…and " + more + " more"));
++        }
++        return out;
++    }
++
+     /** The newest published build when it is newer than this one, else null; for the profile's badge. */
+     static Release newer(Context c) {
+         try {
+@@ -251,6 +279,9 @@ public class UpdateActivity extends Activity {
+             info.addView(Ui.text(this, r.name + badge, 16, Ui.TEXT, true));
+             info.addView(Ui.text(this, r.date + "  ·  " + (r.size >> 20) + Ui.t(" МБ", " MB")
+                     + "  ·  #" + r.code, 12, Ui.MUTED, false));
++            if (r.code > mine) {
++                for (String c : changes(r)) info.addView(Ui.text(this, "•  " + c, 13, Ui.TEXT, false));
++            }
+             row.addView(info, new LinearLayout.LayoutParams(0, -2, 1));
+             final Button b;
+             if (current) {

@@ -54,6 +54,8 @@ jobs:
         with:
           path: oneshot
           persist-credentials: false
+          # The whole history: the release notes list docs/android-changes.md lines added since the last release.
+          fetch-depth: 0
       - name: The port's source
         env:
           REF: ${{ inputs.ref }}
@@ -197,8 +199,24 @@ jobs:
           fi
           tag="android-$VERSION_CODE"
           sha=$(cut -d' ' -f1 src/target/android/horizon.apk.sha256)
-          notes=$(printf 'OneShot for Android %s\n\nversionCode: %s\nversionName: %s\nsha256: %s\nport commit: %s\npatches: %s\n' \
-            "$VERSION_NAME" "$VERSION_CODE" "$VERSION_NAME" "$sha" "$(git -C src rev-parse HEAD)" "$PATCHES")
+          # What is new: the "- " lines of docs/android-changes.md added since the commit of the newest
+          # android-* release (the first 12 when that commit is unknown); the app shows them on start.
+          prev=$(gh release list -R "$GITHUB_REPOSITORY" --limit 100 --json tagName -q '.[].tagName' \
+            | { grep -E '^android-[0-9]+$' || true; } | sort -t- -k2 -n -r | head -n 1)
+          base=""
+          if [[ -n "$prev" ]]; then
+            base=$(gh api "repos/$GITHUB_REPOSITORY/releases/tags/$prev" -q .target_commitish 2>/dev/null || true)
+            [[ -n "$base" ]] && { git -C oneshot cat-file -e "$base^{commit}" 2>/dev/null || base=""; }
+          fi
+          if [[ -n "$base" ]]; then
+            changes=$(git -C oneshot diff "$base" HEAD -- docs/android-changes.md | { grep -E '^\+- ' || true; } | sed 's/^+//')
+          else
+            changes=$({ grep -E '^- ' oneshot/docs/android-changes.md || true; } | head -n 12)
+          fi
+          whatsnew=""
+          if [[ -n "$changes" ]]; then whatsnew="Что нового:"$'\n'"$changes"$'\n\n'; fi
+          notes=$(printf 'OneShot for Android %s\n\n%sversionCode: %s\nversionName: %s\nsha256: %s\nport commit: %s\npatches: %s\n' \
+            "$VERSION_NAME" "$whatsnew" "$VERSION_CODE" "$VERSION_NAME" "$sha" "$(git -C src rev-parse HEAD)" "$PATCHES")
           gh release create "$tag" -R "$GITHUB_REPOSITORY" --target "$GITHUB_SHA" --title "OneShot Android $VERSION_NAME" \
             --notes "$notes" src/target/android/horizon.apk src/target/android/horizon.apk.sha256
           echo "release: $tag" >> "$GITHUB_STEP_SUMMARY"
