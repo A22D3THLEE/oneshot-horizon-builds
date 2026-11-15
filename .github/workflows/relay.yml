@@ -29,7 +29,7 @@ jobs:
           git fetch -q --depth 1 origin "${{ inputs.ref }}"
           git checkout -q FETCH_HEAD
       - name: Oneshot patches
-        # relay/patches: the lasting short code (claims) on top of the chosen commit.
+        # relay/patches: the lasting short code (claims) and who of my friends shares now (online), on top of the chosen commit.
         run: |
           set -euo pipefail
           cd src
@@ -42,6 +42,12 @@ jobs:
         with:
           targets: x86_64-unknown-linux-musl
       - run: sudo apt-get install -y musl-tools
+      - name: Test
+        # The wire protocol and the `online` query (relay/patches/0002).
+        run: |
+          cd src
+          cargo test --locked -p horizon-friends --lib wire:: --message-format short
+          cargo test --locked -p horizon-relay --test online --message-format short
       - name: Build
         run: |
           cd src
