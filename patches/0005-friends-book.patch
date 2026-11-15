@@ -1,0 +1,545 @@
+diff --git a/crates/horizon-client/assets/horizon/lang/en_us.json b/crates/horizon-client/assets/horizon/lang/en_us.json
+index 8be75cbc..252edcd8 100644
+--- a/crates/horizon-client/assets/horizon/lang/en_us.json
++++ b/crates/horizon-client/assets/horizon/lang/en_us.json
+@@ -315,6 +315,7 @@
+   "horizon.multiplayer.join_friend": "Join a Friend",
+   "horizon.multiplayer.invite_code": "Invite Code",
+   "horizon.multiplayer.relay": "Relay (optional)",
++  "horizon.multiplayer.recent_friends": "Played with recently",
+   "Preset": "Preset",
+   "Horizon Preset": "Horizon Preset",
+   "LOD Distance": "LOD Distance",
+diff --git a/crates/horizon-client/assets/horizon/lang/ru_ru.json b/crates/horizon-client/assets/horizon/lang/ru_ru.json
+index 9fdd54c8..1ab05363 100644
+--- a/crates/horizon-client/assets/horizon/lang/ru_ru.json
++++ b/crates/horizon-client/assets/horizon/lang/ru_ru.json
+@@ -214,6 +214,7 @@
+   "horizon.multiplayer.join_friend": "Играть с другом",
+   "horizon.multiplayer.invite_code": "Код приглашения",
+   "horizon.multiplayer.relay": "Ретранслятор (необязательно)",
++  "horizon.multiplayer.recent_friends": "Недавно играли вместе",
+   "Preset": "Пресет",
+   "LOD Distance": "Дистанция LOD",
+   "Far Detail": "Детализация вдали",
+diff --git a/crates/horizon-client/src/game/integrated.rs b/crates/horizon-client/src/game/integrated.rs
+index 2aa7dad2..fc92c6e9 100644
+--- a/crates/horizon-client/src/game/integrated.rs
++++ b/crates/horizon-client/src/game/integrated.rs
+@@ -413,6 +413,8 @@ impl Game<'_> {
+         let player = auth
+             .as_ref()
+             .map_or_else(|| self.options.player_name(), |a| a.name.clone());
++        #[cfg(feature = "friends")]
++        horizon_friends::book::set_name(&player);
+         let new_world = create.is_some();
+         // `IntegratedServer`'s constructor: `setSingleplayerProfile(minecraft.getGameProfile())`
+         // — the signed-in account's own UUID. Only an offline start names its player by the
+diff --git a/crates/horizon-client/src/game/remote.rs b/crates/horizon-client/src/game/remote.rs
+index be6e60c4..60350828 100644
+--- a/crates/horizon-client/src/game/remote.rs
++++ b/crates/horizon-client/src/game/remote.rs
+@@ -991,6 +991,8 @@ impl Game<'_> {
+         lan: bool,
+         realm: bool,
+     ) -> Result<()> {
++        #[cfg(feature = "friends")]
++        horizon_friends::book::set_name(name);
+         self.realm_session = realm;
+         self.reset_tutorial();
+         self.perf.world_opening();
+diff --git a/crates/horizon-client/src/multiplayer.rs b/crates/horizon-client/src/multiplayer.rs
+index aed32064..0ca14557 100644
+--- a/crates/horizon-client/src/multiplayer.rs
++++ b/crates/horizon-client/src/multiplayer.rs
+@@ -151,6 +151,81 @@ pub enum Screen {
+ }
+ mod page;
+ 
++/// Join a Friend's row of the friends played with lately (horizon-friends' book, filled by
++/// the cards both sides of a session swap): a press joins one with their lasting code.
++#[cfg(feature = "friends")]
++mod recent_friends {
++    use super::{ButtonSpec, half, quarter};
++    use horizon_friends::book::{self, Friend};
++    use std::sync::atomic::{AtomicUsize, Ordering};
++
++    /// The two friends' buttons, then » for the next two.
++    pub const FIRST: u8 = 70;
++    pub const MORE: u8 = 72;
++    static PAGE: AtomicUsize = AtomicUsize::new(0);
++
++    /// The friends shown, and whether there are more than fit.
++    fn shown() -> (Vec<Friend>, bool) {
++        let all = book::recent(32);
++        if all.len() <= 2 {
++            return (all, false);
++        }
++        let pages = all.len().div_ceil(2);
++        let page = PAGE.load(Ordering::Relaxed) % pages;
++        (all.into_iter().skip(page * 2).take(2).collect(), true)
++    }
++
++    pub fn any() -> bool {
++        !book::recent(1).is_empty()
++    }
++
++    fn label(name: &str, chars: usize) -> String {
++        if name.chars().count() <= chars {
++            name.to_owned()
++        } else {
++            let mut s: String = name.chars().take(chars - 1).collect();
++            s.push('…');
++            s
++        }
++    }
++
++    pub fn buttons(w: f32, h: f32) -> Vec<ButtonSpec> {
++        let (friends, more) = shown();
++        let (x, y) = (half(w) - 100.0, quarter(h) + 90.0);
++        let mut out = Vec::new();
++        let (bw, chars) = match (friends.len(), more) {
++            (1, _) => (200.0, 24),
++            (_, false) => (98.0, 13),
++            (_, true) => (81.0, 10),
++        };
++        for (k, f) in friends.iter().enumerate() {
++            out.push((
++                x + k as f32 * (bw + 2.0),
++                y,
++                bw,
++                label(&f.name, chars),
++                !f.stale,
++                FIRST + k as u8,
++            ));
++        }
++        if more {
++            out.push((x + 166.0, y, 34.0, "»".to_owned(), true, MORE));
++        }
++        out
++    }
++
++    /// A press on button `id`: the address to join, if it was a friend's.
++    pub fn press(id: u8) -> Option<String> {
++        if id == MORE {
++            PAGE.fetch_add(1, Ordering::Relaxed);
++            return None;
++        }
++        let (friends, _) = shown();
++        let f = friends.get(usize::from(id - FIRST))?;
++        (!f.stale).then(|| format!("{}{}", crate::net::FRIEND, f.code))
++    }
++}
++
+ /// What the title screen's Friends icon opens: the page a crate registered there
+ /// (`Place::Title`), else Join a Friend when an invite code can be joined. None: it is inactive.
+ pub fn title_entry() -> Option<Screen> {
+@@ -771,24 +846,30 @@ impl Screen {
+                 ),
+             ],
+             Self::Page(form) => form.buttons(w, h),
+-            Self::Friend { code, .. } => vec![
+-                b(
+-                    half(w) - 100.0,
+-                    quarter(h) + 96.0 + 18.0,
+-                    200.0,
+-                    &crate::lang::get_or("horizon.multiplayer.join", "Join"),
+-                    crate::net::is_invite(code, false),
+-                    56,
+-                ),
+-                b(
+-                    half(w) - 100.0,
+-                    quarter(h) + 120.0 + 18.0,
+-                    200.0,
+-                    &crate::lang::get_or("gui.cancel", "Cancel"),
+-                    true,
+-                    57,
+-                ),
+-            ],
++            Self::Friend { code, .. } => {
++                #[allow(unused_mut)]
++                let mut buttons = vec![
++                    b(
++                        half(w) - 100.0,
++                        quarter(h) + 96.0 + 18.0,
++                        200.0,
++                        &crate::lang::get_or("horizon.multiplayer.join", "Join"),
++                        crate::net::is_invite(code, false),
++                        56,
++                    ),
++                    b(
++                        half(w) - 100.0,
++                        quarter(h) + 120.0 + 18.0,
++                        200.0,
++                        &crate::lang::get_or("gui.cancel", "Cancel"),
++                        true,
++                        57,
++                    ),
++                ];
++                #[cfg(feature = "friends")]
++                buttons.extend(recent_friends::buttons(w, h));
++                buttons
++            }
+             Self::Disconnected { retry, lines, .. } => {
+                 let btn = disconnected_layout(h, lines.get(), retry.is_some()).buttons;
+                 let mut v = vec![b(
+@@ -1380,6 +1461,18 @@ impl Screen {
+                     (94.0, 105.0),
+                     *focus == 1,
+                 );
++                #[cfg(feature = "friends")]
++                if recent_friends::any() {
++                    centered(
++                        batch,
++                        &crate::lang::get_or(
++                            "horizon.multiplayer.recent_friends",
++                            "Played with recently",
++                        ),
++                        quarter(h) + 79.0,
++                        rgba(160, 160, 160, 255),
++                    );
++                }
+             }
+             Self::Disconnected {
+                 reason,
+@@ -1702,6 +1795,15 @@ impl Screen {
+                     lan: false,
+                 };
+             }
++            #[cfg(feature = "friends")]
++            (Self::Friend { .. }, Some(id @ recent_friends::FIRST..=recent_friends::MORE)) => {
++                if let Some(address) = recent_friends::press(id) {
++                    return Outcome::Connect {
++                        address,
++                        lan: false,
++                    };
++                }
++            }
+             (Self::Friend { code, relay, .. }, Some(56)) => {
+                 if crate::net::is_invite(code, false) {
+                     crate::net::save_friends_relay(relay.trim());
+diff --git a/crates/horizon-friends/src/book.rs b/crates/horizon-friends/src/book.rs
+new file mode 100644
+index 00000000..37798347
+--- /dev/null
++++ b/crates/horizon-friends/src/book.rs
+@@ -0,0 +1,250 @@
++//! The friends a player shared a world with: each side of a session hands the other a card (its
++//! name and lasting short code, [`crate::identity`]) once the tunnel is up, and the book keeps
++//! them beside the identity file, so Join a Friend can join one again without typing a code.
++//! Without an identity file there is no book and no card: a lasting code is the launcher's.
++//!
++//! ```text
++//! K7QM<TAB>3XPD<TAB>1763251200<TAB>0<TAB>Alex
++//! ```
++//! (nameplate, secret, last played in Unix seconds, stale, name). A stale entry turned a wrong
++//! code once: its owner reissued the secret, so it is never tried again until a new card comes,
++//! as every wrong guess counts toward the owner's limit on the relay.
++use crate::code::{self, Code};
++use std::{
++    path::PathBuf,
++    sync::Mutex,
++    time::{SystemTime, UNIX_EPOCH},
++};
++
++/// Entries the book keeps, the most recent first.
++const KEEP: usize = 32;
++/// Characters of a name kept.
++const NAME: usize = 24;
++
++#[derive(Clone, Debug, PartialEq, Eq)]
++pub struct Friend {
++    pub name: String,
++    pub code: Code,
++    /// Unix seconds of the last session together.
++    pub last: u64,
++    pub stale: bool,
++}
++
++/// The book as read (None: not yet), and this player's name for the cards.
++static BOOK: Mutex<Option<Vec<Friend>>> = Mutex::new(None);
++static NAME_MINE: Mutex<String> = Mutex::new(String::new());
++
++fn path() -> Option<PathBuf> {
++    let id = crate::identity::path()?;
++    Some(id.with_file_name("friends-book.txt"))
++}
++
++fn now() -> u64 {
++    SystemTime::now()
++        .duration_since(UNIX_EPOCH)
++        .map_or(0, |d| d.as_secs())
++}
++
++/// A name as kept: printable, one line, no tabs, at most [`NAME`] characters.
++fn clean(name: &str) -> String {
++    name.chars()
++        .filter(|c| !c.is_control())
++        .take(NAME)
++        .collect::<String>()
++        .trim()
++        .to_owned()
++}
++
++fn parse(text: &str) -> Vec<Friend> {
++    let mut out = Vec::new();
++    for line in text.lines() {
++        let mut parts = line.splitn(5, '\t');
++        let (Some(n), Some(s), Some(last), Some(stale), Some(name)) = (
++            parts.next(),
++            parts.next(),
++            parts.next(),
++            parts.next(),
++            parts.next(),
++        ) else {
++            continue;
++        };
++        let (Some(nameplate), Some(secret)) = (code::parse_nameplate(n), code::parse_nameplate(s))
++        else {
++            continue;
++        };
++        out.push(Friend {
++            name: clean(name),
++            code: Code { nameplate, secret },
++            last: last.trim().parse().unwrap_or(0),
++            stale: stale.trim() == "1",
++        });
++    }
++    out.sort_by(|a, b| b.last.cmp(&a.last));
++    out.truncate(KEEP);
++    out
++}
++
++fn format(book: &[Friend]) -> String {
++    book.iter()
++        .map(|f| {
++            format!(
++                "{}\t{}\t{}\t{}\t{}\n",
++                f.code.nameplate,
++                f.code.secret,
++                f.last,
++                u8::from(f.stale),
++                f.name
++            )
++        })
++        .collect()
++}
++
++/// Run `f` on the book (read on first use), then save it when `f` says it changed.
++fn with_book<T>(f: impl FnOnce(&mut Vec<Friend>) -> (T, bool)) -> Option<T> {
++    let path = path()?;
++    let mut guard = BOOK.lock().unwrap_or_else(|e| e.into_inner());
++    let book = guard.get_or_insert_with(|| {
++        std::fs::read_to_string(&path)
++            .map(|t| parse(&t))
++            .unwrap_or_default()
++    });
++    let (out, changed) = f(book);
++    if changed {
++        let mut tmp = path.as_os_str().to_owned();
++        tmp.push(".tmp");
++        let tmp = PathBuf::from(tmp);
++        if std::fs::write(&tmp, format(book)).is_ok() {
++            let _ = std::fs::rename(&tmp, &path);
++        }
++    }
++    Some(out)
++}
++
++/// The friends played with, the most recent first (at most `n`).
++pub fn recent(n: usize) -> Vec<Friend> {
++    with_book(|b| (b.iter().take(n).cloned().collect(), false)).unwrap_or_default()
++}
++
++/// The name this player's cards carry (the game sets it when a world opens).
++pub fn set_name(name: &str) {
++    *NAME_MINE.lock().unwrap_or_else(|e| e.into_inner()) = clean(name);
++}
++
++/// This player's card, None without an identity file.
++pub fn my_card() -> Option<Vec<u8>> {
++    let path = crate::identity::path()?;
++    let id = crate::identity::Identity::load_or_create(&path).ok()?;
++    let name = NAME_MINE.lock().unwrap_or_else(|e| e.into_inner()).clone();
++    let card = serde_json::json!({ "card": { "name": name, "code": id.code.to_string() } });
++    serde_json::to_vec(&card).ok()
++}
++
++/// A control message from the other side: kept when it is a card.
++pub fn heard(message: &[u8]) {
++    #[derive(serde::Deserialize)]
++    struct Card {
++        name: String,
++        code: String,
++    }
++    #[derive(serde::Deserialize)]
++    struct Message {
++        card: Card,
++    }
++    let Ok(Message { card }) = serde_json::from_slice::<Message>(message) else {
++        return;
++    };
++    let Some(code) = Code::parse(&card.code) else {
++        return;
++    };
++    met(&card.name, code);
++}
++
++/// Note a session with the friend named `name` behind `code`.
++pub fn met(name: &str, code: Code) {
++    // Our own card never comes back, but a player could join their own world.
++    if let Some(mine) = crate::identity::path().and_then(|p| crate::identity::Identity::read(&p))
++        && mine.code.nameplate == code.nameplate
++    {
++        return;
++    }
++    let mut name = clean(name);
++    if name.is_empty() {
++        name = code.nameplate.clone();
++    }
++    with_book(|b| {
++        // One entry per nameplate (two friends may share a name).
++        b.retain(|f| f.code.nameplate != code.nameplate);
++        b.insert(
++            0,
++            Friend {
++                name,
++                code,
++                last: now(),
++                stale: false,
++            },
++        );
++        b.truncate(KEEP);
++        ((), true)
++    });
++}
++
++fn find(b: &mut [Friend], code: &str) -> Option<usize> {
++    let code = Code::parse(code)?;
++    b.iter().position(|f| f.code == code)
++}
++
++/// A join with `code` worked: its friend moves up.
++pub fn joined(code: &str) {
++    with_book(|b| match find(b, code) {
++        Some(i) => {
++            let mut f = b.remove(i);
++            f.last = now();
++            f.stale = false;
++            b.insert(0, f);
++            ((), true)
++        }
++        None => ((), false),
++    });
++}
++
++/// A join with `code` met a wrong secret: never tried again until a new card.
++pub fn wrong(code: &str) {
++    with_book(|b| match find(b, code) {
++        Some(i) => {
++            b[i].stale = true;
++            ((), true)
++        }
++        None => ((), false),
++    });
++}
++
++#[cfg(test)]
++mod tests {
++    use super::*;
++
++    #[test]
++    fn the_book_reads_back_what_it_wrote_and_skips_broken_lines() {
++        let book = vec![
++            Friend {
++                name: "Alex".into(),
++                code: Code::parse("K7QM-3XPD").unwrap(),
++                last: 20,
++                stale: false,
++            },
++            Friend {
++                name: "Sam".into(),
++                code: Code::parse("ABCD-EFGH").unwrap(),
++                last: 10,
++                stale: true,
++            },
++        ];
++        let text = format!("{}broken line\nK7\tX\t1\t0\tBad\n", format(&book));
++        assert_eq!(parse(&text), book);
++    }
++
++    #[test]
++    fn names_stay_on_one_line() {
++        assert_eq!(clean("  A\tB\nC  "), "ABC");
++        assert_eq!(clean(&"x".repeat(40)).len(), NAME);
++    }
++}
+diff --git a/crates/horizon-friends/src/game.rs b/crates/horizon-friends/src/game.rs
+index 6991297d..6d9f71f3 100644
+--- a/crates/horizon-friends/src/game.rs
++++ b/crates/horizon-friends/src/game.rs
+@@ -79,7 +79,13 @@ impl Resolver for Invites {
+             game: VANILLA_VERSION.to_owned(),
+             path: PathMode::from_env(),
+         })
+-        .map_err(|e| e.to_string())?;
++        .map_err(|e| {
++            if matches!(e, guest::JoinError::WrongCode) {
++                crate::book::wrong(code);
++            }
++            e.to_string()
++        })?;
++        crate::book::joined(code);
+         progress(Progress::Connected {
+             direct: tunnel.direct,
+         });
+diff --git a/crates/horizon-friends/src/lib.rs b/crates/horizon-friends/src/lib.rs
+index 5bcc8343..68b265cf 100644
+--- a/crates/horizon-friends/src/lib.rs
++++ b/crates/horizon-friends/src/lib.rs
+@@ -8,6 +8,7 @@
+ //! local port the guest's client connects to), end-to-end encrypted with a
+ //! key only the holders of the code can derive. The design, the protocol and
+ //! what the relay sees are in docs/play-with-friends.md.
++pub mod book;
+ pub mod code;
+ pub mod crypto;
+ pub mod direct;
+@@ -127,7 +128,8 @@ pub fn set_tcp_keepalive(stream: &TcpStream) -> io::Result<()> {
+ }
+ 
+ /// Carry one connection both ways between a plain stream (the game's) and a
+-/// protected one, until either side ends; then both are closed.
++/// protected one, until either side ends; then both are closed. Each side first hands the
++/// other its card ([`book`]); a side without cards ignores the control message.
+ pub fn pump(
+     plain: TcpStream,
+     mut reader: crypto::SecureReader<TcpStream>,
+@@ -139,6 +141,9 @@ pub fn pump(
+         let _ = s.set_nodelay(true);
+         let _ = set_tcp_keepalive(s);
+     }
++    if let Some(card) = book::my_card() {
++        let _ = writer.write_control(&card);
++    }
+     let mut plain_in = plain.try_clone()?;
+     let mut plain_out = plain;
+     let outbound = std::thread::Builder::new()
+@@ -162,10 +167,13 @@ pub fn pump(
+         .name("horizon-friends-in".into())
+         .spawn(move || {
+             while let Ok(Some(frame)) = reader.read_frame() {
+-                if let crypto::Frame::Data(d) = frame
+-                    && plain_out.write_all(&d).is_err()
+-                {
+-                    break;
++                match frame {
++                    crypto::Frame::Data(d) => {
++                        if plain_out.write_all(&d).is_err() {
++                            break;
++                        }
++                    }
++                    crypto::Frame::Control(c) => book::heard(&c),
+                 }
+             }
+             let _ = plain_out.shutdown(std::net::Shutdown::Both);
