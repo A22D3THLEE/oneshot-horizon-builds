@@ -193,11 +193,17 @@ jobs:
           set -euo pipefail
           cd src
           # The compiler's errors go to the run's annotations too: they are what to fix when a patch stops fitting.
-          if ! cargo build --release --locked -p horizon-client --bin horizon-client --message-format short 2> ../build-game.txt; then
+          # Since mid-November Horizon ships horizon-official as horizon-client.exe: horizon-client's game
+          # with Horizon's own parts plugged in (Play with Friends' resolver, Discord, heartbeat). A bare
+          # horizon-client has no resolver, so every friend: address is "invalid". Older tags lack the crate.
+          if [ -d crates/horizon-official ]; then bin=horizon-official; else bin=horizon-client; fi
+          echo "Building $bin"
+          if ! cargo build --release --locked -p "$bin" --bin "$bin" --message-format short 2> ../build-game.txt; then
             tail -30 ../build-game.txt
             grep -E '^(error|warning: unused)|error(\[E[0-9]+\])?:' ../build-game.txt | head -15 | while IFS= read -r line; do echo "::warning::${line:0:900}"; done
             exit 1
           fi
+          if [ "$bin" != horizon-client ]; then cp -f "target/release/$bin.exe" target/release/horizon-client.exe; fi
           ./target/release/horizon-client.exe --version || true
       - name: Publish
         if: env.SKIP != '1'
