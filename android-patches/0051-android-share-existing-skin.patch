@@ -1,0 +1,23 @@
+diff --git a/packaging/android/java/dev/horizonlab/horizon/ProfileActivity.java b/packaging/android/java/dev/horizonlab/horizon/ProfileActivity.java
+index a086e5f..baedbe0 100644
+--- a/packaging/android/java/dev/horizonlab/horizon/ProfileActivity.java
++++ b/packaging/android/java/dev/horizonlab/horizon/ProfileActivity.java
+@@ -639,6 +639,8 @@ public class ProfileActivity extends Activity implements View.OnClickListener {
+             updateModel();
+             showPreview();
+         }
++        // A skin worn before the share existed, or put in place by hand, goes to the others too.
++        mirrorSkin();
+         relay.start(this, new Net.Relay.Listener() {
+             public void onStatus(long ms) {
+                 relayMs = ms;
+@@ -762,7 +764,8 @@ public class ProfileActivity extends Activity implements View.OnClickListener {
+                 write(dst, bytes);
+                 new File(out, "textures.signed").delete();
+             }
+-            write(new File(out, "model.txt"), (slim ? "slim\n" : "classic\n").getBytes(StandardCharsets.UTF_8));
++            // From the saved file, not the field: onResume calls this before the profile is built.
++            write(new File(out, "model.txt"), (readModel() ? "slim\n" : "classic\n").getBytes(StandardCharsets.UTF_8));
+         } catch (Exception ignored) {
+         }
+     }
