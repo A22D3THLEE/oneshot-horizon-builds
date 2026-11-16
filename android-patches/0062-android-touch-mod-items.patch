@@ -1,0 +1,22 @@
+diff --git a/crates/horizon-client/src/game/touch.rs b/crates/horizon-client/src/game/touch.rs
+index fbbb820..62dd544 100644
+--- a/crates/horizon-client/src/game/touch.rs
++++ b/crates/horizon-client/src/game/touch.rs
+@@ -2082,6 +2082,17 @@ impl Game<'_> {
+             }
+             _ => {}
+         }
++        // A mod's own item that is no block, tool or thing worn (a designator, a wand): a held
++        // finger uses it, as a held right click does on the PC, so the mod hears the use begin
++        // and end (Orbital Laser fires after its countdown) instead of a block being broken.
++        if !stack.item.starts_with("minecraft:")
++            && self
++                .items()
++                .get(&stack.item)
++                .is_some_and(|i| i.block.is_none() && i.tool.is_empty() && i.equip_slot.is_none())
++        {
++            return true;
++        }
+         self.use_duration(stack) > 0
+     }
+ 
