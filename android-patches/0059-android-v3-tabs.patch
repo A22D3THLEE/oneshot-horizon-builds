@@ -1,0 +1,498 @@
+diff --git a/packaging/android/java/dev/horizonlab/horizon/CatalogActivity.java b/packaging/android/java/dev/horizonlab/horizon/CatalogActivity.java
+index 6f5c62a..7287133 100644
+--- a/packaging/android/java/dev/horizonlab/horizon/CatalogActivity.java
++++ b/packaging/android/java/dev/horizonlab/horizon/CatalogActivity.java
+@@ -203,7 +203,7 @@ public class CatalogActivity extends Activity {
+             }
+         });
+         hdSite.addView(site, new LinearLayout.LayoutParams(-2, -2));
+-        hdSite.addView(Ui.text(this, Ui.t("Скачайте PNG, затем Профиль → «Скин…» и выберите файл. Большой скин (до 2048×2048) уменьшится до 128×128.",
++        hdSite.addView(Ui.text(this, Ui.t("Скачайте PNG, затем «Мой скин» → «Скин…» и выберите файл. Большой скин (до 2048×2048) уменьшится до 128×128.",
+                 "Download a PNG, then Profile → “Skin…” and pick the file. A large skin (up to 2048×2048) is reduced to 128×128."), 12, Ui.MUTED, false), Ui.gap(this, 4));
+         hdSite.setVisibility(View.GONE);
+         top.addView(hdSite, Ui.gap(this, 6));
+diff --git a/packaging/android/java/dev/horizonlab/horizon/FriendsPage.java b/packaging/android/java/dev/horizonlab/horizon/FriendsPage.java
+index 1d76f59..8cec666 100644
+--- a/packaging/android/java/dev/horizonlab/horizon/FriendsPage.java
++++ b/packaging/android/java/dev/horizonlab/horizon/FriendsPage.java
+@@ -11,28 +11,32 @@ import android.widget.LinearLayout;
+ import android.widget.TextView;
+ 
+ /**
+- * Oneshot: playing together, as the PC launcher's Friends page: the code to join with, the code
+- * the running game shares (invite-code.txt) with a link to send, the relay's state and the
+- * mod/resource pack set as one .oneshotpack file (PackShare).
++ * Oneshot: playing together, as the PC launcher's tabs (v3). Друзья (share = false): the friends
++ * played with, the code to join with, the relay's state and the mod/resource pack set as one
++ * .oneshotpack file (PackShare). Открыть для сети (share = true): the codes friends join this
++ * world by (the lasting one masked on screen; Copy and Send give it whole), the route and a new code.
+  */
+ final class FriendsPage extends Page {
+     static final int PACK_OUT = 13;
+     static final int PACK_IN = 14;
+ 
+-    private final TextView hostCode;
+-    private final TextView hostNote;
+-    private final Button copyCode, shareCode;
+-    private final Button restore;
++    /** Открыть для сети; else Друзья. The views of the other tab stay null. */
++    private final boolean share;
++    private TextView hostCode;
++    private TextView hostNote;
++    private Button copyCode, shareCode;
++    private Button restore;
+     private String code;
+-    private final TextView keptCode, keptNote;
++    private TextView keptCode, keptNote;
+     private String kept;
+     /** friends-path.txt in the game folder, read by the game at start (android_main.rs). */
+     static final String[] PATH_IDS = {"auto", "relay", "direct"};
+     private final TextView[] pathChips = new TextView[PATH_IDS.length];
+-    private final TextView pathNote;
+-    private final LinearLayout recentFriends;
++    private TextView pathNote;
++    private LinearLayout recentFriends;
+ 
+     private void paintFriends() {
++        if (recentFriends == null) return;
+         recentFriends.removeAllViews();
+         java.util.List<FriendsBook.Friend> book = FriendsBook.read(a, 8);
+         if (book.isEmpty()) {
+@@ -70,6 +74,7 @@ final class FriendsPage extends Page {
+     }
+ 
+     private void paintPath() {
++        if (pathNote == null) return;
+         String cur = path(a);
+         String[] names = {Ui.t("Авто", "Auto"), Ui.t("Через сервер Oneshot", "Through the Oneshot server"), Ui.t("Только напрямую", "Direct only")};
+         for (int i = 0; i < PATH_IDS.length; i++) {
+@@ -88,10 +93,16 @@ final class FriendsPage extends Page {
+                         "Direct first, through the Oneshot server when that fails."));
+     }
+ 
+-    FriendsPage(final ProfileActivity a) {
++    FriendsPage(final ProfileActivity a, boolean share) {
+         super(a);
+-        Ui.title(root, Ui.t("Друзья", "Friends"), Ui.t("Игра вместе: по коду приглашения, через сервер Oneshot или по адресу.",
+-                "Play together: by invite code, through the Oneshot server or by address."));
++        this.share = share;
++        if (share) buildShare();
++        else buildFriends();
++    }
++
++    private void buildFriends() {
++        Ui.title(root, Ui.t("Друзья", "Friends"), Ui.t("С кем вы играли и подключение по коду друга. Свой мир — во «Открыть для сети».",
++                "Who you played with, and joining by a friend's code. Your own world: Open to network."));
+ 
+         LinearLayout fr = block(Ui.t("Недавно играли вместе", "Played together lately"));
+         recentFriends = new LinearLayout(a);
+@@ -121,42 +132,29 @@ final class FriendsPage extends Page {
+         });
+         buttons(join, paste, clear);
+ 
+-        LinearLayout host = block(Ui.t("Позвать друзей", "Invite friends"));
+-        hostCode = Ui.text(a, "", 22, Ui.TEXT, true);
+-        hostCode.setTypeface(android.graphics.Typeface.MONOSPACE, android.graphics.Typeface.BOLD);
+-        hostCode.setTextIsSelectable(true);
+-        host.addView(hostCode);
+-        hostNote = note(host, "");
+-        copyCode = Ui.button(a, Ui.t("Скопировать код", "Copy code"), false);
+-        copyCode.setOnClickListener(new View.OnClickListener() {
+-            public void onClick(View v) {
+-                if (code == null) return;
+-                ClipboardManager cm = (ClipboardManager) a.getSystemService(Context.CLIPBOARD_SERVICE);
+-                if (cm != null) cm.setPrimaryClip(ClipData.newPlainText("invite", "friend:" + code));
+-                a.say(Ui.t("Код скопирован.", "Code copied."), Ui.GREEN);
+-            }
+-        });
+-        shareCode = Ui.button(a, Ui.t("Отправить ссылку…", "Send a link…"), true);
+-        shareCode.setOnClickListener(new View.OnClickListener() {
++        more(Ui.t("Дополнительно: сервер Oneshot, наборы модов", "More: the Oneshot server, mod sets"));
++        buildServerAndPacks();
++    }
++
++    private void buildShare() {
++        Ui.title(root, Ui.t("Открыть для сети", "Open to network"), Ui.t("Ваш мир для друзей и коды, по которым они заходят.",
++                "Your world for friends and the codes they join by."));
++
++        LinearLayout world = block(Ui.t("Мой мир для друзей", "My world for friends"));
++        note(world, Ui.t("Выберите мир в «Моих картах» и нажмите «Играть». В игре: пауза → «Игра с друзьями» → «Открыть для друзей».",
++                "Pick a world in My maps and press Play. In the game: pause → Play with Friends → Start Sharing."));
++        Button maps = Ui.button(a, Ui.t("Мои карты", "My maps"), false);
++        maps.setOnClickListener(new View.OnClickListener() {
+             public void onClick(View v) {
+-                if (code == null) return;
+-                Intent i = new Intent(Intent.ACTION_SEND);
+-                i.setType("text/plain");
+-                i.putExtra(Intent.EXTRA_TEXT, Ui.t("Заходи ко мне в Oneshot: ", "Join me in Oneshot: ") + Net.linkFor(code)
+-                        + Ui.t("\nИли вставь код в лаунчере: friend:", "\nOr paste the code in the launcher: friend:") + code);
+-                try {
+-                    a.startActivity(Intent.createChooser(i, Ui.t("Отправить приглашение", "Send the invite")));
+-                } catch (Exception e) {
+-                    a.say(Ui.t("Нечем поделиться: скопируйте код.", "Nothing to share with: copy the code."), Ui.WARN);
+-                }
++                a.show(ProfileActivity.WORLDS);
+             }
+         });
+-        buttons(host, copyCode, shareCode);
++        world.addView(maps, Ui.gap(a, 8));
+ 
+-        LinearLayout mine = block(Ui.t("Ваш постоянный код", "Your lasting code"));
++        LinearLayout mine = block(Ui.t("Мои коды доступа", "My access codes"));
++        mine.addView(Ui.text(a, Ui.t("Постоянный код", "Lasting code"), 14, Ui.TEXT, true));
+         keptCode = Ui.text(a, "", 22, Ui.TEXT, true);
+         keptCode.setTypeface(android.graphics.Typeface.MONOSPACE, android.graphics.Typeface.BOLD);
+-        keptCode.setTextIsSelectable(true);
+         mine.addView(keptCode);
+         keptNote = note(mine, "");
+         Button copyKept = Ui.button(a, Ui.t("Скопировать", "Copy"), false);
+@@ -168,15 +166,39 @@ final class FriendsPage extends Page {
+                 a.say(Ui.t("Код скопирован.", "Code copied."), Ui.GREEN);
+             }
+         });
+-        Button reissue = Ui.button(a, Ui.t("Перевыпустить", "Reissue"), false);
+-        reissue.setOnClickListener(new View.OnClickListener() {
++        Button sendKept = Ui.button(a, Ui.t("Отправить ссылку…", "Send a link…"), true);
++        sendKept.setOnClickListener(new View.OnClickListener() {
+             public void onClick(View v) {
+-                confirmReissue();
++                if (kept != null) send(kept);
++            }
++        });
++        buttons(mine, copyKept, sendKept);
++
++        LinearLayout host = mine;
++        host.addView(Ui.text(a, Ui.t("Код этой раздачи", "This sharing's code"), 14, Ui.TEXT, true), Ui.gap(a, 14));
++        hostCode = Ui.text(a, "", 22, Ui.TEXT, true);
++        hostCode.setTypeface(android.graphics.Typeface.MONOSPACE, android.graphics.Typeface.BOLD);
++        hostCode.setTextIsSelectable(true);
++        host.addView(hostCode);
++        hostNote = note(host, "");
++        copyCode = Ui.button(a, Ui.t("Скопировать код", "Copy code"), false);
++        copyCode.setOnClickListener(new View.OnClickListener() {
++            public void onClick(View v) {
++                if (code == null) return;
++                ClipboardManager cm = (ClipboardManager) a.getSystemService(Context.CLIPBOARD_SERVICE);
++                if (cm != null) cm.setPrimaryClip(ClipData.newPlainText("invite", "friend:" + code));
++                a.say(Ui.t("Код скопирован.", "Code copied."), Ui.GREEN);
++            }
++        });
++        shareCode = Ui.button(a, Ui.t("Отправить ссылку…", "Send a link…"), true);
++        shareCode.setOnClickListener(new View.OnClickListener() {
++            public void onClick(View v) {
++                if (code != null) send(code);
+             }
+         });
+-        buttons(mine, copyKept, reissue);
++        buttons(host, copyCode, shareCode);
+ 
+-        more(Ui.t("Дополнительно: маршрут, сервер, наборы модов", "More: the route, the server, mod sets"));
++        more(Ui.t("Дополнительно: маршрут хостинга, перевыпустить код", "More: hosting route, new code"));
+         LinearLayout way = block(Ui.t("Как раздавать мир", "How to share the world"));
+         LinearLayout ways = Ui.row(a);
+         way.addView(ways, Ui.gap(a, 4));
+@@ -198,6 +220,33 @@ final class FriendsPage extends Page {
+         // A route other than Auto changes who can reach this world: keep it in sight.
+         if (!"auto".equals(path(a))) unfold();
+ 
++        LinearLayout again = block(Ui.t("Новый постоянный код", "A new lasting code"));
++        note(again, Ui.t("Если код попал не к тем людям: старый перестанет работать.", "If the code reached the wrong people: the old one stops working."));
++        Button reissue = Ui.button(a, Ui.t("Перевыпустить", "Reissue"), false);
++        reissue.setOnClickListener(new View.OnClickListener() {
++            public void onClick(View v) {
++                confirmReissue();
++            }
++        });
++        again.addView(reissue, Ui.gap(a, 8));
++        less();
++    }
++
++    /** The share sheet with the invite: the link and the code. */
++    private void send(String c) {
++        Intent i = new Intent(Intent.ACTION_SEND);
++        i.setType("text/plain");
++        i.putExtra(Intent.EXTRA_TEXT, Ui.t("Заходи ко мне в Oneshot: ", "Join me in Oneshot: ") + Net.linkFor(c)
++                + Ui.t("\nИли вставь код в лаунчере: friend:", "\nOr paste the code in the launcher: friend:") + c);
++        try {
++            a.startActivity(Intent.createChooser(i, Ui.t("Отправить приглашение", "Send the invite")));
++        } catch (Exception e) {
++            a.say(Ui.t("Нечем поделиться: скопируйте код.", "Nothing to share with: copy the code."), Ui.WARN);
++        }
++    }
++
++    private void buildServerAndPacks() {
++
+         LinearLayout relay = block(Ui.t("Сервер Oneshot", "Oneshot server"));
+         relay.addView(a.relayLabel());
+         note(relay, Ui.t("Через него друзья находят друг друга, когда напрямую не выходит (мобильный интернет, CGNAT). "
+@@ -242,35 +291,38 @@ final class FriendsPage extends Page {
+     @Override
+     void shown() {
+         paintFriends();
++        if (restore != null) restore.setVisibility(PackShare.lastBackup(a.dir) == null ? View.GONE : View.VISIBLE);
++        if (!share) return;
++        paintPath();
+         code = Net.hostCode(a);
+         boolean has = code != null;
+         hostCode.setVisibility(has ? View.VISIBLE : View.GONE);
+         hostCode.setText(has ? "friend:" + code : "");
+         hostNote.setText(has
+-                ? Ui.t("Отправьте ссылку или код другу: он вставит его в «Подключиться к другу» и нажмёт ИГРАТЬ.",
++                ? Ui.t("Отправьте ссылку или код другу: он вставит его во «Друзья» → «Подключиться к другу» и нажмёт ИГРАТЬ.",
+                         "Send the link or the code: your friend pastes it into Join a friend and presses PLAY.")
+-                : Ui.t("В игре: пауза → «Игра с друзьями» → «Открыть для друзей», затем «Отправить код». Код появится и здесь.",
++                : Ui.t("Появится, когда мир открыт: в игре пауза → «Игра с друзьями» → «Открыть для друзей».",
+                         "In the game: pause → Play with Friends → Start Sharing, then Send Invite. The code shows up here too."));
+         copyCode.setEnabled(has);
+         shareCode.setEnabled(has);
+         copyCode.setAlpha(has ? 1f : 0.4f);
+         shareCode.setAlpha(has ? 1f : 0.4f);
+-        restore.setVisibility(PackShare.lastBackup(a.dir) == null ? View.GONE : View.VISIBLE);
+         kept = FriendsIdentity.code(a);
+-        keptCode.setText(kept == null ? "—" : "friend:" + kept);
++        // Masked on screen (a stream or a screenshot does not give it away); Copy and Send give it whole.
++        keptCode.setText(kept == null ? "—" : "friend:" + (kept.length() > 4 ? kept.substring(0, 4) + "-••••" : kept));
+         boolean server = !Net.relay(a).isEmpty() && !path(a).equals("direct");
+         keptNote.setText(!server
+-                ? Ui.t("Работает через сервер Oneshot, а он сейчас выключен (relay.txt или «Только напрямую»). Пока друзьям нужен полный код выше.",
+-                        "Works through the Oneshot server, which is off now (relay.txt or Direct only). Until then friends need the full code above.")
++                ? Ui.t("Работает через сервер Oneshot, а он сейчас выключен (relay.txt или «Только напрямую»). Пока друзьям нужен код этой раздачи ниже.",
++                        "Works through the Oneshot server, which is off now (relay.txt or Direct only). Until then friends need this sharing's code below.")
+                 : keptRefused()
+                 ? Ui.t("В прошлый раз сервер Oneshot не принял этот код и выдал другой: пока друзьям нужен код из игры. "
+                         + "Обычно это значит, что на сервере старая версия relay.",
+                         "Last time the Oneshot server didn't take this code and gave another one: until then friends need the code from the game. "
+                         + "Usually the server runs an older relay.")
+-                : Ui.t("Один и тот же при каждом открытии мира для друзей: отправьте его один раз. Друг подключится, пока вы раздаёте мир. "
+-                        + "Если код попал не к тем людям — перевыпустите его.",
+-                        "The same every time you share the world: send it once. A friend gets in while you are sharing. "
+-                        + "If the code reached the wrong people, reissue it."));
++                : Ui.t("Не меняется: отправьте друзьям один раз. Друг подключится, пока ваш мир открыт. "
++                        + "Новый код — в «Дополнительно».",
++                        "Stays the same: send it once. A friend gets in while your world is open. "
++                        + "A new code: under More."));
+     }
+ 
+     /** The game's word on the last sharing (friends-kept.txt, horizon-friends host.rs): the relay served another code. */
+@@ -355,7 +407,7 @@ final class FriendsPage extends Page {
+ 
+     @Override
+     boolean onResult(int request, int result, final Intent data) {
+-        if (request != PACK_OUT && request != PACK_IN) return false;
++        if (share || request != PACK_OUT && request != PACK_IN) return false;
+         if (result != android.app.Activity.RESULT_OK || data == null || data.getData() == null) return true;
+         if (request == PACK_OUT) {
+             run(new Job() {
+diff --git a/packaging/android/java/dev/horizonlab/horizon/HomePage.java b/packaging/android/java/dev/horizonlab/horizon/HomePage.java
+index 526d126..16a44f2 100644
+--- a/packaging/android/java/dev/horizonlab/horizon/HomePage.java
++++ b/packaging/android/java/dev/horizonlab/horizon/HomePage.java
+@@ -15,10 +15,10 @@ final class HomePage extends Page {
+             "Screenshot: the F2 button on the touch panel. Shots show up in the Gallery."},
+         {"Чтобы позвать друга: в игре пауза → «Игра с друзьями» → «Открыть для друзей» → «Отправить код».",
+             "To invite a friend: in the game, pause → Play with Friends → Start Sharing → Send Invite."},
+-        {"Перед обновлением игры сделайте бэкап миров на странице «Миры».",
+-            "Back your worlds up on the Worlds page before updating the game."},
+-        {"Миры переносятся между телефоном и ПК обычным zip — экспорт и импорт на странице «Миры».",
+-            "Worlds move between the phone and the PC as a plain zip: export and import on the Worlds page."},
++        {"Перед обновлением игры сделайте бэкап миров на вкладке «Мои карты».",
++            "Back your worlds up on the My maps tab before updating the game."},
++        {"Миры переносятся между телефоном и ПК обычным zip — экспорт и импорт на вкладке «Мои карты».",
++            "Worlds move between the phone and the PC as a plain zip: export and import on the My maps tab."},
+         {"Набор модов и ресурспаков можно передать другу одним файлом .oneshotpack («Друзья»).",
+             "Hand your mods and resource packs to a friend as one .oneshotpack file (Friends)."},
+         {"Игра тормозит на Snapdragon? Попробуйте драйвер Turnip: «Настройки» → «Дополнительно».",
+@@ -48,6 +48,12 @@ final class HomePage extends Page {
+         status.addView(relay, rl);
+         root.addView(status, Ui.gap(a, 4));
+         root.addView(a.homeUpdate(), Ui.gap(a, 10));
++        a.nickBlock(this);
++
++        LinearLayout nw = block(Ui.t("Новости Horizon", "Horizon news"));
++        news = new LinearLayout(a);
++        news.setOrientation(LinearLayout.VERTICAL);
++        nw.addView(news);
+ 
+         LinearLayout fr = block(Ui.t("Недавно играли вместе", "Played together lately"));
+         friends = new LinearLayout(a);
+@@ -59,7 +65,7 @@ final class HomePage extends Page {
+         recent.setOrientation(LinearLayout.VERTICAL);
+         rec.addView(recent);
+ 
+-        LinearLayout more = more(Ui.t("Статистика, новости и совет", "Stats, news and a tip"));
++        LinearLayout more = more(Ui.t("Статистика и совет", "Stats and a tip"));
+         figures = new LinearLayout(a);
+         figures.setOrientation(LinearLayout.VERTICAL);
+         more.addView(figures, Ui.gap(a, 12));
+@@ -69,11 +75,6 @@ final class HomePage extends Page {
+         wk.addView(week, Ui.gap(a, 6));
+         weekTotal = note(wk, "");
+ 
+-        LinearLayout nw = block(Ui.t("Новости", "News"));
+-        news = new LinearLayout(a);
+-        news.setOrientation(LinearLayout.VERTICAL);
+-        nw.addView(news);
+-
+         LinearLayout tip = block(Ui.t("Совет", "Tip"));
+         String[] t = TIPS[Calendar.getInstance().get(Calendar.DAY_OF_YEAR) % TIPS.length];
+         tip.addView(Ui.text(a, Ui.t(t[0], t[1]), 14, Ui.TEXT, false));
+diff --git a/packaging/android/java/dev/horizonlab/horizon/ProfileActivity.java b/packaging/android/java/dev/horizonlab/horizon/ProfileActivity.java
+index 85f0ede..458fecd 100644
+--- a/packaging/android/java/dev/horizonlab/horizon/ProfileActivity.java
++++ b/packaging/android/java/dev/horizonlab/horizon/ProfileActivity.java
+@@ -44,7 +44,7 @@ public class ProfileActivity extends Activity implements View.OnClickListener {
+     private static final int WORLD_IN = 11;
+     private static final int WORLD_OUT = 12;
+ 
+-    static final int HOME = 0, PROFILE = 1, FRIENDS = 2, WORLDS = 3, GALLERY = 4, CONTENT = 5, SETTINGS = 6;
++    static final int HOME = 0, PROFILE = 1, FRIENDS = 2, SHARE = 3, CONTENT = 4, WORLDS = 5, GALLERY = 6, SETTINGS = 7;
+     private static final int RAIL_DP = 172;
+ 
+     File dir;
+@@ -115,8 +115,9 @@ public class ProfileActivity extends Activity implements View.OnClickListener {
+         // Short screen: the version stays in Settings → About, the tabs get its line.
+         if (!compact) rail.addView(ver);
+ 
+-        String[] labels = {Ui.t("Главная", "Home"), Ui.t("Профиль", "Profile"), Ui.t("Друзья", "Friends"),
+-            Ui.t("Миры", "Worlds"), Ui.t("Галерея", "Gallery"), Ui.t("Контент", "Content"), Ui.t("Настройки", "Settings")};
++        String[] labels = {Ui.t("Главная", "Home"), Ui.t("Мой скин", "My skin"), Ui.t("Друзья", "Friends"),
++            Ui.t("Открыть для сети", "Open to network"), Ui.t("Моды", "Mods"), Ui.t("Мои карты", "My maps"),
++            Ui.t("Галерея", "Gallery"), Ui.t("Настройки", "Settings")};
+         LinearLayout nav = new LinearLayout(this);
+         nav.setOrientation(LinearLayout.VERTICAL);
+         tabs = new TextView[labels.length];
+@@ -195,13 +196,14 @@ public class ProfileActivity extends Activity implements View.OnClickListener {
+         rightLp.leftMargin = Ui.dp(this, 12);
+         root.addView(right, rightLp);
+ 
+-        pages = new Page[7];
++        pages = new Page[8];
+         pages[HOME] = new HomePage(this);
+         pages[PROFILE] = profilePage();
+-        pages[FRIENDS] = new FriendsPage(this);
++        pages[FRIENDS] = new FriendsPage(this, false);
++        pages[SHARE] = new FriendsPage(this, true);
++        pages[CONTENT] = contentPage();
+         pages[WORLDS] = new WorldsPage(this);
+         pages[GALLERY] = new GalleryPage(this);
+-        pages[CONTENT] = contentPage();
+         SettingsPage settings = new SettingsPage(this);
+         settingsBlocks(settings);
+         settings.tail();
+@@ -320,12 +322,26 @@ public class ProfileActivity extends Activity implements View.OnClickListener {
+         }).start();
+     }
+ 
+-    // ---- The Profile page ---------------------------------------------------------------------
++    // ---- Главная: the nick ----------------------------------------------------------------------
++
++    /** The nick block on Главная (v3, as on the PC): other players see this name. */
++    void nickBlock(Page pg) {
++        LinearLayout b = pg.block(Ui.t("Ник — его видят другие игроки", "Name: other players see it"));
++        name = Ui.field(this, "Steve_123");
++        name.setTextSize(16);
++        name.setFilters(new InputFilter[] {new InputFilter.LengthFilter(16)});
++        name.setText(readName());
++        b.addView(name, Ui.gap(this, 4));
++        pg.note(b, Ui.t("3–16 символов: латиница, цифры и _. Сохраняется, когда вы нажимаете ИГРАТЬ.",
++                "3–16 characters: letters, digits and _. Saved when you press PLAY."));
++    }
++
++    // ---- Мой скин -------------------------------------------------------------------------------
+ 
+     private Page profilePage() {
+         Page pg = new Page(this) {};
+-        Ui.title(pg.root, Ui.t("Профиль", "Profile"), Ui.t("Ник, скин и плащ — их видят другие игроки.",
+-                "Name, skin and cape: other players see them."));
++        Ui.title(pg.root, Ui.t("Мой скин", "My skin"), Ui.t("Скин и плащ — их видят другие игроки. Ник — на «Главной».",
++                "Skin and cape: other players see them. The name is on Home."));
+         LinearLayout panel = pg.block(null);
+         LinearLayout who = Ui.row(this);
+         who.setGravity(Gravity.TOP);
+@@ -338,13 +354,7 @@ public class ProfileActivity extends Activity implements View.OnClickListener {
+         side.setOrientation(LinearLayout.VERTICAL);
+         LinearLayout.LayoutParams sideLp = new LinearLayout.LayoutParams(0, -2, 1.4f);
+         sideLp.leftMargin = Ui.dp(this, 14);
+-        side.addView(Ui.caption(this, Ui.t("Ник", "Name")));
+-        name = Ui.field(this, "Steve_123");
+-        name.setTextSize(16);
+-        name.setFilters(new InputFilter[] {new InputFilter.LengthFilter(16)});
+-        name.setText(readName());
+-        side.addView(name);
+-        side.addView(Ui.text(this, Ui.t("3–16 символов: латиница, цифры и _.", "3–16 characters: letters, digits and _."), 12, Ui.MUTED, false));
++        side.addView(Ui.caption(this, Ui.t("Скин и плащ", "Skin and cape")));
+         pick = Ui.button(this, Ui.t("Скин…", "Skin…"), false);
+         pick.setOnClickListener(this);
+         cape = Ui.button(this, Ui.t("Плащ…", "Cape…"), false);
+@@ -372,11 +382,12 @@ public class ProfileActivity extends Activity implements View.OnClickListener {
+         return pg;
+     }
+ 
+-    // ---- The Content page ---------------------------------------------------------------------
++    // ---- Моды ------------------------------------------------------------------------------------
+ 
+     private Page contentPage() {
+         Page pg = new Page(this) {};
+-        Ui.title(pg.root, Ui.t("Контент", "Content"), Ui.t("Каталог и моды.", "The catalog and mods."));
++        Ui.title(pg.root, Ui.t("Моды", "Mods"), Ui.t("Моды, ресурспаки и шейдеры: каталог и свои файлы.",
++                "Mods, resource packs and shaders: the catalog and your own files."));
+         LinearLayout c = pg.block(Ui.t("Каталог", "Catalog"));
+         pg.note(c, Ui.t("Скины, плащи, ресурспаки и моды Horizon — как в лаунчере OneShot на ПК.",
+                 "Skins, capes, resource packs and Horizon mods, as in the OneShot launcher on the PC."));
+@@ -614,8 +625,8 @@ public class ProfileActivity extends Activity implements View.OnClickListener {
+         box.setOrientation(LinearLayout.VERTICAL);
+         int p = Ui.dp(this, 20);
+         box.setPadding(p, Ui.dp(this, 4), p, 0);
+-        box.addView(Ui.text(this, Ui.t("Как вас будут видеть другие игроки? Ник можно поменять позже в «Профиле».",
+-                "What name will other players see? You can change it later in Profile."), 13, Ui.MUTED, false));
++        box.addView(Ui.text(this, Ui.t("Как вас будут видеть другие игроки? Ник можно поменять позже на «Главной».",
++                "What name will other players see? You can change it later on Home."), 13, Ui.MUTED, false));
+         final EditText n = Ui.field(this, "Steve_123");
+         n.setFilters(new InputFilter[] {new InputFilter.LengthFilter(16)});
+         box.addView(n, Ui.gap(this, 8));
+@@ -651,8 +662,8 @@ public class ProfileActivity extends Activity implements View.OnClickListener {
+         }
+         if (n.isEmpty()) return;
+         if (!validName(n)) {
+-            say(Ui.t("Ник: 3–16 символов, только латиница, цифры и _. Поправьте его в «Профиле».",
+-                    "Name: 3–16 characters, letters, digits and _ only. Fix it in Profile."), Ui.WARN);
++            say(Ui.t("Ник: 3–16 символов, только латиница, цифры и _. Поправьте его на «Главной».",
++                    "Name: 3–16 characters, letters, digits and _ only. Fix it on Home."), Ui.WARN);
+             return;
+         }
+         name.setText(n);
+@@ -871,7 +882,7 @@ public class ProfileActivity extends Activity implements View.OnClickListener {
+     private void launch(boolean join) {
+         if (!saveProfile()) {
+             new File(dir, "world-pending.txt").delete();
+-            show(PROFILE);
++            show(HOME);
+             return;
+         }
+         if (join) {
+diff --git a/packaging/android/java/dev/horizonlab/horizon/SetupActivity.java b/packaging/android/java/dev/horizonlab/horizon/SetupActivity.java
+index 9b1d769..c50d31a 100644
+--- a/packaging/android/java/dev/horizonlab/horizon/SetupActivity.java
++++ b/packaging/android/java/dev/horizonlab/horizon/SetupActivity.java
+@@ -133,7 +133,7 @@ public class SetupActivity extends Activity
+             }
+         });
+         card.addView(turnip, Ui.gap(this, 8));
+-        profile = Ui.button(this, Ui.t("Профиль: ник и скин", "Profile: name and skin"), false);
++        profile = Ui.button(this, Ui.t("Ник и скин", "Name and skin"), false);
+         profile.setOnClickListener(this);
+         card.addView(profile, Ui.gap(this, 14));
+         if (!haveDerived()) {
+diff --git a/packaging/android/java/dev/horizonlab/horizon/WorldsPage.java b/packaging/android/java/dev/horizonlab/horizon/WorldsPage.java
+index a0304c3..99d8272 100644
+--- a/packaging/android/java/dev/horizonlab/horizon/WorldsPage.java
++++ b/packaging/android/java/dev/horizonlab/horizon/WorldsPage.java
+@@ -44,7 +44,7 @@ final class WorldsPage extends Page {
+ 
+     WorldsPage(final ProfileActivity a) {
+         super(a);
+-        Ui.title(root, Ui.t("Миры", "Worlds"), Ui.t("Ваши сохранения, перенос между телефоном и ПК, бэкап, сиды и карты.",
++        Ui.title(root, Ui.t("Мои карты", "My maps"), Ui.t("Ваши сохранения, перенос между телефоном и ПК, бэкап, сиды и карты.",
+                 "Your saves, moving them between the phone and the PC, a backup, seeds and maps."));
+ 
+         LinearLayout w = block(Ui.t("Сохранения", "Saves"));
