@@ -149,6 +149,10 @@ jobs:
           [[ -n "$rev" ]] || { echo "::error::no horizon-mixins version among the mods"; exit 1; }
           echo "horizon-mixins: $rev ($newest)"
           cargo install --git https://github.com/horizon-rust/horizon-mixins --rev "$rev" --locked horizon-mixins-cli --root mixins-tool
+          # The port's crate root has an inner #![cfg_attr(...)] (a lint for other systems): horizon-mixins then
+          # treats every module of the crate as conditional and finds none of game.rs. On Android it does nothing.
+          sed -i '/^#!\[cfg_attr(not(target_os = "android"), forbid(unsafe_code))\]$/d' src/crates/horizon-client/src/lib.rs
+          if grep -n '^#!\[cfg' src/crates/*/src/lib.rs; then echo "::warning::crate roots above still have inner cfg attributes"; fi
           # horizon-mixins takes no symlinks in the workspace (the port has CLAUDE.md -> AGENTS.md): files instead.
           find src -type l -not -path 'src/.git/*' -not -path 'src/target/*' | while read -r l; do
             t=$(readlink -f "$l") || true
