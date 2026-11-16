@@ -1,5 +1,5 @@
 diff --git a/packaging/android/java/dev/horizonlab/horizon/CatalogActivity.java b/packaging/android/java/dev/horizonlab/horizon/CatalogActivity.java
-index 7287133..8cd4b52 100644
+index 7287133..fdbf340 100644
 --- a/packaging/android/java/dev/horizonlab/horizon/CatalogActivity.java
 +++ b/packaging/android/java/dev/horizonlab/horizon/CatalogActivity.java
 @@ -49,7 +49,8 @@ public class CatalogActivity extends Activity {
@@ -22,16 +22,7 @@ index 7287133..8cd4b52 100644
      private static final String HD_SITE = "https://hdskins.de/skins";
      /**
       * HD Skins (hdskins.de), shown with their permission on condition the tab links to hdskins.de and
-@@ -84,6 +88,8 @@ public class CatalogActivity extends Activity {
-     private static final class Item {
-         String id, title, sub, picture, file, fileName, hash, hashKind, signedUrl, kind;
-         boolean cape, slim, hasSlim, hd, hdSkins;
-+        /** A native Horizon mod: built into the game, which only the PC launcher does. */
-+        boolean nativeMod;
-         long downloads;
-     }
- 
-@@ -105,6 +111,7 @@ public class CatalogActivity extends Activity {
+@@ -105,6 +109,7 @@ public class CatalogActivity extends Activity {
          pool.execute(new Runnable() {
              public void run() {
                  trimPictureCache();
@@ -39,7 +30,7 @@ index 7287133..8cd4b52 100644
              }
          });
  
-@@ -140,7 +147,7 @@ public class CatalogActivity extends Activity {
+@@ -140,7 +145,7 @@ public class CatalogActivity extends Activity {
          HorizontalScrollView tabScroll = Ui.hscroll(this);
          LinearLayout tabRow = new LinearLayout(this);
          tabRow.setOrientation(LinearLayout.HORIZONTAL);
@@ -48,7 +39,7 @@ index 7287133..8cd4b52 100644
              Ui.t("Ресурспаки", "Resource packs"), Ui.t("Моды Horizon", "Horizon mods")};
          for (int i = 0; i < TABS; i++) {
              final int which = i;
-@@ -203,8 +210,9 @@ public class CatalogActivity extends Activity {
+@@ -203,8 +208,9 @@ public class CatalogActivity extends Activity {
              }
          });
          hdSite.addView(site, new LinearLayout.LayoutParams(-2, -2));
@@ -60,7 +51,7 @@ index 7287133..8cd4b52 100644
          hdSite.setVisibility(View.GONE);
          top.addView(hdSite, Ui.gap(this, 6));
  
-@@ -250,7 +258,15 @@ public class CatalogActivity extends Activity {
+@@ -250,7 +256,15 @@ public class CatalogActivity extends Activity {
  
      private void selectTab(int which) {
          tab = which;
@@ -77,7 +68,7 @@ index 7287133..8cd4b52 100644
          for (int i = 0; i < TABS; i++) {
              boolean on = i == which;
              tabs[i].setBackground(on ? Ui.rounded(this, Ui.GREEN, 0, 10) : Ui.rounded(this, Ui.HIGH, Ui.EDGE, 10));
-@@ -259,7 +275,7 @@ public class CatalogActivity extends Activity {
+@@ -259,7 +273,7 @@ public class CatalogActivity extends Activity {
          query.setText("");
          query.setHint(which == SKINS ? Ui.t("Название или ник игрока", "Name or a player's name")
                  : which == HD ? Ui.t("Ник игрока на HD Skins", "A player's name on HD Skins")
@@ -86,7 +77,7 @@ index 7287133..8cd4b52 100644
          runSearch();
      }
  
-@@ -288,6 +304,7 @@ public class CatalogActivity extends Activity {
+@@ -288,6 +302,7 @@ public class CatalogActivity extends Activity {
                      else if (which == HD) token = hd(q, after, items);
                      else if (which == CAPES) capes(q, items);
                      else if (which == PACKS) token = packs(q, after, items);
@@ -94,11 +85,11 @@ index 7287133..8cd4b52 100644
                      else mods(q, items);
                  } catch (Exception e) {
                      err = e.getMessage() == null ? e.toString() : e.getMessage();
-@@ -366,6 +383,56 @@ public class CatalogActivity extends Activity {
+@@ -366,6 +381,56 @@ public class CatalogActivity extends Activity {
          }
      }
  
-+    /** «Все»: Horizon's mods on the first page (native ones marked PC only), then the resource packs page by page. */
++    /** «Все»: Horizon's mods on the first page, then the resource packs page by page. */
 +    private String all(String q, String after, List<Item> out) throws Exception {
 +        if (after == null) {
 +            try {
@@ -151,7 +142,7 @@ index 7287133..8cd4b52 100644
      /** One request to HD Skins, at most once a second. */
      private static byte[] hdGet(String url, int limit) throws Exception {
          synchronized (hdGate) {
-@@ -395,18 +462,19 @@ public class CatalogActivity extends Activity {
+@@ -395,18 +460,19 @@ public class CatalogActivity extends Activity {
      private String hdSkinsSite(String q, String after, List<Item> out) throws Exception {
          if (!q.isEmpty()) {
              if (after != null || !q.matches("[A-Za-z0-9_]{3,16}")) return null;
@@ -179,7 +170,7 @@ index 7287133..8cd4b52 100644
              return null;
          }
          int offset = 0;
-@@ -528,6 +596,16 @@ public class CatalogActivity extends Activity {
+@@ -528,6 +594,16 @@ public class CatalogActivity extends Activity {
      }
  
      private void capes(String q, List<Item> out) throws Exception {
@@ -196,7 +187,7 @@ index 7287133..8cd4b52 100644
          JSONObject root = new JSONObject(getString("https://api.mineskin.org/v2/capes"));
          JSONArray arr = root.optJSONArray("capes");
          for (int i = 0; arr != null && i < arr.length(); i++) {
-@@ -564,6 +642,7 @@ public class CatalogActivity extends Activity {
+@@ -564,6 +640,7 @@ public class CatalogActivity extends Activity {
              it.title = str(h, "title");
              it.sub = str(h, "author") + " · " + downloads(h.optLong("downloads")) + "\n" + str(h, "description");
              it.picture = str(h, "icon_url", "");
@@ -204,54 +195,16 @@ index 7287133..8cd4b52 100644
              out.add(it);
          }
          int reached = offset + (hits == null ? 0 : hits.length());
-@@ -580,7 +659,8 @@ public class CatalogActivity extends Activity {
+@@ -580,6 +657,8 @@ public class CatalogActivity extends Activity {
          for (int i = 0; projects != null && i < projects.length(); i++) {
              JSONObject pr = projects.getJSONObject(i);
              String kind = str(pr, "kind");
--            if (!kind.equals("mod") && !kind.equals("resourcepack") && !kind.equals("shader")) continue;
-+            boolean nativeMod = kind.equals("native-mod");
-+            if (!kind.equals("mod") && !kind.equals("resourcepack") && !kind.equals("shader") && !nativeMod) continue;
++            // Only what works on every platform: content mods, packs and shaders. Native mods (code built into the
++            // game) are for the PC only, and the phone does not offer them.
+             if (!kind.equals("mod") && !kind.equals("resourcepack") && !kind.equals("shader")) continue;
              JSONArray vs = pr.optJSONArray("versions");
              JSONObject ver = null;
-             for (int j = 0; vs != null && j < vs.length(); j++) {
-@@ -601,8 +681,10 @@ public class CatalogActivity extends Activity {
-             JSONArray au = pr.optJSONArray("authors");
-             for (int k = 0; au != null && k < au.length(); k++) authors.append(k > 0 ? ", " : "").append(au.optString(k));
-             it.sub = authors + " · " + downloads(pr.optLong("downloads")) + "\n"
--                    + (kind.equals("mod") ? "" : (kind.equals("shader") ? Ui.t("шейдеры", "shader") : Ui.t("ресурспак", "pack")) + " · ")
-+                    + (kind.equals("mod") ? "" : (nativeMod ? Ui.t("native-мод, только на ПК", "native mod, PC only")
-+                        : kind.equals("shader") ? Ui.t("шейдеры", "shader") : Ui.t("ресурспак", "pack")) + " · ")
-                     + str(pr, "summary");
-+            it.nativeMod = nativeMod;
-             if (!q.isEmpty() && !(it.title + " " + it.sub).toLowerCase(Locale.ROOT).contains(q.toLowerCase(Locale.ROOT))) continue;
-             it.picture = str(pr, "icon", "");
-             it.file = str(f, "url");
-@@ -652,8 +734,8 @@ public class CatalogActivity extends Activity {
-             text.addView(s);
-         }
-         r.addView(text, tl);
--        final Button act = Ui.button(this, it.kind != null ? Ui.t("Установить", "Install")
--                : it.cape ? Ui.t("Надеть плащ", "Wear cape") : Ui.t("Надеть", "Wear"), true);
-+        final Button act = Ui.button(this, it.nativeMod ? Ui.t("Только на ПК", "PC only") : it.kind != null ? Ui.t("Установить", "Install")
-+                : it.cape ? Ui.t("Надеть плащ", "Wear cape") : Ui.t("Надеть", "Wear"), !it.nativeMod);
-         act.setTextSize(15);
-         act.setOnClickListener(new View.OnClickListener() {
-             public void onClick(View v) {
-@@ -828,6 +910,13 @@ public class CatalogActivity extends Activity {
-     // ------------------------------------------------------------------ actions
- 
-     private void act(final Item it, final Button button) {
-+        if (it.nativeMod) {
-+            // Its code is compiled into the game, which only the PC launcher does (20 to 30 minutes of building).
-+            status.setTextColor(Ui.TEXT);
-+            status.setText(Ui.t("«" + it.title + "» — native-мод: его код собирается в игру, а это умеет только лаунчер на ПК (Моды → Каталог → «Моды Horizon»). На телефоне его поставить нельзя.",
-+                    "«" + it.title + "» is a native mod: its code is built into the game, which only the PC launcher does (Mods → Catalog → «Horizon mods»). It can't be installed on the phone."));
-+            return;
-+        }
-         button.setEnabled(false);
-         button.setText("…");
-         status.setText("");
-@@ -928,8 +1017,8 @@ public class CatalogActivity extends Activity {
+@@ -928,8 +1007,8 @@ public class CatalogActivity extends Activity {
      }
  
      private String wearCape(Item it) throws Exception {
@@ -262,7 +215,7 @@ index 7287133..8cd4b52 100644
          File sd = new File(dir, "skin");
          sd.mkdirs();
          write(new File(sd, "cape.png"), png);
-@@ -957,11 +1046,53 @@ public class CatalogActivity extends Activity {
+@@ -957,11 +1036,53 @@ public class CatalogActivity extends Activity {
          String got = hex(MessageDigest.getInstance(algo).digest(data));
          if (!got.equalsIgnoreCase(hash)) throw new Exception(Ui.t("Контрольная сумма не совпала.", "Checksum mismatch."));
          String safe = name.replaceAll("[^A-Za-z0-9._ +()\\[\\]-]", "_");
