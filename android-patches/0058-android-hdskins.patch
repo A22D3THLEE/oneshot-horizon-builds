@@ -1,0 +1,236 @@
+diff --git a/packaging/android/java/dev/horizonlab/horizon/CatalogActivity.java b/packaging/android/java/dev/horizonlab/horizon/CatalogActivity.java
+index 4babf78..6f5c62a 100644
+--- a/packaging/android/java/dev/horizonlab/horizon/CatalogActivity.java
++++ b/packaging/android/java/dev/horizonlab/horizon/CatalogActivity.java
+@@ -67,13 +67,23 @@ public class CatalogActivity extends Activity {
+     /** HD tab only: a site with many HD skins (the team's own list is still small). */
+     private LinearLayout hdSite;
+     private static final String HD_SITE = "https://hdskins.de/skins";
++    /**
++     * HD Skins (hdskins.de), shown with their permission on condition the tab links to hdskins.de and
++     * credits "HD Skins": the most worn skins 15 at a time, or a player's current skin by name (a
++     * private one is not shown). Their server is asked at most once a second, only for what the
++     * player opens or wears, and each tile is kept in the cache reduced to 128x128.
++     */
++    private static final String HD_API = "https://api.hdskins.de/";
++    private static final int HD_PAGE = 15;
++    private static final Object hdGate = new Object();
++    private static long hdLast;
+     private Button[] tabs = new Button[TABS];
+     private Button more;
+ 
+     /** One result. */
+     private static final class Item {
+         String id, title, sub, picture, file, fileName, hash, hashKind, signedUrl, kind;
+-        boolean cape, slim, hasSlim, hd;
++        boolean cape, slim, hasSlim, hd, hdSkins;
+         long downloads;
+     }
+ 
+@@ -182,7 +192,7 @@ public class CatalogActivity extends Activity {
+         top.addView(status, Ui.gap(this, 4));
+         hdSite = new LinearLayout(this);
+         hdSite.setOrientation(LinearLayout.VERTICAL);
+-        Button site = Ui.button(this, Ui.t("Ещё HD-скины: hdskins.de", "More HD skins: hdskins.de"), false);
++        Button site = Ui.button(this, Ui.t("HD-скины от HD Skins — hdskins.de", "HD skins by HD Skins — hdskins.de"), false);
+         site.setOnClickListener(new View.OnClickListener() {
+             public void onClick(View v) {
+                 try {
+@@ -248,7 +258,7 @@ public class CatalogActivity extends Activity {
+         }
+         query.setText("");
+         query.setHint(which == SKINS ? Ui.t("Название или ник игрока", "Name or a player's name")
+-                : which == HD ? Ui.t("Название HD-скина", "HD skin name")
++                : which == HD ? Ui.t("Ник игрока на HD Skins", "A player's name on HD Skins")
+                 : which == CAPES ? Ui.t("Название плаща", "Cape name") : Ui.t("Поиск", "Search"));
+         runSearch();
+     }
+@@ -275,7 +285,7 @@ public class CatalogActivity extends Activity {
+                 String token = null;
+                 try {
+                     if (which == SKINS) token = skins(q, after, items);
+-                    else if (which == HD) hdSkins(q, items);
++                    else if (which == HD) token = hd(q, after, items);
+                     else if (which == CAPES) capes(q, items);
+                     else if (which == PACKS) token = packs(q, after, items);
+                     else mods(q, items);
+@@ -293,11 +303,12 @@ public class CatalogActivity extends Activity {
+                         next = nextToken;
+                         boolean none = items.isEmpty() && list.getChildCount() == 0;
+                         status.setText(which == HD ? (none && q.isEmpty()
+-                                ? Ui.t("Пока пусто: здесь появятся HD-скины от команды OneShot. А пока возьмите скин на hdskins.de (кнопка ниже).",
+-                                        "Empty for now: HD skins from the OneShot team will show here. Meanwhile take one from hdskins.de (the button below).")
+-                                : none ? Ui.t("Ничего не найдено.", "Nothing found.")
+-                                : Ui.t("HD-скины 128×128. Их видят друзья, у которых тоже OneShot.",
+-                                        "HD skins of 128×128. Friends who also play OneShot see them."))
++                                ? Ui.t("HD Skins не ответил. Попробуйте чуть позже или откройте hdskins.de (кнопка ниже).",
++                                        "HD Skins did not answer. Try again a little later or open hdskins.de (the button below).")
++                                : none ? Ui.t("У " + q + " нет открытого HD-скина на HD Skins.", q + " has no public HD skin on HD Skins.")
++                                : after != null ? ""
++                                : Ui.t("Скины от HD Skins (hdskins.de), показаны с их разрешения. В игре скин 128×128, его видят друзья с OneShot.",
++                                        "Skins by HD Skins (hdskins.de), shown with their permission. In the game the skin is 128×128; friends with OneShot see it."))
+                                 : none ? Ui.t("Ничего не найдено.", "Nothing found.")
+                                 : which == SKINS && after == null ? Ui.t("Обычные скины 64×64. HD-скины — на вкладке «HD-скины».",
+                                         "Regular 64×64 skins. HD skins are on the «HD skins» tab.") : "");
+@@ -338,6 +349,112 @@ public class CatalogActivity extends Activity {
+         return arr == null || arr.length() == 0 ? null : token;
+     }
+ 
++    /** The HD tab: on its first page the team's own HD skins, then HD Skins'. */
++    private String hd(String q, String after, List<Item> out) throws Exception {
++        if (after == null) {
++            try {
++                hdSkins(q, out);
++            } catch (Exception ignored) {
++                // the team's list is optional; HD Skins' still shows
++            }
++        }
++        try {
++            return hdSkinsSite(q, after, out);
++        } catch (Exception e) {
++            if (out.isEmpty()) throw e;
++            return null;
++        }
++    }
++
++    /** One request to HD Skins, at most once a second. */
++    private static byte[] hdGet(String url, int limit) throws Exception {
++        synchronized (hdGate) {
++            long wait = hdLast + 1000 - System.currentTimeMillis();
++            if (wait > 0) Thread.sleep(wait);
++            try {
++                return getBytes(url, limit);
++            } finally {
++                hdLast = System.currentTimeMillis();
++            }
++        }
++    }
++
++    private static Item hdSkinsItem(String texture, boolean slim, String title) {
++        Item it = new Item();
++        it.hd = true;
++        it.hdSkins = true;
++        it.id = texture;
++        it.title = title;
++        it.picture = HD_API + "textures/" + texture;
++        it.hasSlim = true;
++        it.slim = slim;
++        return it;
++    }
++
++    /** HD Skins: a player's current skin by name, or the most worn ones, 15 at a time. */
++    private String hdSkinsSite(String q, String after, List<Item> out) throws Exception {
++        if (!q.isEmpty()) {
++            if (after != null || !q.matches("[A-Za-z0-9_]{3,16}")) return null;
++            String body = new String(hdGet(HD_API + "users/" + enc(q), 1 << 20), StandardCharsets.UTF_8).trim();
++            if (body.isEmpty()) return null;
++            JSONObject root = new JSONObject(body);
++            JSONObject tex = root.optJSONObject("textures");
++            if (tex == null || tex.optBoolean("private")) return null;
++            JSONObject skin = tex.optJSONObject("SKIN");
++            JSONObject cur = skin == null ? null : skin.optJSONObject("current");
++            String texture = str(cur, "checksum").toLowerCase(Locale.ROOT);
++            if (!texture.matches("[0-9a-f]{64}")) return null;
++            JSONObject meta = cur.optJSONObject("textureMeta");
++            JSONObject user = root.optJSONObject("user");
++            out.add(hdSkinsItem(texture, meta != null && meta.optBoolean("slim"), str(user, "name", q)));
++            return null;
++        }
++        int offset = 0;
++        if (after != null && after.startsWith("hd:")) {
++            try {
++                offset = Integer.parseInt(after.substring(3));
++            } catch (NumberFormatException ignored) {
++            }
++        }
++        JSONArray arr = new JSONArray(new String(hdGet(HD_API + "skins/users?limit=" + HD_PAGE + "&offset=" + offset, 1 << 20),
++                StandardCharsets.UTF_8));
++        for (int i = 0; i < arr.length(); i++) {
++            JSONObject s = arr.optJSONObject(i);
++            String texture = str(s, "texture").toLowerCase(Locale.ROOT);
++            if (!texture.matches("[0-9a-f]{64}")) continue;
++            Item it = hdSkinsItem(texture, s.optBoolean("slim"), "#" + s.optLong("textureId"));
++            it.sub = Ui.t("носят ", "worn by ") + s.optLong("users");
++            out.add(it);
++        }
++        return arr.length() == HD_PAGE ? "hd:" + (offset + HD_PAGE) : null;
++    }
++
++    /**
++     * A skin from HD Skins as a tile: decoded at a reduced size (an HD texture is up to 2048x2048)
++     * and brought pixel for pixel to 128x128, or to 64x32 for an old 2:1 HD skin, as it is worn.
++     */
++    private static byte[] hdTile(byte[] raw) throws Exception {
++        BitmapFactory.Options o = new BitmapFactory.Options();
++        o.inJustDecodeBounds = true;
++        BitmapFactory.decodeByteArray(raw, 0, raw.length, o);
++        int w = o.outWidth, h = o.outHeight;
++        if (w <= 0 || h <= 0) return raw;
++        int tw = w == h ? 128 : w == h * 2 ? 64 : w;
++        if (w <= tw) return raw;
++        int sample = 1;
++        while (w / (sample * 2) >= tw && w % (sample * 2) == 0) sample *= 2;
++        BitmapFactory.Options d = new BitmapFactory.Options();
++        d.inScaled = false;
++        d.inSampleSize = sample;
++        d.inPreferredConfig = Bitmap.Config.ARGB_8888;
++        Bitmap b = BitmapFactory.decodeByteArray(raw, 0, raw.length, d);
++        if (b == null) return raw;
++        Bitmap small = b.getWidth() == tw ? b : Bitmap.createScaledBitmap(b, tw, tw * h / w, false);
++        ByteArrayOutputStream out = new ByteArrayOutputStream();
++        small.compress(Bitmap.CompressFormat.PNG, 100, out);
++        return out.toByteArray();
++    }
++
+     /**
+      * The team's HD skins. Each entry names a PNG beside the index and its SHA-256, checked when it
+      * is worn. No index yet (404): an empty list, not an error.
+@@ -599,6 +716,12 @@ public class CatalogActivity extends Activity {
+         // How big the texture is, so a regular skin is not taken for an HD one.
+         final TextView size = Ui.text(this, sizes.containsKey(it.picture) ? sizes.get(it.picture) : "", 12,
+                 it.hd ? Ui.GREEN : Ui.MUTED, it.hd);
++        if (it.hdSkins) {
++            TextView credit = Ui.text(this, "HD Skins" + (it.sub == null ? "" : " · " + it.sub), 12, Ui.MUTED, false);
++            credit.setMaxLines(1);
++            credit.setEllipsize(android.text.TextUtils.TruncateAt.END);
++            t.addView(credit);
++        }
+         size.setMaxLines(1);
+         t.addView(size);
+         final Button act = Ui.button(this, it.cape ? Ui.t("Надеть плащ", "Wear cape") : Ui.t("Надеть", "Wear"), true);
+@@ -656,7 +779,7 @@ public class CatalogActivity extends Activity {
+                         cached.setLastModified(System.currentTimeMillis());
+                     }
+                     if (bytes == null || bytes.length == 0) {
+-                        bytes = getBytes(it.picture, 4 << 20);
++                        bytes = it.hdSkins ? hdTile(hdGet(it.picture, 16 << 20)) : getBytes(it.picture, 4 << 20);
+                         if (cached != null && bytes.length > 0) {
+                             try {
+                                 cached.getParentFile().mkdirs();
+@@ -738,9 +861,16 @@ public class CatalogActivity extends Activity {
+     }
+ 
+     private String wearSkin(Item it) throws Exception {
+-        byte[] png = getBytes(it.picture, 1 << 20);
++        byte[] png = it.hdSkins ? hdGet(it.picture, 16 << 20) : getBytes(it.picture, 1 << 20);
++        boolean wide = false;
++        if (it.hdSkins) {
++            BitmapFactory.Options bounds = new BitmapFactory.Options();
++            bounds.inJustDecodeBounds = true;
++            BitmapFactory.decodeByteArray(png, 0, png.length, bounds);
++            wide = bounds.outWidth > 64 && bounds.outWidth == bounds.outHeight * 2;
++        }
+         if (it.hd) {
+-            if (!hex(MessageDigest.getInstance("SHA-256").digest(png)).equals(it.hash)) {
++            if (!it.hdSkins && !hex(MessageDigest.getInstance("SHA-256").digest(png)).equals(it.hash)) {
+                 throw new Exception(Ui.t("Контрольная сумма не совпала.", "Checksum mismatch."));
+             }
+             // The same cleaning as a picked file: 128×128 RGBA, or 64×64 when it is over the share's 22 KB.
+@@ -791,6 +921,7 @@ public class CatalogActivity extends Activity {
+         if (it.hd) {
+             return hd ? Ui.t("HD-скин надет: ", "HD skin worn: ") + it.title
+                     + Ui.t(". Его видят друзья, у которых тоже OneShot.", ". Friends who also play OneShot see it.")
++                    : wide ? Ui.t("Старый HD-скин 2:1 надет как 64×32: ", "An old 2:1 HD skin, worn as 64×32: ") + it.title
+                     : Ui.t("Скин надет, но уменьшен до 64×64 (в HD он больше 22 КБ): ", "Skin worn, scaled down to 64×64 (over 22 KB in HD): ") + it.title;
+         }
+         return Ui.t("Скин надет: ", "Skin worn: ") + it.title + (signed.isFile() ? "" : Ui.t(" (без подписи Mojang)", " (unsigned)"));
