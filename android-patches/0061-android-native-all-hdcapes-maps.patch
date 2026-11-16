@@ -1,5 +1,5 @@
 diff --git a/packaging/android/java/dev/horizonlab/horizon/CatalogActivity.java b/packaging/android/java/dev/horizonlab/horizon/CatalogActivity.java
-index 7287133..b365e37 100644
+index 7287133..57ee308 100644
 --- a/packaging/android/java/dev/horizonlab/horizon/CatalogActivity.java
 +++ b/packaging/android/java/dev/horizonlab/horizon/CatalogActivity.java
 @@ -49,7 +49,8 @@ public class CatalogActivity extends Activity {
@@ -12,7 +12,17 @@ index 7287133..b365e37 100644
      /** The team's HD skins: {"schema":1,"skins":[{"name","file","sha256","model","author"}]}, files beside it. */
      private static final String HD_BASE = "https://raw.githubusercontent.com/A22D3THLEE/oneshot-horizon-data/main/hd-skins/";
  
-@@ -84,6 +85,8 @@ public class CatalogActivity extends Activity {
+@@ -66,6 +67,9 @@ public class CatalogActivity extends Activity {
+     private TextView status;
+     /** HD tab only: a site with many HD skins (the team's own list is still small). */
+     private LinearLayout hdSite;
++    /** Its button and line: about skins on the HD tab, about capes on the capes tab. */
++    private Button hdSiteButton;
++    private TextView hdSiteNote;
+     private static final String HD_SITE = "https://hdskins.de/skins";
+     /**
+      * HD Skins (hdskins.de), shown with their permission on condition the tab links to hdskins.de and
+@@ -84,6 +88,8 @@ public class CatalogActivity extends Activity {
      private static final class Item {
          String id, title, sub, picture, file, fileName, hash, hashKind, signedUrl, kind;
          boolean cape, slim, hasSlim, hd, hdSkins;
@@ -21,7 +31,7 @@ index 7287133..b365e37 100644
          long downloads;
      }
  
-@@ -140,7 +143,7 @@ public class CatalogActivity extends Activity {
+@@ -140,7 +146,7 @@ public class CatalogActivity extends Activity {
          HorizontalScrollView tabScroll = Ui.hscroll(this);
          LinearLayout tabRow = new LinearLayout(this);
          tabRow.setOrientation(LinearLayout.HORIZONTAL);
@@ -30,17 +40,36 @@ index 7287133..b365e37 100644
              Ui.t("Ресурспаки", "Resource packs"), Ui.t("Моды Horizon", "Horizon mods")};
          for (int i = 0; i < TABS; i++) {
              final int which = i;
-@@ -250,7 +253,8 @@ public class CatalogActivity extends Activity {
+@@ -203,8 +209,9 @@ public class CatalogActivity extends Activity {
+             }
+         });
+         hdSite.addView(site, new LinearLayout.LayoutParams(-2, -2));
+-        hdSite.addView(Ui.text(this, Ui.t("Скачайте PNG, затем «Мой скин» → «Скин…» и выберите файл. Большой скин (до 2048×2048) уменьшится до 128×128.",
+-                "Download a PNG, then Profile → “Skin…” and pick the file. A large skin (up to 2048×2048) is reduced to 128×128."), 12, Ui.MUTED, false), Ui.gap(this, 4));
++        hdSiteButton = site;
++        hdSiteNote = Ui.text(this, "", 12, Ui.MUTED, false);
++        hdSite.addView(hdSiteNote, Ui.gap(this, 4));
+         hdSite.setVisibility(View.GONE);
+         top.addView(hdSite, Ui.gap(this, 6));
+ 
+@@ -250,7 +257,15 @@ public class CatalogActivity extends Activity {
  
      private void selectTab(int which) {
          tab = which;
 -        hdSite.setVisibility(which == HD ? View.VISIBLE : View.GONE);
 +        // HD Skins' condition: their skins and capes are shown with a link to hdskins.de and their name.
 +        hdSite.setVisibility(which == HD || which == CAPES ? View.VISIBLE : View.GONE);
++        hdSiteButton.setText(which == CAPES ? Ui.t("HD-плащи от HD Skins — hdskins.de", "HD capes by HD Skins — hdskins.de")
++                : Ui.t("HD-скины от HD Skins — hdskins.de", "HD skins by HD Skins — hdskins.de"));
++        hdSiteNote.setText(which == CAPES
++                ? Ui.t("Введите ник игрока: его HD-плащ с HD Skins появится первым и наденется уменьшенным до 128×64.",
++                        "Type a player's name: their HD cape from HD Skins comes first and is worn reduced to 128×64.")
++                : Ui.t("Скачайте PNG, затем «Мой скин» → «Скин…» и выберите файл. Большой скин (до 2048×2048) уменьшится до 128×128.",
++                        "Download a PNG, then Profile → “Skin…” and pick the file. A large skin (up to 2048×2048) is reduced to 128×128."));
          for (int i = 0; i < TABS; i++) {
              boolean on = i == which;
              tabs[i].setBackground(on ? Ui.rounded(this, Ui.GREEN, 0, 10) : Ui.rounded(this, Ui.HIGH, Ui.EDGE, 10));
-@@ -259,7 +263,7 @@ public class CatalogActivity extends Activity {
+@@ -259,7 +274,7 @@ public class CatalogActivity extends Activity {
          query.setText("");
          query.setHint(which == SKINS ? Ui.t("Название или ник игрока", "Name or a player's name")
                  : which == HD ? Ui.t("Ник игрока на HD Skins", "A player's name on HD Skins")
@@ -49,7 +78,7 @@ index 7287133..b365e37 100644
          runSearch();
      }
  
-@@ -288,6 +292,7 @@ public class CatalogActivity extends Activity {
+@@ -288,6 +303,7 @@ public class CatalogActivity extends Activity {
                      else if (which == HD) token = hd(q, after, items);
                      else if (which == CAPES) capes(q, items);
                      else if (which == PACKS) token = packs(q, after, items);
@@ -57,7 +86,7 @@ index 7287133..b365e37 100644
                      else mods(q, items);
                  } catch (Exception e) {
                      err = e.getMessage() == null ? e.toString() : e.getMessage();
-@@ -366,6 +371,46 @@ public class CatalogActivity extends Activity {
+@@ -366,6 +382,56 @@ public class CatalogActivity extends Activity {
          }
      }
  
@@ -70,12 +99,22 @@ index 7287133..b365e37 100644
 +                // the packs still show
 +            }
 +        }
++        String token;
 +        try {
-+            return packs(q, after, out);
++            token = packs(q, after, out);
 +        } catch (Exception e) {
 +            if (out.isEmpty()) throw e;
 +            return null;
 +        }
++        // The first page: mods and packs together, the most downloaded first (the packs are not all at the end).
++        if (after == null) {
++            java.util.Collections.sort(out, new java.util.Comparator<Item>() {
++                public int compare(Item a, Item b) {
++                    return a.downloads == b.downloads ? 0 : a.downloads < b.downloads ? 1 : -1;
++                }
++            });
++        }
++        return token;
 +    }
 +
 +    /** A player's record on HD Skins (their current skin and cape), or null when private or absent. */
@@ -104,7 +143,7 @@ index 7287133..b365e37 100644
      /** One request to HD Skins, at most once a second. */
      private static byte[] hdGet(String url, int limit) throws Exception {
          synchronized (hdGate) {
-@@ -395,18 +440,19 @@ public class CatalogActivity extends Activity {
+@@ -395,18 +461,19 @@ public class CatalogActivity extends Activity {
      private String hdSkinsSite(String q, String after, List<Item> out) throws Exception {
          if (!q.isEmpty()) {
              if (after != null || !q.matches("[A-Za-z0-9_]{3,16}")) return null;
@@ -132,7 +171,7 @@ index 7287133..b365e37 100644
              return null;
          }
          int offset = 0;
-@@ -528,6 +574,16 @@ public class CatalogActivity extends Activity {
+@@ -528,6 +595,16 @@ public class CatalogActivity extends Activity {
      }
  
      private void capes(String q, List<Item> out) throws Exception {
@@ -149,7 +188,15 @@ index 7287133..b365e37 100644
          JSONObject root = new JSONObject(getString("https://api.mineskin.org/v2/capes"));
          JSONArray arr = root.optJSONArray("capes");
          for (int i = 0; arr != null && i < arr.length(); i++) {
-@@ -580,7 +636,8 @@ public class CatalogActivity extends Activity {
+@@ -564,6 +641,7 @@ public class CatalogActivity extends Activity {
+             it.title = str(h, "title");
+             it.sub = str(h, "author") + " · " + downloads(h.optLong("downloads")) + "\n" + str(h, "description");
+             it.picture = str(h, "icon_url", "");
++            it.downloads = h.optLong("downloads");
+             out.add(it);
+         }
+         int reached = offset + (hits == null ? 0 : hits.length());
+@@ -580,7 +658,8 @@ public class CatalogActivity extends Activity {
          for (int i = 0; projects != null && i < projects.length(); i++) {
              JSONObject pr = projects.getJSONObject(i);
              String kind = str(pr, "kind");
@@ -159,7 +206,7 @@ index 7287133..b365e37 100644
              JSONArray vs = pr.optJSONArray("versions");
              JSONObject ver = null;
              for (int j = 0; vs != null && j < vs.length(); j++) {
-@@ -601,8 +658,10 @@ public class CatalogActivity extends Activity {
+@@ -601,8 +680,10 @@ public class CatalogActivity extends Activity {
              JSONArray au = pr.optJSONArray("authors");
              for (int k = 0; au != null && k < au.length(); k++) authors.append(k > 0 ? ", " : "").append(au.optString(k));
              it.sub = authors + " · " + downloads(pr.optLong("downloads")) + "\n"
@@ -171,7 +218,7 @@ index 7287133..b365e37 100644
              if (!q.isEmpty() && !(it.title + " " + it.sub).toLowerCase(Locale.ROOT).contains(q.toLowerCase(Locale.ROOT))) continue;
              it.picture = str(pr, "icon", "");
              it.file = str(f, "url");
-@@ -652,8 +711,8 @@ public class CatalogActivity extends Activity {
+@@ -652,8 +733,8 @@ public class CatalogActivity extends Activity {
              text.addView(s);
          }
          r.addView(text, tl);
@@ -182,7 +229,7 @@ index 7287133..b365e37 100644
          act.setTextSize(15);
          act.setOnClickListener(new View.OnClickListener() {
              public void onClick(View v) {
-@@ -828,6 +887,13 @@ public class CatalogActivity extends Activity {
+@@ -828,6 +909,13 @@ public class CatalogActivity extends Activity {
      // ------------------------------------------------------------------ actions
  
      private void act(final Item it, final Button button) {
@@ -196,7 +243,7 @@ index 7287133..b365e37 100644
          button.setEnabled(false);
          button.setText("…");
          status.setText("");
-@@ -928,8 +994,8 @@ public class CatalogActivity extends Activity {
+@@ -928,8 +1016,8 @@ public class CatalogActivity extends Activity {
      }
  
      private String wearCape(Item it) throws Exception {
@@ -221,7 +268,7 @@ index f3531eb..361a287 100644
          if (!legacy && w > 64) {
              byte[] hd = png(w == 128 ? b : scaleRaw(b, 128, 64));
 diff --git a/packaging/android/java/dev/horizonlab/horizon/WorldsPage.java b/packaging/android/java/dev/horizonlab/horizon/WorldsPage.java
-index 99d8272..dbcb709 100644
+index 99d8272..1309f37 100644
 --- a/packaging/android/java/dev/horizonlab/horizon/WorldsPage.java
 +++ b/packaging/android/java/dev/horizonlab/horizon/WorldsPage.java
 @@ -409,8 +409,16 @@ final class WorldsPage extends Page {
@@ -253,13 +300,14 @@ index 99d8272..dbcb709 100644
                  if (b == null) return;
                  a.runOnUiThread(new Runnable() {
                      public void run() {
-@@ -436,6 +446,51 @@ final class WorldsPage extends Page {
+@@ -436,6 +446,52 @@ final class WorldsPage extends Page {
          return pic;
      }
  
 +    /** A map's name and author on a colour of its own, for a map without a picture. */
 +    private static Bitmap drawnPicture(String title, String author) {
-+        int w = 960, h = 540;
++        // As wide as the row shows it (the view is cropped to at most 260 dp high), so nothing is cut off.
++        int w = 1400, h = 400;
 +        Bitmap b = Bitmap.createBitmap(w, h, Bitmap.Config.ARGB_8888);
 +        android.graphics.Canvas c = new android.graphics.Canvas(b);
 +        float hue = (title.hashCode() & 0x7fffffff) % 360;
@@ -270,16 +318,16 @@ index 99d8272..dbcb709 100644
 +        c.drawRect(0, 0, w, h, p);
 +        p.setShader(null);
 +        p.setColor(0x28FFFFFF);
-+        for (int i = 0; i < 6; i++) c.drawRect(w - 90 - i * 66, h - 90 - (i % 3) * 66, w - 30 - i * 66, h - 30 - (i % 3) * 66, p);
++        for (int i = 0; i < 6; i++) c.drawRect(w - 80 - i * 56, h - 80 - (i % 3) * 56, w - 30 - i * 56, h - 30 - (i % 3) * 56, p);
 +        p.setColor(0xFFFFFFFF);
 +        p.setTypeface(android.graphics.Typeface.DEFAULT_BOLD);
-+        p.setTextSize(64);
++        p.setTextSize(58);
 +        // The name in up to two lines that fit the width.
 +        List<String> lines = new ArrayList<String>();
 +        StringBuilder line = new StringBuilder();
 +        for (String word : title.split(" ")) {
 +            String tryLine = line.length() == 0 ? word : line + " " + word;
-+            if (p.measureText(tryLine) > w - 100 && line.length() > 0) {
++            if (p.measureText(tryLine) > w - 420 && line.length() > 0) {
 +                lines.add(line.toString());
 +                line = new StringBuilder(word);
 +            } else {
@@ -288,16 +336,16 @@ index 99d8272..dbcb709 100644
 +        }
 +        if (line.length() > 0) lines.add(line.toString());
 +        if (lines.size() > 2) lines = new ArrayList<String>(lines.subList(0, 2));
-+        float y = 300 - (lines.size() - 1) * 74;
++        float y = 200 - (lines.size() - 1) * 68;
 +        for (String l : lines) {
-+            c.drawText(l, 50, y, p);
-+            y += 74;
++            c.drawText(l, 60, y, p);
++            y += 68;
 +        }
 +        if (author != null && !author.isEmpty()) {
 +            p.setTypeface(android.graphics.Typeface.DEFAULT);
-+            p.setTextSize(34);
++            p.setTextSize(32);
 +            p.setColor(0xD0FFFFFF);
-+            c.drawText(author, 50, y + 10, p);
++            c.drawText(author, 60, y + 4, p);
 +        }
 +        return b;
 +    }
@@ -305,7 +353,7 @@ index 99d8272..dbcb709 100644
      /** An https link as is; a path such as img/x.jpg is relative to the catalog folder. */
      static String imageUrl(String image) {
          if (image == null) return null;
-@@ -555,7 +610,7 @@ final class WorldsPage extends Page {
+@@ -555,7 +611,7 @@ final class WorldsPage extends Page {
              final boolean direct = url.startsWith("https://") && sha.matches("[0-9a-f]{64}");
              if (name.isEmpty() || (!direct && !page.startsWith("https://"))) continue;
              long size = direct ? o.optLong("size", 0) : 0;
