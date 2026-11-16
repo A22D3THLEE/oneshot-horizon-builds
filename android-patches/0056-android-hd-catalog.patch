@@ -1,0 +1,273 @@
+diff --git a/packaging/android/java/dev/horizonlab/horizon/CatalogActivity.java b/packaging/android/java/dev/horizonlab/horizon/CatalogActivity.java
+index 1b7651c..90c4bd2 100644
+--- a/packaging/android/java/dev/horizonlab/horizon/CatalogActivity.java
++++ b/packaging/android/java/dev/horizonlab/horizon/CatalogActivity.java
+@@ -40,7 +40,8 @@ import org.json.JSONObject;
+ 
+ /**
+  * The OneShot launcher's catalogs on the phone (Catalog.cs): skins and capes from MineSkin and
+- * Mojang, resource packs from Modrinth and Horizon's own registry of mods and packs. A skin or a
++ * Mojang (all 64×64, each tile says its size), HD skins of 128×128 from the OneShot data repository
++ * (hd-skins/index.json there; a list not made yet is an empty tab), resource packs from Modrinth and Horizon's own registry of mods and packs. A skin or a
+  * cape is worn at once (the same files the profile screen writes); a pack or a mod is downloaded,
+  * its checksum checked, and put in the game folder.
+  */
+@@ -48,11 +49,14 @@ public class CatalogActivity extends Activity {
+     private static final String GAME_VERSION = "26.3";
+     private static final String REGISTRY = "https://horizon-rust.github.io/horizon-mods/index.json";
+     private static final int PAGE = 24;
+-    private static final int SKINS = 0, CAPES = 1, PACKS = 2, MODS = 3;
++    private static final int SKINS = 0, HD = 1, CAPES = 2, PACKS = 3, MODS = 4, TABS = 5;
++    /** The team's HD skins: {"schema":1,"skins":[{"name","file","sha256","model","author"}]}, files beside it. */
++    private static final String HD_BASE = "https://raw.githubusercontent.com/A22D3THLEE/oneshot-horizon-data/main/hd-skins/";
+ 
+     private final ExecutorService pool = Executors.newFixedThreadPool(4);
+     private final Handler ui = new Handler(Looper.getMainLooper());
+     private final Map<String, Bitmap> pictures = new HashMap<String, Bitmap>();
++    private final Map<String, String> sizes = new HashMap<String, String>();   // picture -> "64×64", "HD 128×128"
+     private File dir;
+     private int tab = SKINS;
+     private int generation;          // a search started later makes older answers stale
+@@ -60,13 +64,13 @@ public class CatalogActivity extends Activity {
+     private EditText query;
+     private LinearLayout list;
+     private TextView status;
+-    private Button[] tabs = new Button[4];
++    private Button[] tabs = new Button[TABS];
+     private Button more;
+ 
+     /** One result. */
+     private static final class Item {
+         String id, title, sub, picture, file, fileName, hash, hashKind, signedUrl, kind;
+-        boolean cape, slim, hasSlim;
++        boolean cape, slim, hasSlim, hd;
+         long downloads;
+     }
+ 
+@@ -123,9 +127,9 @@ public class CatalogActivity extends Activity {
+         HorizontalScrollView tabScroll = Ui.hscroll(this);
+         LinearLayout tabRow = new LinearLayout(this);
+         tabRow.setOrientation(LinearLayout.HORIZONTAL);
+-        String[] names = {Ui.t("Скины", "Skins"), Ui.t("Плащи", "Capes"),
++        String[] names = {Ui.t("Скины", "Skins"), Ui.t("HD-скины", "HD skins"), Ui.t("Плащи", "Capes"),
+             Ui.t("Ресурспаки", "Resource packs"), Ui.t("Моды Horizon", "Horizon mods")};
+-        for (int i = 0; i < 4; i++) {
++        for (int i = 0; i < TABS; i++) {
+             final int which = i;
+             tabs[i] = Ui.button(this, names[i], false);
+             tabs[i].setOnClickListener(new View.OnClickListener() {
+@@ -216,13 +220,14 @@ public class CatalogActivity extends Activity {
+ 
+     private void selectTab(int which) {
+         tab = which;
+-        for (int i = 0; i < 4; i++) {
++        for (int i = 0; i < TABS; i++) {
+             boolean on = i == which;
+             tabs[i].setBackground(on ? Ui.rounded(this, Ui.GREEN, 0, 10) : Ui.rounded(this, Ui.HIGH, Ui.EDGE, 10));
+             tabs[i].setTextColor(on ? Ui.ON_ACCENT : Ui.TEXT);
+         }
+         query.setText("");
+         query.setHint(which == SKINS ? Ui.t("Название или ник игрока", "Name or a player's name")
++                : which == HD ? Ui.t("Название HD-скина", "HD skin name")
+                 : which == CAPES ? Ui.t("Название плаща", "Cape name") : Ui.t("Поиск", "Search"));
+         runSearch();
+     }
+@@ -249,6 +254,7 @@ public class CatalogActivity extends Activity {
+                 String token = null;
+                 try {
+                     if (which == SKINS) token = skins(q, after, items);
++                    else if (which == HD) hdSkins(q, items);
+                     else if (which == CAPES) capes(q, items);
+                     else if (which == PACKS) token = packs(q, after, items);
+                     else mods(q, items);
+@@ -264,9 +270,17 @@ public class CatalogActivity extends Activity {
+                             return;
+                         }
+                         next = nextToken;
+-                        status.setText(items.isEmpty() && list.getChildCount() == 0
+-                                ? Ui.t("Ничего не найдено.", "Nothing found.") : "");
+-                        if (which == SKINS || which == CAPES) addTiles(items);
++                        boolean none = items.isEmpty() && list.getChildCount() == 0;
++                        status.setText(which == HD ? (none && q.isEmpty()
++                                ? Ui.t("Пока пусто: здесь появятся HD-скины 128×128 от команды OneShot.",
++                                        "Empty for now: HD skins of 128×128 from the OneShot team will show here.")
++                                : none ? Ui.t("Ничего не найдено.", "Nothing found.")
++                                : Ui.t("HD-скины 128×128. Их видят друзья, у которых тоже OneShot.",
++                                        "HD skins of 128×128. Friends who also play OneShot see them."))
++                                : none ? Ui.t("Ничего не найдено.", "Nothing found.")
++                                : which == SKINS && after == null ? Ui.t("Обычные скины 64×64. HD-скины — на вкладке «HD-скины».",
++                                        "Regular 64×64 skins. HD skins are on the «HD skins» tab.") : "");
++                        if (which == SKINS || which == HD || which == CAPES) addTiles(items);
+                         else for (Item it : items) list.addView(row(it), Ui.gap(CatalogActivity.this, 8));
+                         if (next != null) list.addView(more, Ui.gap(CatalogActivity.this, 10));
+                     }
+@@ -303,6 +317,39 @@ public class CatalogActivity extends Activity {
+         return arr == null || arr.length() == 0 ? null : token;
+     }
+ 
++    /**
++     * The team's HD skins. Each entry names a PNG beside the index and its SHA-256, checked when it
++     * is worn. No index yet (404): an empty list, not an error.
++     */
++    private void hdSkins(String q, List<Item> out) throws Exception {
++        String body = getString(HD_BASE + "index.json").trim();
++        if (body.isEmpty()) return;
++        JSONObject root = new JSONObject(body);
++        if (root.optInt("schema") > 1) throw new Exception(Ui.t("Каталог новее лаунчера", "The catalog is newer than this app"));
++        JSONArray arr = root.optJSONArray("skins");
++        for (int i = 0; arr != null && i < arr.length(); i++) {
++            JSONObject s = arr.optJSONObject(i);
++            if (s == null) continue;
++            String file = str(s, "file"), sha = str(s, "sha256").toLowerCase(Locale.ROOT);
++            if (!file.matches("[A-Za-z0-9_-]{1,64}\\.png") || !sha.matches("[0-9a-f]{64}")) continue;
++            Item it = new Item();
++            it.hd = true;
++            it.id = file;
++            it.title = str(s, "name").isEmpty() ? file.substring(0, file.length() - 4) : str(s, "name");
++            String author = str(s, "author");
++            if (!q.isEmpty() && !(it.title + " " + author).toLowerCase(Locale.ROOT).contains(q.toLowerCase(Locale.ROOT))) continue;
++            it.picture = HD_BASE + file;
++            it.hash = sha;
++            it.hashKind = "SHA-256";
++            String model = str(s, "model");
++            if (model.equals("slim") || model.equals("classic")) {
++                it.hasSlim = true;
++                it.slim = model.equals("slim");
++            }
++            out.add(it);
++        }
++    }
++
+     /** A player's skin and cape as Mojang has them. */
+     private void player(String name, List<Item> out) throws Exception {
+         String profile = getString("https://api.mojang.com/users/profiles/minecraft/" + enc(name));
+@@ -476,7 +523,7 @@ public class CatalogActivity extends Activity {
+             }
+         });
+         r.addView(act);
+-        picture(it, pic);
++        picture(it, pic, null);
+         return r;
+     }
+ 
+@@ -528,6 +575,11 @@ public class CatalogActivity extends Activity {
+         name.setMaxLines(1);
+         name.setEllipsize(android.text.TextUtils.TruncateAt.END);
+         t.addView(name);
++        // How big the texture is, so a regular skin is not taken for an HD one.
++        final TextView size = Ui.text(this, sizes.containsKey(it.picture) ? sizes.get(it.picture) : "", 12,
++                it.hd ? Ui.GREEN : Ui.MUTED, it.hd);
++        size.setMaxLines(1);
++        t.addView(size);
+         final Button act = Ui.button(this, it.cape ? Ui.t("Надеть плащ", "Wear cape") : Ui.t("Надеть", "Wear"), true);
+         act.setTextSize(14);
+         act.setOnClickListener(new View.OnClickListener() {
+@@ -536,7 +588,7 @@ public class CatalogActivity extends Activity {
+             }
+         });
+         t.addView(act, new LinearLayout.LayoutParams(-1, -2));
+-        picture(it, pic);
++        picture(it, pic, size);
+         return t;
+     }
+ 
+@@ -559,7 +611,13 @@ public class CatalogActivity extends Activity {
+         for (File f : files) if (f.lastModified() < old) f.delete();
+     }
+ 
+-    private void picture(final Item it, final ImageView target) {
++    /** "64×64", "64×32", "HD 128×128": what a texture is, read from the picture itself. */
++    private static String sizeLabel(Bitmap b) {
++        String wh = b.getWidth() + "×" + b.getHeight();
++        return b.getWidth() >= 128 ? "HD " + wh : wh;
++    }
++
++    private void picture(final Item it, final ImageView target, final TextView size) {
+         if (it.picture == null || it.picture.isEmpty()) return;
+         Bitmap have = pictures.get(it.picture);
+         if (have != null) {
+@@ -590,11 +648,14 @@ public class CatalogActivity extends Activity {
+                     o.inScaled = false;
+                     Bitmap b = BitmapFactory.decodeByteArray(bytes, 0, bytes.length, o);
+                     if (b == null) return;
++                    final String label = sizeLabel(b);
+                     final Bitmap shown = it.kind == null && !it.cape ? face(b) : scaleUp(b);
+                     ui.post(new Runnable() {
+                         public void run() {
+                             pictures.put(it.picture, shown);
++                            sizes.put(it.picture, label);
+                             target.setImageBitmap(shown);
++                            if (size != null) size.setText(label);
+                         }
+                     });
+                 } catch (Exception ignored) {
+@@ -603,13 +664,14 @@ public class CatalogActivity extends Activity {
+         });
+     }
+ 
+-    /** A skin's face with its hat layer, large and sharp. */
++    /** A skin's face with its hat layer, large and sharp (an HD skin's at its own scale). */
+     private static Bitmap face(Bitmap skin) {
+-        if (skin.getWidth() < 64 || skin.getHeight() < 32) return scaleUp(skin);
+-        Bitmap f = Bitmap.createBitmap(8, 8, Bitmap.Config.ARGB_8888);
++        int k = skin.getWidth() / 64;
++        if (k < 1 || skin.getHeight() < 32 * k) return scaleUp(skin);
++        Bitmap f = Bitmap.createBitmap(8 * k, 8 * k, Bitmap.Config.ARGB_8888);
+         android.graphics.Canvas c = new android.graphics.Canvas(f);
+-        c.drawBitmap(Bitmap.createBitmap(skin, 8, 8, 8, 8), 0, 0, null);
+-        c.drawBitmap(Bitmap.createBitmap(skin, 40, 8, 8, 8), 0, 0, null);
++        c.drawBitmap(Bitmap.createBitmap(skin, 8 * k, 8 * k, 8 * k, 8 * k), 0, 0, null);
++        c.drawBitmap(Bitmap.createBitmap(skin, 40 * k, 8 * k, 8 * k, 8 * k), 0, 0, null);
+         return Bitmap.createScaledBitmap(f, 128, 128, false);
+     }
+ 
+@@ -656,10 +718,19 @@ public class CatalogActivity extends Activity {
+ 
+     private String wearSkin(Item it) throws Exception {
+         byte[] png = getBytes(it.picture, 1 << 20);
++        if (it.hd) {
++            if (!hex(MessageDigest.getInstance("SHA-256").digest(png)).equals(it.hash)) {
++                throw new Exception(Ui.t("Контрольная сумма не совпала.", "Checksum mismatch."));
++            }
++            // The same cleaning as a picked file: 128×128 RGBA, or 64×64 when it is over the share's 22 KB.
++            png = ProfileActivity.normalizeSkin(png);
++            if (png == null) throw new Exception(Ui.t("Это не скин.", "That is not a skin."));
++        }
+         BitmapFactory.Options o = new BitmapFactory.Options();
+         o.inScaled = false;
+         Bitmap b = BitmapFactory.decodeByteArray(png, 0, png.length, o);
+-        if (b == null || b.getWidth() != 64 || (b.getHeight() != 64 && b.getHeight() != 32)) {
++        boolean hd = it.hd && b != null && b.getWidth() == 128 && b.getHeight() == 128;
++        if (b == null || !hd && (b.getWidth() != 64 || (b.getHeight() != 64 && b.getHeight() != 32))) {
+             throw new Exception(Ui.t("Нужен скин 64×64 или 64×32.", "A 64×64 or 64×32 skin is needed."));
+         }
+         boolean slim = it.hasSlim ? it.slim : looksSlim(b);
+@@ -696,6 +767,11 @@ public class CatalogActivity extends Activity {
+         } catch (Exception ignored) {
+             // worn without the signature: the player sees it, other players may not
+         }
++        if (it.hd) {
++            return hd ? Ui.t("HD-скин надет: ", "HD skin worn: ") + it.title
++                    + Ui.t(". Его видят друзья, у которых тоже OneShot.", ". Friends who also play OneShot see it.")
++                    : Ui.t("Скин надет, но уменьшен до 64×64 (в HD он больше 22 КБ): ", "Skin worn, scaled down to 64×64 (over 22 KB in HD): ") + it.title;
++        }
+         return Ui.t("Скин надет: ", "Skin worn: ") + it.title + (signed.isFile() ? "" : Ui.t(" (без подписи Mojang)", " (unsigned)"));
+     }
+ 
+@@ -738,10 +814,13 @@ public class CatalogActivity extends Activity {
+ 
+     // ------------------------------------------------------------------ helpers
+ 
+-    /** Whether a skin's arms are 3 px wide: the right arm's last column is empty. */
++    /** Whether a skin's arms are 3 px wide: the right arm's last column is empty (at an HD skin's scale too). */
+     private static boolean looksSlim(Bitmap b) {
+-        if (b.getHeight() < 64) return false;
+-        for (int y = 20; y < 32; y++) if (Color.alpha(b.getPixel(55, y)) != 0) return false;
++        int k = Math.max(1, b.getWidth() / 64);
++        if (b.getHeight() < 64 * k) return false;
++        for (int y = 20 * k; y < 32 * k; y++) {
++            for (int x = 55 * k; x < 56 * k; x++) if (Color.alpha(b.getPixel(x, y)) != 0) return false;
++        }
+         return true;
+     }
+ 
