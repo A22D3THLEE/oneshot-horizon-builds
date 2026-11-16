@@ -1,0 +1,352 @@
+diff --git a/crates/horizon-client/src/game/friends.rs b/crates/horizon-client/src/game/friends.rs
+index c696c599..7520b54a 100644
+--- a/crates/horizon-client/src/game/friends.rs
++++ b/crates/horizon-client/src/game/friends.rs
+@@ -110,6 +110,12 @@ impl Game<'_> {
+             lan: std::net::SocketAddr::from(([127, 0, 0, 1], port)),
+             protocol: PROTOCOL_VERSION,
+             game: GAME_VERSION.to_owned(),
++            // Friends see which world this is (presence).
++            world: self
++                .integrated
++                .as_ref()
++                .map(|h| h.world_name.clone())
++                .filter(|n| !n.is_empty()),
+             relay: horizon_client::net::friends_relay_setting(),
+             path: PathMode::from_env(),
+             port: std::env::var("HORIZON_FRIENDS_PORT")
+diff --git a/crates/horizon-friends/src/host.rs b/crates/horizon-friends/src/host.rs
+index f7d8deca..e4f0a79d 100644
+--- a/crates/horizon-friends/src/host.rs
++++ b/crates/horizon-friends/src/host.rs
+@@ -64,6 +64,9 @@ pub struct HostConfig {
+     /// The direct port to ask for (0: any).
+     pub port: u16,
+     pub reach: reach::Options,
++    /// Oneshot: the world's name, for friends asking the relay who shares now
++    /// (presence). Sent only with the player's lasting code.
++    pub world: Option<String>,
+ }
+ 
+ /// What the host's game shows.
+@@ -649,6 +652,10 @@ fn register(shared: &Arc<Shared>, relay_url: &str) -> io::Result<()> {
+             game: config.game.clone(),
+             nameplate: id.code.nameplate.clone(),
+             claim: id.claim.clone(),
++            presence: config
++                .world
++                .as_deref()
++                .and_then(|w| crate::presence::seal(&id.code.nameplate, &id.code.secret, w)),
+         },
+         None => ToRelay::Host {
+             v: wire::VERSION,
+diff --git a/crates/horizon-friends/src/lib.rs b/crates/horizon-friends/src/lib.rs
+index 68b265cf..dddaf57d 100644
+--- a/crates/horizon-friends/src/lib.rs
++++ b/crates/horizon-friends/src/lib.rs
+@@ -19,6 +19,7 @@ pub mod host;
+ pub mod identity;
+ pub mod invite;
+ pub mod portmap;
++pub mod presence;
+ pub mod reach;
+ mod session;
+ pub mod stun;
+diff --git a/crates/horizon-friends/src/presence.rs b/crates/horizon-friends/src/presence.rs
+new file mode 100644
+index 00000000..002ffd88
+--- /dev/null
++++ b/crates/horizon-friends/src/presence.rs
+@@ -0,0 +1,154 @@
++//! Oneshot: what a sharing host tells its friends through the relay's `online`
++//! query, keyed by its lasting code so that only those who know the code can
++//! ask for it or read it (wire::Presence). The relay keeps both strings opaque.
++//!
++//! Only HMAC-SHA256 is used, so the launchers (C#, Java) do the same in a few
++//! lines. With PRF(k, m) = HMAC-SHA256(k, m || 0x01) (HKDF-Expand's first
++//! block):
++//! - code: the nameplate and the secret, 8 characters, uppercase ASCII;
++//! - prk = HMAC-SHA256("oneshot-presence-v1", code) (HKDF-Extract);
++//! - id = hex(PRF(prk, "id")[..16]);
++//! - key = PRF(prk, "seal");
++//! - name: the world's name in UTF-8, at most 32 bytes (cut at a character);
++//! - nonce: 8 random bytes; ct = name XOR PRF(key, "ks" || nonce)[..len];
++//! - tag = PRF(key, "tag" || nonce || ct)[..8];
++//! - blob = hex(nonce || tag || ct).
++//!
++//! The secret has 20 bits, so whoever runs the relay could find a code by
++//! trying them all: the relay is the player's own, and a world's name is all
++//! it would learn.
++use crate::wire::Presence;
++use hkdf::Hkdf;
++use sha2::Sha256;
++
++const SALT: &[u8] = b"oneshot-presence-v1";
++/// The longest world name sent, in bytes.
++pub const MAX_NAME: usize = 32;
++
++fn prf(key: &[u8], message: &[u8]) -> [u8; 32] {
++    let mut out = [0u8; 32];
++    Hkdf::<Sha256>::from_prk(key)
++        .expect("a 32-byte key")
++        .expand(message, &mut out)
++        .expect("one block");
++    out
++}
++
++fn hex(bytes: &[u8]) -> String {
++    bytes.iter().map(|b| format!("{b:02x}")).collect()
++}
++
++fn unhex(text: &str) -> Option<Vec<u8>> {
++    if text.len() % 2 != 0 {
++        return None;
++    }
++    (0..text.len())
++        .step_by(2)
++        .map(|i| u8::from_str_radix(text.get(i..i + 2)?, 16).ok())
++        .collect()
++}
++
++/// The keys of a code: (id, sealing key).
++fn keys(nameplate: &str, secret: &str) -> (String, [u8; 32]) {
++    let code = format!("{nameplate}{secret}").to_ascii_uppercase();
++    let (prk, _) = Hkdf::<Sha256>::extract(Some(SALT), code.as_bytes());
++    (hex(&prf(&prk, b"id")[..16]), prf(&prk, b"seal"))
++}
++
++/// The world's name cut to [`MAX_NAME`] bytes at a character boundary.
++fn cut(name: &str) -> &str {
++    let mut end = name.len().min(MAX_NAME);
++    while !name.is_char_boundary(end) {
++        end -= 1;
++    }
++    &name[..end]
++}
++
++fn stream(key: &[u8; 32], nonce: &[u8], data: &mut [u8]) {
++    let ks = prf(key, &[b"ks".as_slice(), nonce].concat());
++    for (d, k) in data.iter_mut().zip(ks) {
++        *d ^= k;
++    }
++}
++
++fn tag(key: &[u8; 32], nonce: &[u8], ct: &[u8]) -> [u8; 8] {
++    let t = prf(key, &[b"tag".as_slice(), nonce, ct].concat());
++    t[..8].try_into().unwrap()
++}
++
++/// The id friends ask the relay about.
++pub fn id(nameplate: &str, secret: &str) -> String {
++    keys(nameplate, secret).0
++}
++
++/// The presence of a host sharing `world` under this code, with this nonce.
++pub fn seal_with(nameplate: &str, secret: &str, world: &str, nonce: [u8; 8]) -> Presence {
++    let (id, key) = keys(nameplate, secret);
++    let mut ct = cut(world).as_bytes().to_vec();
++    stream(&key, &nonce, &mut ct);
++    let tag = tag(&key, &nonce, &ct);
++    Presence {
++        id,
++        blob: hex(&[&nonce[..], &tag[..], &ct[..]].concat()),
++    }
++}
++
++/// The same with a fresh nonce; None if the OS has no random numbers.
++pub fn seal(nameplate: &str, secret: &str, world: &str) -> Option<Presence> {
++    let mut nonce = [0u8; 8];
++    getrandom::fill(&mut nonce).ok()?;
++    Some(seal_with(nameplate, secret, world, nonce))
++}
++
++/// The world's name in a friend's presence; None if it isn't theirs or was
++/// altered.
++pub fn open(nameplate: &str, secret: &str, blob: &str) -> Option<String> {
++    let (_, key) = keys(nameplate, secret);
++    let b = unhex(blob)?;
++    if b.len() < 16 || b.len() > 16 + MAX_NAME {
++        return None;
++    }
++    let (nonce, rest) = b.split_at(8);
++    let (t, ct) = rest.split_at(8);
++    if tag(&key, nonce, ct) != *t {
++        return None;
++    }
++    let mut name = ct.to_vec();
++    stream(&key, nonce, &mut name);
++    String::from_utf8(name).ok()
++}
++
++#[cfg(test)]
++mod tests {
++    use super::*;
++
++    #[test]
++    fn seals_and_opens() {
++        let p = seal_with("K7QM", "X2PA", "Новый мир", [1, 2, 3, 4, 5, 6, 7, 8]);
++        assert!(p.valid());
++        assert_eq!(p.id, id("k7qm", "x2pa"));
++        assert_eq!(open("K7QM", "X2PA", &p.blob).as_deref(), Some("Новый мир"));
++        // Another code reads nothing; an altered blob neither.
++        assert_eq!(open("K7QM", "X2PB", &p.blob), None);
++        let mut bad = p.blob.clone().into_bytes();
++        let last = bad.len() - 1;
++        bad[last] = if bad[last] == b'0' { b'1' } else { b'0' };
++        assert_eq!(open("K7QM", "X2PA", &String::from_utf8(bad).unwrap()), None);
++        // A long name is cut at a character.
++        let long = "ж".repeat(40);
++        let p = seal("K7QM", "X2PA", &long).unwrap();
++        assert!(p.valid());
++        assert_eq!(open("K7QM", "X2PA", &p.blob).unwrap(), "ж".repeat(16));
++    }
++
++    /// The vector the launchers check themselves against (FriendsPresence).
++    #[test]
++    fn launcher_vector() {
++        let p = seal_with("K7QM", "X2PA", "World", [0, 1, 2, 3, 4, 5, 6, 7]);
++        println!("id {} blob {}", p.id, p.blob);
++        assert_eq!(p.id, VECTOR_ID);
++        assert_eq!(p.blob, VECTOR_BLOB);
++    }
++    const VECTOR_ID: &str = "3f9a99ded828d80b83492609f4d66733";
++    const VECTOR_BLOB: &str = "00010203040506072d40854bcb3c215b22efe8a6dc";
++}
+diff --git a/crates/horizon-friends/src/wire.rs b/crates/horizon-friends/src/wire.rs
+index 9504ed82..1f1a1297 100644
+--- a/crates/horizon-friends/src/wire.rs
++++ b/crates/horizon-friends/src/wire.rs
+@@ -7,6 +7,34 @@ use std::io::{self, BufRead, Read, Write};
+ pub const VERSION: u32 = 1;
+ /// The longest line either side accepts.
+ pub const MAX_LINE: usize = 4096;
++/// Friends one `online` query may ask about; the answer stays within [`MAX_LINE`].
++pub const MAX_ONLINE_IDS: usize = 16;
++/// The longest presence blob the relay keeps (hex digits).
++pub const MAX_PRESENCE_BLOB: usize = 112;
++
++/// What a host's friends may learn while it shares: `id` is derived from its
++/// code, so only those who know the code can ask for it, and `blob` (the
++/// world's name) is sealed with the code too. The relay keeps both as opaque
++/// strings and never needs the code.
++#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
++pub struct Presence {
++    pub id: String,
++    pub blob: String,
++}
++impl Presence {
++    /// The shape the relay keeps: a valid id, and lowercase hex of even
++    /// length at most [`MAX_PRESENCE_BLOB`] for the blob.
++    pub fn valid(&self) -> bool {
++        valid_presence_id(&self.id)
++            && self.blob.len() <= MAX_PRESENCE_BLOB
++            && self.blob.len() % 2 == 0
++            && self.blob.bytes().all(|b| matches!(b, b'0'..=b'9' | b'a'..=b'f'))
++    }
++}
++/// A presence id: 32 lowercase hex digits.
++pub fn valid_presence_id(id: &str) -> bool {
++    id.len() == 32 && id.bytes().all(|b| matches!(b, b'0'..=b'9' | b'a'..=b'f'))
++}
+ 
+ /// Lines a client sends.
+ #[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
+@@ -30,6 +58,10 @@ pub enum ToRelay {
+         game: String,
+         nameplate: String,
+         claim: String,
++        /// For the host's friends asking `online`. A relay that predates it
++        /// ignores the field.
++        #[serde(default, skip_serializing_if = "Option::is_none")]
++        presence: Option<Presence>,
+     },
+     /// Join the world behind a nameplate.
+     Join {
+@@ -45,6 +77,13 @@ pub enum ToRelay {
+         token: String,
+     },
+     Pong,
++    /// Which of these friends (presence ids) share a world right now. The
++    /// relay answers `online` and closes the connection; a relay that
++    /// predates it answers `bad_request`.
++    Online {
++        v: u32,
++        ids: Vec<String>,
++    },
+ }
+ 
+ /// Lines the relay sends.
+@@ -67,6 +106,11 @@ pub enum FromRelay {
+         observed: Option<String>,
+     },
+     Ping,
++    /// The presence of each asked-for friend sharing right now; the others
++    /// aren't.
++    Online {
++        friends: Vec<Presence>,
++    },
+     Error {
+         code: ErrorCode,
+         /// The host's game version, for `version_mismatch`.
+@@ -209,6 +253,7 @@ mod tests {
+             game: "26.3".into(),
+             nameplate: "K7QM".into(),
+             claim: "ab".repeat(32),
++            presence: None,
+         };
+         send(&mut buf, &claim).unwrap();
+         assert!(buf.starts_with(b"{\"op\":\"claim\","));
+@@ -234,6 +279,41 @@ mod tests {
+         assert_eq!(ErrorCode::Taken.as_str(), "nameplate_taken");
+     }
+ 
++    #[test]
++    fn presence_round_trips_and_fits_a_line() {
++        // A claim from before presence still reads.
++        let old = br#"{"op":"claim","v":1,"protocol":777,"game":"26.3","nameplate":"K7QM","claim":"ab"}"#;
++        let mut line = old.to_vec();
++        line.push(b'\n');
++        assert!(matches!(
++            recv::<_, ToRelay>(&mut &line[..]).unwrap(),
++            ToRelay::Claim { presence: None, .. }
++        ));
++        let p = Presence {
++            id: "0f".repeat(16),
++            blob: "a".repeat(MAX_PRESENCE_BLOB),
++        };
++        assert!(p.valid());
++        assert!(!Presence { id: "0F".repeat(16), ..p.clone() }.valid());
++        assert!(!Presence { blob: "a".repeat(MAX_PRESENCE_BLOB + 2), ..p.clone() }.valid());
++        assert!(!Presence { blob: "abc".into(), ..p.clone() }.valid());
++        let mut buf = Vec::new();
++        let ask = ToRelay::Online {
++            v: VERSION,
++            ids: vec![p.id.clone(); MAX_ONLINE_IDS],
++        };
++        send(&mut buf, &ask).unwrap();
++        // The fullest answer still fits in a line.
++        let answer = FromRelay::Online {
++            friends: vec![p; MAX_ONLINE_IDS],
++        };
++        send(&mut buf, &answer).unwrap();
++        assert!(buf.len() < 2 * MAX_LINE);
++        let mut r = &buf[..];
++        assert_eq!(recv::<_, ToRelay>(&mut r).unwrap(), ask);
++        assert_eq!(recv::<_, FromRelay>(&mut r).unwrap(), answer);
++    }
++
+     #[test]
+     fn long_lines_and_garbage_are_refused() {
+         let long = vec![b'a'; MAX_LINE + 1];
+diff --git a/crates/horizon-relay/tests/tunnel.rs b/crates/horizon-relay/tests/tunnel.rs
+index 39f93422..945ec4c9 100644
+--- a/crates/horizon-relay/tests/tunnel.rs
++++ b/crates/horizon-relay/tests/tunnel.rs
+@@ -52,6 +52,7 @@ fn generous() -> Config {
+ 
+ fn start(relay: Option<&str>, path: PathMode) -> Host {
+     Host::start(HostConfig {
++        world: None,
+         lan: echo_server(),
+         protocol: PROTOCOL,
+         game: "26.3".into(),

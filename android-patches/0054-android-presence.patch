@@ -1,0 +1,746 @@
+diff --git a/crates/horizon-client/src/game/friends.rs b/crates/horizon-client/src/game/friends.rs
+index 846603c56..f929c4583 100644
+--- a/crates/horizon-client/src/game/friends.rs
++++ b/crates/horizon-client/src/game/friends.rs
+@@ -114,6 +114,12 @@ impl Game<'_> {
+             lan: std::net::SocketAddr::from(([127, 0, 0, 1], port)),
+             protocol: PROTOCOL_VERSION,
+             game: GAME_VERSION.to_owned(),
++            // Friends see which world this is (presence).
++            world: self
++                .integrated
++                .as_ref()
++                .map(|h| h.world_name.clone())
++                .filter(|n| !n.is_empty()),
+             // "Direct only" on the launcher's Friends page leaves the relay out of the code.
+             relay: if path == PathMode::DirectOnly {
+                 None
+diff --git a/crates/horizon-friends/src/host.rs b/crates/horizon-friends/src/host.rs
+index 0147bba55..5955aa5ae 100644
+--- a/crates/horizon-friends/src/host.rs
++++ b/crates/horizon-friends/src/host.rs
+@@ -69,6 +69,9 @@ pub struct HostConfig {
+     /// The direct port to ask for (0: any).
+     pub port: u16,
+     pub reach: reach::Options,
++    /// Oneshot: the world's name, for friends asking the relay who shares now
++    /// (presence). Sent only with the player's lasting code.
++    pub world: Option<String>,
+ }
+ 
+ /// What the host's game shows.
+@@ -635,6 +638,10 @@ fn register(shared: &Arc<Shared>, relay_url: &str) -> io::Result<()> {
+             game: config.game.clone(),
+             nameplate: id.code.nameplate.clone(),
+             claim: id.claim.clone(),
++            presence: config
++                .world
++                .as_deref()
++                .and_then(|w| crate::presence::seal(&id.code.nameplate, &id.code.secret, w)),
+         },
+         None => ToRelay::Host {
+             v: wire::VERSION,
+diff --git a/crates/horizon-friends/src/lib.rs b/crates/horizon-friends/src/lib.rs
+index d7ef3e251..ae0f102a0 100644
+--- a/crates/horizon-friends/src/lib.rs
++++ b/crates/horizon-friends/src/lib.rs
+@@ -17,6 +17,7 @@ pub mod host;
+ pub mod identity;
+ pub mod invite;
+ pub mod portmap;
++pub mod presence;
+ pub mod reach;
+ mod session;
+ pub mod stun;
+diff --git a/crates/horizon-friends/src/presence.rs b/crates/horizon-friends/src/presence.rs
+new file mode 100644
+index 000000000..002ffd886
+--- /dev/null
++++ b/crates/horizon-friends/src/presence.rs
+@@ -0,0 +1,154 @@
++//! Oneshot: what a sharing host tells its friends through the relay's `online`
++//! query, keyed by its lasting code so that only those who know the code can
++//! ask for it or read it (wire::Presence). The relay keeps both strings opaque.
++//!
++//! Only HMAC-SHA256 is used, so the launchers (C#, Java) do the same in a few
++//! lines. With PRF(k, m) = HMAC-SHA256(k, m || 0x01) (HKDF-Expand's first
++//! block):
++//! - code: the nameplate and the secret, 8 characters, uppercase ASCII;
++//! - prk = HMAC-SHA256("oneshot-presence-v1", code) (HKDF-Extract);
++//! - id = hex(PRF(prk, "id")[..16]);
++//! - key = PRF(prk, "seal");
++//! - name: the world's name in UTF-8, at most 32 bytes (cut at a character);
++//! - nonce: 8 random bytes; ct = name XOR PRF(key, "ks" || nonce)[..len];
++//! - tag = PRF(key, "tag" || nonce || ct)[..8];
++//! - blob = hex(nonce || tag || ct).
++//!
++//! The secret has 20 bits, so whoever runs the relay could find a code by
++//! trying them all: the relay is the player's own, and a world's name is all
++//! it would learn.
++use crate::wire::Presence;
++use hkdf::Hkdf;
++use sha2::Sha256;
++
++const SALT: &[u8] = b"oneshot-presence-v1";
++/// The longest world name sent, in bytes.
++pub const MAX_NAME: usize = 32;
++
++fn prf(key: &[u8], message: &[u8]) -> [u8; 32] {
++    let mut out = [0u8; 32];
++    Hkdf::<Sha256>::from_prk(key)
++        .expect("a 32-byte key")
++        .expand(message, &mut out)
++        .expect("one block");
++    out
++}
++
++fn hex(bytes: &[u8]) -> String {
++    bytes.iter().map(|b| format!("{b:02x}")).collect()
++}
++
++fn unhex(text: &str) -> Option<Vec<u8>> {
++    if text.len() % 2 != 0 {
++        return None;
++    }
++    (0..text.len())
++        .step_by(2)
++        .map(|i| u8::from_str_radix(text.get(i..i + 2)?, 16).ok())
++        .collect()
++}
++
++/// The keys of a code: (id, sealing key).
++fn keys(nameplate: &str, secret: &str) -> (String, [u8; 32]) {
++    let code = format!("{nameplate}{secret}").to_ascii_uppercase();
++    let (prk, _) = Hkdf::<Sha256>::extract(Some(SALT), code.as_bytes());
++    (hex(&prf(&prk, b"id")[..16]), prf(&prk, b"seal"))
++}
++
++/// The world's name cut to [`MAX_NAME`] bytes at a character boundary.
++fn cut(name: &str) -> &str {
++    let mut end = name.len().min(MAX_NAME);
++    while !name.is_char_boundary(end) {
++        end -= 1;
++    }
++    &name[..end]
++}
++
++fn stream(key: &[u8; 32], nonce: &[u8], data: &mut [u8]) {
++    let ks = prf(key, &[b"ks".as_slice(), nonce].concat());
++    for (d, k) in data.iter_mut().zip(ks) {
++        *d ^= k;
++    }
++}
++
++fn tag(key: &[u8; 32], nonce: &[u8], ct: &[u8]) -> [u8; 8] {
++    let t = prf(key, &[b"tag".as_slice(), nonce, ct].concat());
++    t[..8].try_into().unwrap()
++}
++
++/// The id friends ask the relay about.
++pub fn id(nameplate: &str, secret: &str) -> String {
++    keys(nameplate, secret).0
++}
++
++/// The presence of a host sharing `world` under this code, with this nonce.
++pub fn seal_with(nameplate: &str, secret: &str, world: &str, nonce: [u8; 8]) -> Presence {
++    let (id, key) = keys(nameplate, secret);
++    let mut ct = cut(world).as_bytes().to_vec();
++    stream(&key, &nonce, &mut ct);
++    let tag = tag(&key, &nonce, &ct);
++    Presence {
++        id,
++        blob: hex(&[&nonce[..], &tag[..], &ct[..]].concat()),
++    }
++}
++
++/// The same with a fresh nonce; None if the OS has no random numbers.
++pub fn seal(nameplate: &str, secret: &str, world: &str) -> Option<Presence> {
++    let mut nonce = [0u8; 8];
++    getrandom::fill(&mut nonce).ok()?;
++    Some(seal_with(nameplate, secret, world, nonce))
++}
++
++/// The world's name in a friend's presence; None if it isn't theirs or was
++/// altered.
++pub fn open(nameplate: &str, secret: &str, blob: &str) -> Option<String> {
++    let (_, key) = keys(nameplate, secret);
++    let b = unhex(blob)?;
++    if b.len() < 16 || b.len() > 16 + MAX_NAME {
++        return None;
++    }
++    let (nonce, rest) = b.split_at(8);
++    let (t, ct) = rest.split_at(8);
++    if tag(&key, nonce, ct) != *t {
++        return None;
++    }
++    let mut name = ct.to_vec();
++    stream(&key, nonce, &mut name);
++    String::from_utf8(name).ok()
++}
++
++#[cfg(test)]
++mod tests {
++    use super::*;
++
++    #[test]
++    fn seals_and_opens() {
++        let p = seal_with("K7QM", "X2PA", "Новый мир", [1, 2, 3, 4, 5, 6, 7, 8]);
++        assert!(p.valid());
++        assert_eq!(p.id, id("k7qm", "x2pa"));
++        assert_eq!(open("K7QM", "X2PA", &p.blob).as_deref(), Some("Новый мир"));
++        // Another code reads nothing; an altered blob neither.
++        assert_eq!(open("K7QM", "X2PB", &p.blob), None);
++        let mut bad = p.blob.clone().into_bytes();
++        let last = bad.len() - 1;
++        bad[last] = if bad[last] == b'0' { b'1' } else { b'0' };
++        assert_eq!(open("K7QM", "X2PA", &String::from_utf8(bad).unwrap()), None);
++        // A long name is cut at a character.
++        let long = "ж".repeat(40);
++        let p = seal("K7QM", "X2PA", &long).unwrap();
++        assert!(p.valid());
++        assert_eq!(open("K7QM", "X2PA", &p.blob).unwrap(), "ж".repeat(16));
++    }
++
++    /// The vector the launchers check themselves against (FriendsPresence).
++    #[test]
++    fn launcher_vector() {
++        let p = seal_with("K7QM", "X2PA", "World", [0, 1, 2, 3, 4, 5, 6, 7]);
++        println!("id {} blob {}", p.id, p.blob);
++        assert_eq!(p.id, VECTOR_ID);
++        assert_eq!(p.blob, VECTOR_BLOB);
++    }
++    const VECTOR_ID: &str = "3f9a99ded828d80b83492609f4d66733";
++    const VECTOR_BLOB: &str = "00010203040506072d40854bcb3c215b22efe8a6dc";
++}
+diff --git a/crates/horizon-friends/src/wire.rs b/crates/horizon-friends/src/wire.rs
+index 9504ed823..1f1a12970 100644
+--- a/crates/horizon-friends/src/wire.rs
++++ b/crates/horizon-friends/src/wire.rs
+@@ -7,6 +7,34 @@ use std::io::{self, BufRead, Read, Write};
+ pub const VERSION: u32 = 1;
+ /// The longest line either side accepts.
+ pub const MAX_LINE: usize = 4096;
++/// Friends one `online` query may ask about; the answer stays within [`MAX_LINE`].
++pub const MAX_ONLINE_IDS: usize = 16;
++/// The longest presence blob the relay keeps (hex digits).
++pub const MAX_PRESENCE_BLOB: usize = 112;
++
++/// What a host's friends may learn while it shares: `id` is derived from its
++/// code, so only those who know the code can ask for it, and `blob` (the
++/// world's name) is sealed with the code too. The relay keeps both as opaque
++/// strings and never needs the code.
++#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
++pub struct Presence {
++    pub id: String,
++    pub blob: String,
++}
++impl Presence {
++    /// The shape the relay keeps: a valid id, and lowercase hex of even
++    /// length at most [`MAX_PRESENCE_BLOB`] for the blob.
++    pub fn valid(&self) -> bool {
++        valid_presence_id(&self.id)
++            && self.blob.len() <= MAX_PRESENCE_BLOB
++            && self.blob.len() % 2 == 0
++            && self.blob.bytes().all(|b| matches!(b, b'0'..=b'9' | b'a'..=b'f'))
++    }
++}
++/// A presence id: 32 lowercase hex digits.
++pub fn valid_presence_id(id: &str) -> bool {
++    id.len() == 32 && id.bytes().all(|b| matches!(b, b'0'..=b'9' | b'a'..=b'f'))
++}
+ 
+ /// Lines a client sends.
+ #[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
+@@ -30,6 +58,10 @@ pub enum ToRelay {
+         game: String,
+         nameplate: String,
+         claim: String,
++        /// For the host's friends asking `online`. A relay that predates it
++        /// ignores the field.
++        #[serde(default, skip_serializing_if = "Option::is_none")]
++        presence: Option<Presence>,
+     },
+     /// Join the world behind a nameplate.
+     Join {
+@@ -45,6 +77,13 @@ pub enum ToRelay {
+         token: String,
+     },
+     Pong,
++    /// Which of these friends (presence ids) share a world right now. The
++    /// relay answers `online` and closes the connection; a relay that
++    /// predates it answers `bad_request`.
++    Online {
++        v: u32,
++        ids: Vec<String>,
++    },
+ }
+ 
+ /// Lines the relay sends.
+@@ -67,6 +106,11 @@ pub enum FromRelay {
+         observed: Option<String>,
+     },
+     Ping,
++    /// The presence of each asked-for friend sharing right now; the others
++    /// aren't.
++    Online {
++        friends: Vec<Presence>,
++    },
+     Error {
+         code: ErrorCode,
+         /// The host's game version, for `version_mismatch`.
+@@ -209,6 +253,7 @@ mod tests {
+             game: "26.3".into(),
+             nameplate: "K7QM".into(),
+             claim: "ab".repeat(32),
++            presence: None,
+         };
+         send(&mut buf, &claim).unwrap();
+         assert!(buf.starts_with(b"{\"op\":\"claim\","));
+@@ -234,6 +279,41 @@ mod tests {
+         assert_eq!(ErrorCode::Taken.as_str(), "nameplate_taken");
+     }
+ 
++    #[test]
++    fn presence_round_trips_and_fits_a_line() {
++        // A claim from before presence still reads.
++        let old = br#"{"op":"claim","v":1,"protocol":777,"game":"26.3","nameplate":"K7QM","claim":"ab"}"#;
++        let mut line = old.to_vec();
++        line.push(b'\n');
++        assert!(matches!(
++            recv::<_, ToRelay>(&mut &line[..]).unwrap(),
++            ToRelay::Claim { presence: None, .. }
++        ));
++        let p = Presence {
++            id: "0f".repeat(16),
++            blob: "a".repeat(MAX_PRESENCE_BLOB),
++        };
++        assert!(p.valid());
++        assert!(!Presence { id: "0F".repeat(16), ..p.clone() }.valid());
++        assert!(!Presence { blob: "a".repeat(MAX_PRESENCE_BLOB + 2), ..p.clone() }.valid());
++        assert!(!Presence { blob: "abc".into(), ..p.clone() }.valid());
++        let mut buf = Vec::new();
++        let ask = ToRelay::Online {
++            v: VERSION,
++            ids: vec![p.id.clone(); MAX_ONLINE_IDS],
++        };
++        send(&mut buf, &ask).unwrap();
++        // The fullest answer still fits in a line.
++        let answer = FromRelay::Online {
++            friends: vec![p; MAX_ONLINE_IDS],
++        };
++        send(&mut buf, &answer).unwrap();
++        assert!(buf.len() < 2 * MAX_LINE);
++        let mut r = &buf[..];
++        assert_eq!(recv::<_, ToRelay>(&mut r).unwrap(), ask);
++        assert_eq!(recv::<_, FromRelay>(&mut r).unwrap(), answer);
++    }
++
+     #[test]
+     fn long_lines_and_garbage_are_refused() {
+         let long = vec![b'a'; MAX_LINE + 1];
+diff --git a/crates/horizon-relay/src/lib.rs b/crates/horizon-relay/src/lib.rs
+index fdde944b3..32e420cfe 100644
+--- a/crates/horizon-relay/src/lib.rs
++++ b/crates/horizon-relay/src/lib.rs
+@@ -467,6 +467,8 @@ fn handle(state: &Arc<State>, mut stream: TcpStream, peer: SocketAddr) -> io::Re
+             game,
+             nameplate,
+             claim,
++            // Presence is relay/patches/0002's (the relay this repository builds).
++            ..
+         } if v == wire::VERSION => {
+             match code::parse_nameplate(&nameplate).filter(|_| identity::valid_claim(&claim)) {
+                 Some(nameplate) => host(
+diff --git a/crates/horizon-relay/tests/tunnel.rs b/crates/horizon-relay/tests/tunnel.rs
+index e59f48d52..aede62d6f 100644
+--- a/crates/horizon-relay/tests/tunnel.rs
++++ b/crates/horizon-relay/tests/tunnel.rs
+@@ -52,6 +52,7 @@ fn generous() -> Config {
+ 
+ fn start(relay: Option<&str>, path: PathMode) -> Host {
+     Host::start(HostConfig {
++        world: None,
+         lan: echo_server(),
+         protocol: PROTOCOL,
+         game: "26.3".into(),
+diff --git a/packaging/android/java/dev/horizonlab/horizon/FriendsBook.java b/packaging/android/java/dev/horizonlab/horizon/FriendsBook.java
+index d0e0507c3..672d7c686 100644
+--- a/packaging/android/java/dev/horizonlab/horizon/FriendsBook.java
++++ b/packaging/android/java/dev/horizonlab/horizon/FriendsBook.java
+@@ -41,6 +41,18 @@ final class FriendsBook {
+         String code() {
+             return nameplate + secret;
+         }
++
++        private String presenceId;
++
++        /** What the relay knows this friend's shared world by (FriendsPresence). */
++        String presenceId() {
++            if (presenceId == null) presenceId = FriendsPresence.id(nameplate, secret);
++            return presenceId;
++        }
++
++        String openWorld(String blob) {
++            return FriendsPresence.open(nameplate, secret, blob);
++        }
+     }
+ 
+     private FriendsBook() {}
+@@ -130,10 +142,56 @@ final class FriendsBook {
+         return Ui.ago(ms);
+     }
+ 
+-    /** One row per friend: a round badge with the first letter, the name, when, and Join. */
+-    static void fill(final ProfileActivity a, LinearLayout into, List<Friend> friends) {
++    /** How often the relay is asked who is online while a list is on screen. */
++    private static final long ASK_MS = 45000;
++
++    static void fill(ProfileActivity a, LinearLayout into, List<Friend> friends) {
++        fill(a, into, friends, friends.size());
++    }
++
++    /**
++     * Up to `max` rows: a round badge with the first letter, the name, when, and Join. A friend sharing a world
++     * right now (FriendsPresence) gets a green dot and the world's name, and comes first.
++     */
++    static void fill(final ProfileActivity a, LinearLayout into, final List<Friend> friends, final int max) {
++        final LinearLayout box = new LinearLayout(a);
++        box.setOrientation(LinearLayout.VERTICAL);
++        into.addView(box);
++        rows(a, box, friends, max);
++        final Runnable repaint = new Runnable() {
++            public void run() {
++                if (box.isAttachedToWindow()) rows(a, box, friends, max);
++            }
++        };
++        // Ask now and then while the list is on screen; a repainted page puts up a new list and this one stops.
++        Runnable poll = new Runnable() {
++            public void run() {
++                if (box.getParent() == null) return;
++                if (box.isShown() && box.getWindowVisibility() == View.VISIBLE) FriendsPresence.ask(a, friends, repaint);
++                box.postDelayed(this, ASK_MS);
++            }
++        };
++        FriendsPresence.ask(a, friends, repaint);
++        box.postDelayed(poll, ASK_MS);
++    }
++
++    private static void rows(final ProfileActivity a, LinearLayout into, List<Friend> all, int max) {
++        into.removeAllViews();
++        // The friends online first, otherwise in the book's order (the most recent first).
++        List<Friend> friends = new ArrayList<>();
++        final Map<Friend, String> worlds = new java.util.HashMap<>();
++        for (Friend f : all) {
++            String w = FriendsPresence.world(f);
++            if (w != null) {
++                worlds.put(f, w);
++                friends.add(f);
++            }
++        }
++        for (Friend f : all) if (!worlds.containsKey(f)) friends.add(f);
++        if (friends.size() > max) friends = friends.subList(0, Math.max(0, max));
+         for (int i = 0; i < friends.size(); i++) {
+             final Friend f = friends.get(i);
++            final String world = worlds.get(f);
+             LinearLayout r = Ui.row(a);
+             r.setGravity(Gravity.CENTER_VERTICAL);
+ 
+@@ -149,7 +207,22 @@ final class FriendsBook {
+             circle.setColor(f.stale ? (color & 0x00FFFFFF) | 0x66000000 : color);
+             letter.setBackground(circle);
+             int size = Ui.dp(a, 40);
+-            r.addView(letter, new LinearLayout.LayoutParams(size, size));
++            android.widget.FrameLayout badge = new android.widget.FrameLayout(a);
++            badge.addView(letter, new android.widget.FrameLayout.LayoutParams(size, size));
++            if (world != null) {
++                // A green dot on the badge, ringed with the card's color as a status dot is.
++                View dot = new View(a);
++                GradientDrawable d = new GradientDrawable();
++                d.setShape(GradientDrawable.OVAL);
++                d.setColor(Ui.GOOD);
++                d.setStroke(Ui.dp(a, 2.5f), Ui.CARD);
++                dot.setBackground(d);
++                int ds = Ui.dp(a, 15);
++                android.widget.FrameLayout.LayoutParams dl = new android.widget.FrameLayout.LayoutParams(ds, ds, Gravity.BOTTOM | Gravity.END);
++                badge.addView(dot, dl);
++                badge.setClipChildren(false);
++            }
++            r.addView(badge, new LinearLayout.LayoutParams(size, size));
+ 
+             LinearLayout texts = new LinearLayout(a);
+             texts.setOrientation(LinearLayout.VERTICAL);
+@@ -158,9 +231,13 @@ final class FriendsBook {
+             name.setEllipsize(android.text.TextUtils.TruncateAt.END);
+             name.setPadding(0, 0, 0, 0);
+             texts.addView(name);
+-            String sub = f.stale ? Ui.t("сменил код: сыграйте вместе ещё раз", "changed their code: play together once more")
++            String sub = world != null ? (world.isEmpty() ? Ui.t("в сети · мир открыт для друзей", "online · a world open for friends")
++                    : Ui.t("в сети · играет в «", "online · playing “") + world + Ui.t("»", "”"))
++                    : f.stale ? Ui.t("сменил код: сыграйте вместе ещё раз", "changed their code: play together once more")
+                     : f.last <= 0 ? "" : Ui.t("играли вместе ", "played together ") + when(f.last);
+-            TextView s = Ui.text(a, sub, 12, Ui.MUTED, false);
++            TextView s = Ui.text(a, sub, 12, world != null ? Ui.GOOD : Ui.MUTED, world != null);
++            s.setSingleLine(true);
++            s.setEllipsize(android.text.TextUtils.TruncateAt.END);
+             s.setPadding(0, 0, 0, 0);
+             if (!sub.isEmpty()) texts.addView(s);
+             LinearLayout.LayoutParams tl = new LinearLayout.LayoutParams(0, -2, 1);
+diff --git a/packaging/android/java/dev/horizonlab/horizon/FriendsPresence.java b/packaging/android/java/dev/horizonlab/horizon/FriendsPresence.java
+new file mode 100644
+index 000000000..7ae4095c0
+--- /dev/null
++++ b/packaging/android/java/dev/horizonlab/horizon/FriendsPresence.java
+@@ -0,0 +1,240 @@
++package dev.horizonlab.horizon;
++
++import java.io.ByteArrayOutputStream;
++import java.io.InputStream;
++import java.io.OutputStream;
++import java.net.InetSocketAddress;
++import java.net.Socket;
++import java.nio.ByteBuffer;
++import java.nio.charset.CharacterCodingException;
++import java.nio.charset.CodingErrorAction;
++import java.nio.charset.StandardCharsets;
++import java.util.ArrayList;
++import java.util.Arrays;
++import java.util.HashMap;
++import java.util.List;
++import java.util.Map;
++import javax.crypto.Mac;
++import javax.crypto.spec.SecretKeySpec;
++import org.json.JSONArray;
++import org.json.JSONObject;
++
++/**
++ * Oneshot: which friends share a world right now, and which world: the relay's "online" query
++ * (horizon-friends presence.rs and wire.rs, patch 0006). A host with a lasting code registers an id derived
++ * from the code and its world's name sealed with the code; only who knows the code can ask for the id or read
++ * the name, the relay keeps both as opaque strings. "Online" means the friend has a world open for friends,
++ * so Join works. Asked only while a list of friends is on screen; a relay that predates the query just shows
++ * no one online. As the PC launcher's FriendsPresence.cs.
++ */
++final class FriendsPresence {
++    private static final int MAX_IDS = 16, TIMEOUT_MS = 4000, FRESH_MS = 20000;
++    private static final byte[] SALT = "oneshot-presence-v1".getBytes(StandardCharsets.US_ASCII);
++    private static final Object GATE = new Object();
++    /** Presence id -> the friend's sealed world (blob), from the last answer. */
++    private static Map<String, String> online = new HashMap<>();
++    /** When each id was last asked about: an old answer no longer shows a friend online. */
++    private static final Map<String, Long> ANSWERED = new HashMap<>();
++    private static final long STALE_MS = 120000;
++    private static String askedKey = "";
++    private static long askedAt;
++    private static boolean busy;
++    private static String lastError;
++    /** A relay that answered bad_request predates the query: it isn't asked again for a while. */
++    private static long quietUntil;
++    private static final boolean WORKS = selfTest();
++
++    private FriendsPresence() {}
++
++    private static byte[] hmac(byte[] key, byte[] message) {
++        try {
++            Mac m = Mac.getInstance("HmacSHA256");
++            m.init(new SecretKeySpec(key, "HmacSHA256"));
++            return m.doFinal(message);
++        } catch (Exception e) {
++            throw new IllegalStateException(e);
++        }
++    }
++
++    /** HKDF-Expand's first block: HMAC(key, message || 0x01). */
++    private static byte[] prf(byte[] key, byte[]... parts) {
++        ByteArrayOutputStream m = new ByteArrayOutputStream();
++        for (byte[] p : parts) m.write(p, 0, p.length);
++        m.write(1);
++        return hmac(key, m.toByteArray());
++    }
++
++    private static byte[] a(String s) {
++        return s.getBytes(StandardCharsets.US_ASCII);
++    }
++
++    private static String hex(byte[] b, int count) {
++        StringBuilder s = new StringBuilder(count * 2);
++        for (int i = 0; i < count; i++) s.append(String.format("%02x", b[i] & 0xff));
++        return s.toString();
++    }
++
++    private static byte[] unhex(String s) {
++        if (s == null || s.length() % 2 != 0) return null;
++        byte[] b = new byte[s.length() / 2];
++        for (int i = 0; i < b.length; i++) {
++            int hi = Character.digit(s.charAt(2 * i), 16), lo = Character.digit(s.charAt(2 * i + 1), 16);
++            if (hi < 0 || lo < 0 || Character.isUpperCase(s.charAt(2 * i)) || Character.isUpperCase(s.charAt(2 * i + 1))) return null;
++            b[i] = (byte) (hi * 16 + lo);
++        }
++        return b;
++    }
++
++    private static byte[] prk(String nameplate, String secret) {
++        return hmac(SALT, a((nameplate + secret).toUpperCase(java.util.Locale.ROOT)));
++    }
++
++    static String id(String nameplate, String secret) {
++        return hex(prf(prk(nameplate, secret), a("id")), 16);
++    }
++
++    /** The world's name in a friend's presence; null if it isn't theirs or was altered. */
++    static String open(String nameplate, String secret, String blob) {
++        byte[] key = prf(prk(nameplate, secret), a("seal"));
++        byte[] b = unhex(blob);
++        if (b == null || b.length < 16 || b.length > 48) return null;
++        byte[] nonce = Arrays.copyOfRange(b, 0, 8), tag = Arrays.copyOfRange(b, 8, 16), ct = Arrays.copyOfRange(b, 16, b.length);
++        if (!java.security.MessageDigest.isEqual(Arrays.copyOf(prf(key, a("tag"), nonce, ct), 8), tag)) return null;
++        byte[] ks = prf(key, a("ks"), nonce);
++        for (int i = 0; i < ct.length; i++) ct[i] ^= ks[i];
++        try {
++            return StandardCharsets.UTF_8.newDecoder().onMalformedInput(CodingErrorAction.REPORT)
++                    .onUnmappableCharacter(CodingErrorAction.REPORT).decode(ByteBuffer.wrap(ct)).toString();
++        } catch (CharacterCodingException e) {
++            return null;
++        }
++    }
++
++    /** The game's own vector (presence.rs launcher_vector): a launcher that reads it wrong asks nothing. */
++    private static boolean selfTest() {
++        try {
++            String blob = "00010203040506072d40854bcb3c215b22efe8a6dc";
++            boolean ok = id("k7qm", "x2pa").equals("3f9a99ded828d80b83492609f4d66733") && "World".equals(open("K7QM", "X2PA", blob))
++                    && open("K7QM", "X2PB", blob) == null;
++            if (!ok) android.util.Log.w("Horizon", "friends presence: self-test failed, online friends are not shown");
++            return ok;
++        } catch (Throwable e) {
++            android.util.Log.w("Horizon", "friends presence: " + e);
++            return false;
++        }
++    }
++
++    /** The friend's world while they share one ("" if its name can't be read), null while they don't. */
++    static String world(FriendsBook.Friend f) {
++        if (f == null || f.stale) return null;
++        String blob;
++        synchronized (GATE) {
++            blob = online.get(f.presenceId());
++            Long at = ANSWERED.get(f.presenceId());
++            if (at == null || System.currentTimeMillis() - at > STALE_MS) blob = null;
++        }
++        if (blob == null) return null;
++        String name = f.openWorld(blob);
++        if (name == null) return "";
++        StringBuilder b = new StringBuilder();
++        for (int i = 0; i < name.length(); i++) if (!Character.isISOControl(name.charAt(i))) b.append(name.charAt(i));
++        return b.toString().trim();
++    }
++
++    /**
++     * Ask the relay about these friends (the most recent first, at most 16) unless an answer for them is fresh;
++     * `changed` runs on the UI thread when the answer differs from the last.
++     */
++    static void ask(final android.app.Activity a, List<FriendsBook.Friend> friends, final Runnable changed) {
++        if (!WORKS) return;
++        final List<String> ids = new ArrayList<>();
++        for (FriendsBook.Friend f : friends) {
++            if (f.stale || ids.contains(f.presenceId())) continue;
++            ids.add(f.presenceId());
++            if (ids.size() == MAX_IDS) break;
++        }
++        if (ids.isEmpty()) return;
++        final String relay = Net.relay(a);
++        String key = relay + "|" + android.text.TextUtils.join(",", ids);
++        synchronized (GATE) {
++            long now = System.currentTimeMillis();
++            if (busy || now < quietUntil || (key.equals(askedKey) && now - askedAt < FRESH_MS)) return;
++            busy = true;
++            askedKey = key;
++            askedAt = now;
++        }
++        new Thread(new Runnable() {
++            public void run() {
++                Map<String, String> found = new HashMap<>();
++                try {
++                    // An empty relay.txt turns the server off: then no one is shown online.
++                    if (!relay.isEmpty()) found = fetch(relay, ids);
++                    lastError = null;
++                } catch (Exception e) {
++                    // Unreachable relay, or one that predates the query: no one is shown online (logged once).
++                    String m = String.valueOf(e.getMessage());
++                    if (!m.equals(lastError)) android.util.Log.i("Horizon", "friends presence: " + m);
++                    lastError = m;
++                    if (m.endsWith("bad_request")) {
++                        synchronized (GATE) {
++                            quietUntil = System.currentTimeMillis() + 10 * 60 * 1000L;
++                        }
++                    }
++                }
++                boolean differs;
++                synchronized (GATE) {
++                    // Only the friends asked about change: another list may have asked about others.
++                    Map<String, String> next = new HashMap<>(online);
++                    long now = System.currentTimeMillis();
++                    for (String id : ids) {
++                        next.remove(id);
++                        ANSWERED.put(id, now);
++                    }
++                    next.putAll(found);
++                    differs = !next.equals(online);
++                    online = next;
++                    busy = false;
++                }
++                if (differs && changed != null) a.runOnUiThread(changed);
++            }
++        }, "friends-presence").start();
++    }
++
++    private static Map<String, String> fetch(String relay, List<String> ids) throws Exception {
++        int colon = relay.lastIndexOf(':');
++        if (colon <= 0) throw new java.io.IOException("no relay port");
++        String host = relay.substring(0, colon);
++        if (host.startsWith("[") && host.endsWith("]")) host = host.substring(1, host.length() - 1);
++        int port = Integer.parseInt(relay.substring(colon + 1).trim());
++        try (Socket s = new Socket()) {
++            s.connect(new InetSocketAddress(host, port), TIMEOUT_MS);
++            s.setSoTimeout(TIMEOUT_MS);
++            JSONObject ask = new JSONObject();
++            ask.put("op", "online");
++            ask.put("v", 1);
++            ask.put("ids", new JSONArray(ids));
++            OutputStream out = s.getOutputStream();
++            out.write((ask.toString() + "\n").getBytes(StandardCharsets.UTF_8));
++            out.flush();
++            InputStream in = s.getInputStream();
++            ByteArrayOutputStream line = new ByteArrayOutputStream();
++            int c;
++            while ((c = in.read()) >= 0 && c != '\n') {
++                line.write(c);
++                if (line.size() > 8192) throw new java.io.IOException("answer too long");
++            }
++            JSONObject reply = new JSONObject(new String(line.toByteArray(), StandardCharsets.UTF_8));
++            String op = reply.optString("op");
++            if (!op.equals("online")) throw new java.io.IOException("relay answered " + reply.optString("code", op));
++            Map<String, String> result = new HashMap<>();
++            JSONArray list = reply.optJSONArray("friends");
++            for (int i = 0; list != null && i < list.length(); i++) {
++                JSONObject p = list.optJSONObject(i);
++                if (p == null) continue;
++                String id = p.optString("id", null), blob = p.optString("blob", null);
++                if (id != null && blob != null && ids.contains(id)) result.put(id, blob);
++            }
++            return result;
++        }
++    }
++}
+diff --git a/packaging/android/java/dev/horizonlab/horizon/HomePage.java b/packaging/android/java/dev/horizonlab/horizon/HomePage.java
+index 2cdfb99cf..5d4430bb7 100644
+--- a/packaging/android/java/dev/horizonlab/horizon/HomePage.java
++++ b/packaging/android/java/dev/horizonlab/horizon/HomePage.java
+@@ -115,7 +115,7 @@ final class HomePage extends Page {
+             note(friends, Ui.t("Пока никого. Друзья появятся здесь после первой совместной игры по коду друга.",
+                     "No one yet. Friends show up here after the first game together by a friend's code."));
+         } else {
+-            FriendsBook.fill(a, friends, book.subList(0, Math.min(3, book.size())));
++            FriendsBook.fill(a, friends, book, 3);
+             note(friends, Ui.t("Подключение сработает, если друг сейчас открыл мир для друзей.",
+                     "Joining works when the friend has their world open to friends right now."));
+             if (book.size() > 3) {

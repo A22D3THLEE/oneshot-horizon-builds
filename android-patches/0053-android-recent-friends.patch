@@ -1,0 +1,1380 @@
+From 8a61221178d46004d00e9954b215f9395a06adca Mon Sep 17 00:00:00 2001
+From: oneshot <oneshot@localhost>
+Date: Mon, 16 Nov 2026 02:19:44 +0300
+Subject: [PATCH] 0053 android recent friends: the friends book on Home and
+ Friends, Join in one tap
+
+Co-Authored-By: Claude Opus 5.5 <noreply@anthropic.com>
+---
+ .../dev/horizonlab/horizon/FriendsBook.java   | 189 +++++
+ .../dev/horizonlab/horizon/FriendsPage.java   | 740 +++++++++---------
+ .../java/dev/horizonlab/horizon/HomePage.java | 400 +++++-----
+ .../horizonlab/horizon/ProfileActivity.java   |   6 +
+ 4 files changed, 788 insertions(+), 547 deletions(-)
+ create mode 100644 packaging/android/java/dev/horizonlab/horizon/FriendsBook.java
+
+diff --git a/packaging/android/java/dev/horizonlab/horizon/FriendsBook.java b/packaging/android/java/dev/horizonlab/horizon/FriendsBook.java
+new file mode 100644
+index 0000000..d0e0507
+--- /dev/null
++++ b/packaging/android/java/dev/horizonlab/horizon/FriendsBook.java
+@@ -0,0 +1,189 @@
++package dev.horizonlab.horizon;
++
++import android.graphics.Typeface;
++import android.graphics.drawable.GradientDrawable;
++import android.view.Gravity;
++import android.view.View;
++import android.widget.Button;
++import android.widget.LinearLayout;
++import android.widget.TextView;
++import java.io.File;
++import java.nio.charset.StandardCharsets;
++import java.nio.file.Files;
++import java.util.ArrayList;
++import java.util.Collections;
++import java.util.Comparator;
++import java.util.LinkedHashMap;
++import java.util.List;
++import java.util.Locale;
++import java.util.Map;
++
++/**
++ * Oneshot: the friends this player shared a world with, as the game keeps them beside the identity
++ * file (horizon-friends book.rs): "nameplate TAB secret TAB last unix seconds TAB stale 0/1 TAB name"
++ * per line, the most recent first. Only the game writes the book; the launcher reads it to join a
++ * friend again. The secret is part of the friend's code: it is never shown, logged or copied.
++ * As the PC launcher's FriendsBook.cs and RecentFriendsView.cs.
++ */
++final class FriendsBook {
++    private static final String ALPHABET = "0123456789ABCDEFGHJKMNPQRSTVWXYZ";
++    private static final int KEEP = 32;
++
++    static final class Friend {
++        String name;
++        String nameplate;
++        private String secret;
++        /** Unix milliseconds of the last session together, 0 unknown. */
++        long last;
++        /** The friend reissued their code since: a join would only count as a wrong guess on the relay. */
++        boolean stale;
++
++        String code() {
++            return nameplate + secret;
++        }
++    }
++
++    private FriendsBook() {}
++
++    static File file(android.app.Activity a) {
++        return new File(FriendsIdentity.file(a).getParentFile(), "friends-book.txt");
++    }
++
++    private static String part(String s) {
++        if (s == null) return null;
++        s = s.trim().toUpperCase(Locale.ROOT).replace('O', '0').replace('I', '1').replace('L', '1');
++        if (s.length() != 4) return null;
++        for (int i = 0; i < 4; i++) if (ALPHABET.indexOf(s.charAt(i)) < 0) return null;
++        return s;
++    }
++
++    private static String clean(String name) {
++        StringBuilder b = new StringBuilder();
++        for (int i = 0; i < name.length() && b.length() < 24; i++) {
++            char c = name.charAt(i);
++            if (!Character.isISOControl(c)) b.append(c);
++        }
++        return b.toString().trim();
++    }
++
++    static List<Friend> read(android.app.Activity a, int max) {
++        List<Friend> all = new ArrayList<>();
++        String text;
++        try {
++            File f = file(a);
++            if (!f.isFile()) return all;
++            text = new String(Files.readAllBytes(f.toPath()), StandardCharsets.UTF_8);
++        } catch (Exception e) {
++            return all;
++        }
++        for (String line : text.replace("\r", "").split("\n")) {
++            String[] p = line.split("\t", 5);
++            if (p.length < 5) continue;
++            String nameplate = part(p[0]), secret = part(p[1]);
++            if (nameplate == null || secret == null) continue;
++            Friend f = new Friend();
++            f.nameplate = nameplate;
++            f.secret = secret;
++            try {
++                f.last = Long.parseLong(p[2].trim()) * 1000L;
++            } catch (NumberFormatException e) {
++                f.last = 0;
++            }
++            f.stale = p[3].trim().equals("1");
++            String name = clean(p[4]);
++            f.name = name.isEmpty() ? nameplate : name;
++            all.add(f);
++        }
++        Collections.sort(all, new Comparator<Friend>() {
++            public int compare(Friend x, Friend y) {
++                return Long.compare(y.last, x.last);
++            }
++        });
++        // One entry per nameplate, the most recent first, as the game keeps it.
++        Map<String, Friend> one = new LinkedHashMap<>();
++        for (Friend f : all) if (!one.containsKey(f.nameplate)) one.put(f.nameplate, f);
++        List<Friend> out = new ArrayList<>(one.values());
++        return out.size() > max ? new ArrayList<>(out.subList(0, Math.max(0, max))) : out;
++    }
++
++    static int count(android.app.Activity a) {
++        return read(a, KEEP).size();
++    }
++
++    // Soft colors for the badges, picked by the nameplate so a friend keeps theirs.
++    private static final int[] BADGES = {
++        0xFF5E81AC, 0xFFA3719B, 0xFF689778, 0xFFB8865C, 0xFF8174B8, 0xFF5896A0, 0xFFB06868, 0xFF8C9260,
++    };
++
++    private static int badge(String key) {
++        int h = 17;
++        for (int i = 0; i < key.length(); i++) h = h * 31 + key.charAt(i);
++        return BADGES[(h & 0x7fffffff) % BADGES.length];
++    }
++
++    private static String when(long ms) {
++        if (ms <= 0) return "";
++        long min = (System.currentTimeMillis() - ms) / 60000L;
++        if (min < 1) return Ui.t("только что", "just now");
++        if (min < 60) return min + Ui.t(" мин назад", " min ago");
++        if (min < 24 * 60) return (min / 60) + Ui.t(" ч назад", " h ago");
++        return Ui.ago(ms);
++    }
++
++    /** One row per friend: a round badge with the first letter, the name, when, and Join. */
++    static void fill(final ProfileActivity a, LinearLayout into, List<Friend> friends) {
++        for (int i = 0; i < friends.size(); i++) {
++            final Friend f = friends.get(i);
++            LinearLayout r = Ui.row(a);
++            r.setGravity(Gravity.CENTER_VERTICAL);
++
++            TextView letter = new TextView(a);
++            letter.setText(f.name.isEmpty() ? "?" : f.name.substring(0, 1).toUpperCase(Locale.getDefault()));
++            letter.setTextColor(0xFFFFFFFF);
++            letter.setTextSize(17);
++            letter.setTypeface(Typeface.create("sans-serif-medium", Typeface.BOLD));
++            letter.setGravity(Gravity.CENTER);
++            GradientDrawable circle = new GradientDrawable();
++            circle.setShape(GradientDrawable.OVAL);
++            int color = badge(f.nameplate);
++            circle.setColor(f.stale ? (color & 0x00FFFFFF) | 0x66000000 : color);
++            letter.setBackground(circle);
++            int size = Ui.dp(a, 40);
++            r.addView(letter, new LinearLayout.LayoutParams(size, size));
++
++            LinearLayout texts = new LinearLayout(a);
++            texts.setOrientation(LinearLayout.VERTICAL);
++            TextView name = Ui.text(a, f.name, 15, f.stale ? Ui.MUTED : Ui.TEXT, true);
++            name.setSingleLine(true);
++            name.setEllipsize(android.text.TextUtils.TruncateAt.END);
++            name.setPadding(0, 0, 0, 0);
++            texts.addView(name);
++            String sub = f.stale ? Ui.t("сменил код: сыграйте вместе ещё раз", "changed their code: play together once more")
++                    : f.last <= 0 ? "" : Ui.t("играли вместе ", "played together ") + when(f.last);
++            TextView s = Ui.text(a, sub, 12, Ui.MUTED, false);
++            s.setPadding(0, 0, 0, 0);
++            if (!sub.isEmpty()) texts.addView(s);
++            LinearLayout.LayoutParams tl = new LinearLayout.LayoutParams(0, -2, 1);
++            tl.leftMargin = Ui.dp(a, 12);
++            tl.rightMargin = Ui.dp(a, 8);
++            r.addView(texts, tl);
++
++            final Button join = Ui.button(a, Ui.t("Подключиться", "Join"), !f.stale);
++            join.setTextSize(15);
++            join.setMinHeight(Ui.dp(a, 48));
++            join.setPadding(Ui.dp(a, 16), 0, Ui.dp(a, 16), 0);
++            join.setEnabled(!f.stale);
++            if (f.stale) join.setAlpha(0.5f);
++            join.setOnClickListener(new View.OnClickListener() {
++                public void onClick(View v) {
++                    // One press, one start.
++                    join.setEnabled(false);
++                    a.playFriend(f.code());
++                }
++            });
++            r.addView(join, new LinearLayout.LayoutParams(-2, -2));
++
++            into.addView(r, Ui.gap(a, i == 0 ? 4 : 10));
++        }
++    }
++}
+diff --git a/packaging/android/java/dev/horizonlab/horizon/FriendsPage.java b/packaging/android/java/dev/horizonlab/horizon/FriendsPage.java
+index 915f7b5..31a269c 100644
+--- a/packaging/android/java/dev/horizonlab/horizon/FriendsPage.java
++++ b/packaging/android/java/dev/horizonlab/horizon/FriendsPage.java
+@@ -1,360 +1,380 @@
+-package dev.horizonlab.horizon;
+-
+-import android.content.ClipData;
+-import android.content.ClipboardManager;
+-import android.content.Context;
+-import android.content.Intent;
+-import android.view.View;
+-import android.widget.Button;
+-import android.widget.EditText;
+-import android.widget.LinearLayout;
+-import android.widget.TextView;
+-
+-/**
+- * Oneshot: playing together, as the PC launcher's Friends page: the code to join with, the code
+- * the running game shares (invite-code.txt) with a link to send, the relay's state and the
+- * mod/resource pack set as one .oneshotpack file (PackShare).
+- */
+-final class FriendsPage extends Page {
+-    static final int PACK_OUT = 13;
+-    static final int PACK_IN = 14;
+-
+-    private final TextView hostCode;
+-    private final TextView hostNote;
+-    private final Button copyCode, shareCode;
+-    private final Button restore;
+-    private String code;
+-    private final TextView keptCode, keptNote;
+-    private String kept;
+-    /** friends-path.txt in the game folder, read by the game at start (android_main.rs). */
+-    static final String[] PATH_IDS = {"auto", "relay", "direct"};
+-    private final TextView[] pathChips = new TextView[PATH_IDS.length];
+-    private final TextView pathNote;
+-
+-    static String path(android.app.Activity a) {
+-        try {
+-            String s = new String(java.nio.file.Files.readAllBytes(new java.io.File(SetupActivity.home(a), "friends-path.txt").toPath()),
+-                    java.nio.charset.StandardCharsets.UTF_8).trim();
+-            return s.equals("relay") || s.equals("direct") ? s : "auto";
+-        } catch (Exception e) {
+-            return "auto";
+-        }
+-    }
+-
+-    private void setPath(String id) {
+-        try {
+-            java.nio.file.Files.write(new java.io.File(SetupActivity.home(a), "friends-path.txt").toPath(),
+-                    (id + "\n").getBytes(java.nio.charset.StandardCharsets.UTF_8));
+-        } catch (Exception e) {
+-            a.say(Ui.t("Не удалось сохранить: ", "Couldn't save: ") + e.getMessage(), Ui.BAD);
+-            return;
+-        }
+-        paintPath();
+-        a.say(Net.hostCode(a) != null
+-                ? Ui.t("Сохранено. Сработает после перезапуска игры и новой раздачи.", "Saved. It applies after the game restarts and you share again.")
+-                : Ui.t("Сохранено.", "Saved."), Ui.GREEN);
+-    }
+-
+-    private void paintPath() {
+-        String cur = path(a);
+-        String[] names = {Ui.t("Авто", "Auto"), Ui.t("Через сервер Oneshot", "Through the Oneshot server"), Ui.t("Только напрямую", "Direct only")};
+-        for (int i = 0; i < PATH_IDS.length; i++) {
+-            boolean on = PATH_IDS[i].equals(cur);
+-            pathChips[i].setText(names[i]);
+-            pathChips[i].setTextColor(on ? Ui.ON_ACCENT : Ui.TEXT);
+-            pathChips[i].setBackground(on ? Ui.rounded(a, Ui.GREEN, 0, 20) : Ui.rounded(a, Ui.HIGH, Ui.EDGE, 20));
+-        }
+-        pathNote.setText(cur.equals("relay")
+-                ? Ui.t("Друзья заходят только через сервер Oneshot: работает с мобильным интернетом и CGNAT, ваш адрес друзьям не виден. Код появится, когда сервер ответит.",
+-                        "Friends join through the Oneshot server only: works on mobile internet and behind CGNAT, and your address stays hidden. The code shows up once the server answers.")
+-                : cur.equals("direct")
+-                ? Ui.t("Только напрямую, без сервера: нужна одна сеть (Wi-Fi, VPN вроде Radmin) или проброшенный порт.",
+-                        "Direct only, no server: you need one network (Wi-Fi, a VPN such as Radmin) or a forwarded port.")
+-                : Ui.t("Сначала напрямую, а если не выходит — через сервер Oneshot.",
+-                        "Direct first, through the Oneshot server when that fails."));
+-    }
+-
+-    FriendsPage(final ProfileActivity a) {
+-        super(a);
+-        Ui.title(root, Ui.t("Друзья", "Friends"), Ui.t("Игра вместе: по коду приглашения, через сервер Oneshot или по адресу.",
+-                "Play together: by invite code, through the Oneshot server or by address."));
+-
+-        LinearLayout join = block(Ui.t("Подключиться к другу", "Join a friend"));
+-        a.join = Ui.field(a, "friend:…  /  host:port");
+-        a.join.setTextSize(14);
+-        join.addView(a.join, Ui.gap(a, 4));
+-        note(join, Ui.t("Код друга (friend:…), steam:… или адрес сервера. Пусто — игра откроется в главном меню. Нажмите ИГРАТЬ.",
+-                "A friend's code (friend:…), steam:… or a server address. Empty: the game opens at the main menu. Press PLAY."));
+-        Button paste = Ui.button(a, Ui.t("Вставить", "Paste"), false);
+-        paste.setOnClickListener(new View.OnClickListener() {
+-            public void onClick(View v) {
+-                ClipboardManager cm = (ClipboardManager) a.getSystemService(Context.CLIPBOARD_SERVICE);
+-                CharSequence s = cm == null || !cm.hasPrimaryClip() || cm.getPrimaryClip().getItemCount() == 0 ? null
+-                        : cm.getPrimaryClip().getItemAt(0).coerceToText(a);
+-                a.setJoin(s == null ? "" : s.toString());
+-            }
+-        });
+-        Button clear = Ui.button(a, Ui.t("Очистить", "Clear"), false);
+-        clear.setOnClickListener(new View.OnClickListener() {
+-            public void onClick(View v) {
+-                a.join.setText("");
+-            }
+-        });
+-        buttons(join, paste, clear);
+-
+-        LinearLayout host = block(Ui.t("Позвать друзей", "Invite friends"));
+-        hostCode = Ui.text(a, "", 22, Ui.TEXT, true);
+-        hostCode.setTypeface(android.graphics.Typeface.MONOSPACE, android.graphics.Typeface.BOLD);
+-        hostCode.setTextIsSelectable(true);
+-        host.addView(hostCode);
+-        hostNote = note(host, "");
+-        copyCode = Ui.button(a, Ui.t("Скопировать код", "Copy code"), false);
+-        copyCode.setOnClickListener(new View.OnClickListener() {
+-            public void onClick(View v) {
+-                if (code == null) return;
+-                ClipboardManager cm = (ClipboardManager) a.getSystemService(Context.CLIPBOARD_SERVICE);
+-                if (cm != null) cm.setPrimaryClip(ClipData.newPlainText("invite", "friend:" + code));
+-                a.say(Ui.t("Код скопирован.", "Code copied."), Ui.GREEN);
+-            }
+-        });
+-        shareCode = Ui.button(a, Ui.t("Отправить ссылку…", "Send a link…"), true);
+-        shareCode.setOnClickListener(new View.OnClickListener() {
+-            public void onClick(View v) {
+-                if (code == null) return;
+-                Intent i = new Intent(Intent.ACTION_SEND);
+-                i.setType("text/plain");
+-                i.putExtra(Intent.EXTRA_TEXT, Ui.t("Заходи ко мне в Oneshot: ", "Join me in Oneshot: ") + Net.linkFor(code)
+-                        + Ui.t("\nИли вставь код в лаунчере: friend:", "\nOr paste the code in the launcher: friend:") + code);
+-                try {
+-                    a.startActivity(Intent.createChooser(i, Ui.t("Отправить приглашение", "Send the invite")));
+-                } catch (Exception e) {
+-                    a.say(Ui.t("Нечем поделиться: скопируйте код.", "Nothing to share with: copy the code."), Ui.WARN);
+-                }
+-            }
+-        });
+-        buttons(host, copyCode, shareCode);
+-
+-        LinearLayout mine = block(Ui.t("Ваш постоянный код", "Your lasting code"));
+-        keptCode = Ui.text(a, "", 22, Ui.TEXT, true);
+-        keptCode.setTypeface(android.graphics.Typeface.MONOSPACE, android.graphics.Typeface.BOLD);
+-        keptCode.setTextIsSelectable(true);
+-        mine.addView(keptCode);
+-        keptNote = note(mine, "");
+-        Button copyKept = Ui.button(a, Ui.t("Скопировать", "Copy"), false);
+-        copyKept.setOnClickListener(new View.OnClickListener() {
+-            public void onClick(View v) {
+-                if (kept == null) return;
+-                ClipboardManager cm = (ClipboardManager) a.getSystemService(Context.CLIPBOARD_SERVICE);
+-                if (cm != null) cm.setPrimaryClip(ClipData.newPlainText("invite", "friend:" + kept));
+-                a.say(Ui.t("Код скопирован.", "Code copied."), Ui.GREEN);
+-            }
+-        });
+-        Button reissue = Ui.button(a, Ui.t("Перевыпустить", "Reissue"), false);
+-        reissue.setOnClickListener(new View.OnClickListener() {
+-            public void onClick(View v) {
+-                confirmReissue();
+-            }
+-        });
+-        buttons(mine, copyKept, reissue);
+-
+-        LinearLayout way = block(Ui.t("Как раздавать мир", "How to share the world"));
+-        LinearLayout ways = Ui.row(a);
+-        way.addView(ways, Ui.gap(a, 4));
+-        pathNote = note(way, "");
+-        for (int i = 0; i < PATH_IDS.length; i++) {
+-            TextView c = Ui.chip(a, "", false);
+-            final String id = PATH_IDS[i];
+-            c.setOnClickListener(new View.OnClickListener() {
+-                public void onClick(View v) {
+-                    setPath(id);
+-                }
+-            });
+-            LinearLayout.LayoutParams lp = new LinearLayout.LayoutParams(-2, -2);
+-            if (i > 0) lp.leftMargin = Ui.dp(a, 8);
+-            ways.addView(c, lp);
+-            pathChips[i] = c;
+-        }
+-        paintPath();
+-
+-        LinearLayout relay = block(Ui.t("Сервер Oneshot", "Oneshot server"));
+-        relay.addView(a.relayLabel());
+-        note(relay, Ui.t("Через него друзья находят друг друга, когда напрямую не выходит (мобильный интернет, CGNAT). "
+-                + "Свой адрес — в relay.txt в папке игры, пустой файл выключает сервер.",
+-                "Friends meet through it when they cannot reach each other directly (mobile internet, CGNAT). "
+-                + "Your own address goes in relay.txt in the game folder; an empty file turns it off."));
+-
+-        LinearLayout pack = block(Ui.t("Набор модов и ресурспаков", "Mods and resource packs"));
+-        note(pack, Ui.t("Файл .oneshotpack: ваши моды Horizon, ресурспаки и шейдеры — чтобы у друга было то же самое. Открывается и лаунчером на ПК.",
+-                "A .oneshotpack file: your Horizon mods, resource packs and shaders, so a friend gets the same set. The PC launcher opens it too."));
+-        Button out = Ui.button(a, Ui.t("Сохранить набор…", "Save the set…"), false);
+-        out.setOnClickListener(new View.OnClickListener() {
+-            public void onClick(View v) {
+-                Intent i = new Intent(Intent.ACTION_CREATE_DOCUMENT);
+-                i.addCategory(Intent.CATEGORY_OPENABLE);
+-                i.setType("application/octet-stream");
+-                i.putExtra(Intent.EXTRA_TITLE, "oneshot-" + new java.text.SimpleDateFormat("yyyy-MM-dd", java.util.Locale.ROOT)
+-                        .format(new java.util.Date()) + ".oneshotpack");
+-                a.startActivityForResult(i, PACK_OUT);
+-            }
+-        });
+-        Button in = Ui.button(a, Ui.t("Открыть набор…", "Open a set…"), false);
+-        in.setOnClickListener(new View.OnClickListener() {
+-            public void onClick(View v) {
+-                Intent i = new Intent(Intent.ACTION_OPEN_DOCUMENT);
+-                i.addCategory(Intent.CATEGORY_OPENABLE);
+-                i.setType("*/*");
+-                a.startActivityForResult(i, PACK_IN);
+-            }
+-        });
+-        buttons(pack, out, in);
+-        restore = Ui.button(a, Ui.t("Вернуть мои моды и паки", "Bring my mods and packs back"), false);
+-        restore.setOnClickListener(new View.OnClickListener() {
+-            public void onClick(View v) {
+-                confirmRestore();
+-            }
+-        });
+-        pack.addView(restore, Ui.gap(a, 8));
+-    }
+-
+-    @Override
+-    void shown() {
+-        code = Net.hostCode(a);
+-        boolean has = code != null;
+-        hostCode.setVisibility(has ? View.VISIBLE : View.GONE);
+-        hostCode.setText(has ? "friend:" + code : "");
+-        hostNote.setText(has
+-                ? Ui.t("Отправьте ссылку или код другу: он вставит его в «Подключиться к другу» и нажмёт ИГРАТЬ.",
+-                        "Send the link or the code: your friend pastes it into Join a friend and presses PLAY.")
+-                : Ui.t("В игре: пауза → «Игра с друзьями» → «Открыть для друзей», затем «Отправить код». Код появится и здесь.",
+-                        "In the game: pause → Play with Friends → Start Sharing, then Send Invite. The code shows up here too."));
+-        copyCode.setEnabled(has);
+-        shareCode.setEnabled(has);
+-        copyCode.setAlpha(has ? 1f : 0.4f);
+-        shareCode.setAlpha(has ? 1f : 0.4f);
+-        restore.setVisibility(PackShare.lastBackup(a.dir) == null ? View.GONE : View.VISIBLE);
+-        kept = FriendsIdentity.code(a);
+-        keptCode.setText(kept == null ? "—" : "friend:" + kept);
+-        boolean server = !Net.relay(a).isEmpty() && !path(a).equals("direct");
+-        keptNote.setText(!server
+-                ? Ui.t("Работает через сервер Oneshot, а он сейчас выключен (relay.txt или «Только напрямую»). Пока друзьям нужен полный код выше.",
+-                        "Works through the Oneshot server, which is off now (relay.txt or Direct only). Until then friends need the full code above.")
+-                : keptRefused()
+-                ? Ui.t("В прошлый раз сервер Oneshot не принял этот код и выдал другой: пока друзьям нужен код из игры. "
+-                        + "Обычно это значит, что на сервере старая версия relay.",
+-                        "Last time the Oneshot server didn't take this code and gave another one: until then friends need the code from the game. "
+-                        + "Usually the server runs an older relay.")
+-                : Ui.t("Один и тот же при каждом открытии мира для друзей: отправьте его один раз. Друг подключится, пока вы раздаёте мир. "
+-                        + "Если код попал не к тем людям — перевыпустите его.",
+-                        "The same every time you share the world: send it once. A friend gets in while you are sharing. "
+-                        + "If the code reached the wrong people, reissue it."));
+-    }
+-
+-    /** The game's word on the last sharing (friends-kept.txt, horizon-friends host.rs): the relay served another code. */
+-    private boolean keptRefused() {
+-        try {
+-            java.io.File f = new java.io.File(SetupActivity.home(a), "friends-kept.txt");
+-            return f.isFile() && new String(java.nio.file.Files.readAllBytes(f.toPath()), java.nio.charset.StandardCharsets.UTF_8)
+-                    .trim().equals("refused");
+-        } catch (Exception e) {
+-            return false;
+-        }
+-    }
+-
+-    private void confirmReissue() {
+-        new android.app.AlertDialog.Builder(a)
+-                .setTitle(Ui.t("Перевыпустить код?", "Reissue the code?"))
+-                .setMessage(Ui.t("Старый код перестанет работать, друзьям нужно будет отправить новый. "
+-                        + "Если мир сейчас открыт для друзей, новый код заработает со следующего открытия.",
+-                        "The old code stops working and friends need the new one. "
+-                        + "If the world is shared right now, the new code works from the next time you share it."))
+-                .setPositiveButton(Ui.t("Перевыпустить", "Reissue"), new android.content.DialogInterface.OnClickListener() {
+-                    public void onClick(android.content.DialogInterface d, int w) {
+-                        try {
+-                            String c = FriendsIdentity.reissue(a);
+-                            a.say(Ui.t("Новый код: friend:", "New code: friend:") + c, Ui.GREEN);
+-                        } catch (Exception e) {
+-                            a.say(Ui.t("Не удалось: ", "Failed: ") + e.getMessage(), Ui.BAD);
+-                        }
+-                        shown();
+-                    }
+-                })
+-                .setNegativeButton(Ui.t("Отмена", "Cancel"), null)
+-                .show();
+-    }
+-
+-    private void confirmRestore() {
+-        new android.app.AlertDialog.Builder(a)
+-                .setTitle(Ui.t("Вернуть прежний набор?", "Bring the old set back?"))
+-                .setMessage(Ui.t("Моды и паки, что были до открытия последнего набора, вернутся на место; нынешние будут удалены.",
+-                        "The mods and packs you had before the last opened set come back; the current ones are deleted."))
+-                .setPositiveButton(Ui.t("Вернуть", "Bring back"), new android.content.DialogInterface.OnClickListener() {
+-                    public void onClick(android.content.DialogInterface d, int w) {
+-                        run(new Job() {
+-                            public String run() throws Exception {
+-                                PackShare.restore(a.dir);
+-                                return Ui.t("Прежний набор возвращён. Перезапустите игру.", "The old set is back. Restart the game.");
+-                            }
+-                        });
+-                    }
+-                })
+-                .setNegativeButton(Ui.t("Отмена", "Cancel"), null)
+-                .show();
+-    }
+-
+-    interface Job {
+-        String run() throws Exception;
+-    }
+-
+-    private void run(final Job job) {
+-        a.say(Ui.t("Работаем…", "Working…"), Ui.WARN);
+-        new Thread(new Runnable() {
+-            public void run() {
+-                String msg;
+-                int color = Ui.GREEN;
+-                try {
+-                    msg = job.run();
+-                } catch (Exception e) {
+-                    msg = Ui.t("Не получилось: ", "Failed: ") + e.getMessage();
+-                    color = Ui.BAD;
+-                }
+-                final String m = msg;
+-                final int c = color;
+-                a.runOnUiThread(new Runnable() {
+-                    public void run() {
+-                        a.say(m, c);
+-                        shown();
+-                    }
+-                });
+-            }
+-        }).start();
+-    }
+-
+-    @Override
+-    boolean onResult(int request, int result, final Intent data) {
+-        if (request != PACK_OUT && request != PACK_IN) return false;
+-        if (result != android.app.Activity.RESULT_OK || data == null || data.getData() == null) return true;
+-        if (request == PACK_OUT) {
+-            run(new Job() {
+-                public String run() throws Exception {
+-                    int n;
+-                    try (java.io.OutputStream o = a.getContentResolver().openOutputStream(data.getData())) {
+-                        n = PackShare.export(a, a.dir, o);
+-                    }
+-                    return Ui.t("Набор сохранён: файлов ", "Set saved: files ") + n;
+-                }
+-            });
+-        } else {
+-            run(new Job() {
+-                public String run() throws Exception {
+-                    int n;
+-                    try (java.io.InputStream in = a.getContentResolver().openInputStream(data.getData())) {
+-                        n = PackShare.open(a.dir, in);
+-                    }
+-                    return Ui.t("Набор открыт: файлов ", "Set opened: files ") + n
+-                            + Ui.t(". Прежний сохранён — его можно вернуть. Перезапустите игру.", ". The old one is kept and can come back. Restart the game.");
+-                }
+-            });
+-        }
+-        return true;
+-    }
+-}
++package dev.horizonlab.horizon;
++
++import android.content.ClipData;
++import android.content.ClipboardManager;
++import android.content.Context;
++import android.content.Intent;
++import android.view.View;
++import android.widget.Button;
++import android.widget.EditText;
++import android.widget.LinearLayout;
++import android.widget.TextView;
++
++/**
++ * Oneshot: playing together, as the PC launcher's Friends page: the code to join with, the code
++ * the running game shares (invite-code.txt) with a link to send, the relay's state and the
++ * mod/resource pack set as one .oneshotpack file (PackShare).
++ */
++final class FriendsPage extends Page {
++    static final int PACK_OUT = 13;
++    static final int PACK_IN = 14;
++
++    private final TextView hostCode;
++    private final TextView hostNote;
++    private final Button copyCode, shareCode;
++    private final Button restore;
++    private String code;
++    private final TextView keptCode, keptNote;
++    private String kept;
++    /** friends-path.txt in the game folder, read by the game at start (android_main.rs). */
++    static final String[] PATH_IDS = {"auto", "relay", "direct"};
++    private final TextView[] pathChips = new TextView[PATH_IDS.length];
++    private final TextView pathNote;
++    private final LinearLayout recentFriends;
++
++    private void paintFriends() {
++        recentFriends.removeAllViews();
++        java.util.List<FriendsBook.Friend> book = FriendsBook.read(a, 8);
++        if (book.isEmpty()) {
++            note(recentFriends, Ui.t("Пока никого. Друзья появятся здесь после первой совместной игры по коду друга.",
++                    "No one yet. Friends show up here after the first game together by a friend's code."));
++            return;
++        }
++        FriendsBook.fill(a, recentFriends, book);
++        note(recentFriends, Ui.t("Подключение сработает, если друг сейчас открыл мир для друзей.",
++                "Joining works when the friend has their world open to friends right now."));
++    }
++
++    static String path(android.app.Activity a) {
++        try {
++            String s = new String(java.nio.file.Files.readAllBytes(new java.io.File(SetupActivity.home(a), "friends-path.txt").toPath()),
++                    java.nio.charset.StandardCharsets.UTF_8).trim();
++            return s.equals("relay") || s.equals("direct") ? s : "auto";
++        } catch (Exception e) {
++            return "auto";
++        }
++    }
++
++    private void setPath(String id) {
++        try {
++            java.nio.file.Files.write(new java.io.File(SetupActivity.home(a), "friends-path.txt").toPath(),
++                    (id + "\n").getBytes(java.nio.charset.StandardCharsets.UTF_8));
++        } catch (Exception e) {
++            a.say(Ui.t("Не удалось сохранить: ", "Couldn't save: ") + e.getMessage(), Ui.BAD);
++            return;
++        }
++        paintPath();
++        a.say(Net.hostCode(a) != null
++                ? Ui.t("Сохранено. Сработает после перезапуска игры и новой раздачи.", "Saved. It applies after the game restarts and you share again.")
++                : Ui.t("Сохранено.", "Saved."), Ui.GREEN);
++    }
++
++    private void paintPath() {
++        String cur = path(a);
++        String[] names = {Ui.t("Авто", "Auto"), Ui.t("Через сервер Oneshot", "Through the Oneshot server"), Ui.t("Только напрямую", "Direct only")};
++        for (int i = 0; i < PATH_IDS.length; i++) {
++            boolean on = PATH_IDS[i].equals(cur);
++            pathChips[i].setText(names[i]);
++            pathChips[i].setTextColor(on ? Ui.ON_ACCENT : Ui.TEXT);
++            pathChips[i].setBackground(on ? Ui.rounded(a, Ui.GREEN, 0, 20) : Ui.rounded(a, Ui.HIGH, Ui.EDGE, 20));
++        }
++        pathNote.setText(cur.equals("relay")
++                ? Ui.t("Друзья заходят только через сервер Oneshot: работает с мобильным интернетом и CGNAT, ваш адрес друзьям не виден. Код появится, когда сервер ответит.",
++                        "Friends join through the Oneshot server only: works on mobile internet and behind CGNAT, and your address stays hidden. The code shows up once the server answers.")
++                : cur.equals("direct")
++                ? Ui.t("Только напрямую, без сервера: нужна одна сеть (Wi-Fi, VPN вроде Radmin) или проброшенный порт.",
++                        "Direct only, no server: you need one network (Wi-Fi, a VPN such as Radmin) or a forwarded port.")
++                : Ui.t("Сначала напрямую, а если не выходит — через сервер Oneshot.",
++                        "Direct first, through the Oneshot server when that fails."));
++    }
++
++    FriendsPage(final ProfileActivity a) {
++        super(a);
++        Ui.title(root, Ui.t("Друзья", "Friends"), Ui.t("Игра вместе: по коду приглашения, через сервер Oneshot или по адресу.",
++                "Play together: by invite code, through the Oneshot server or by address."));
++
++        LinearLayout fr = block(Ui.t("Недавно играли вместе", "Played together lately"));
++        recentFriends = new LinearLayout(a);
++        recentFriends.setOrientation(LinearLayout.VERTICAL);
++        fr.addView(recentFriends);
++
++        LinearLayout join = block(Ui.t("Подключиться к другу", "Join a friend"));
++        a.join = Ui.field(a, "friend:…  /  host:port");
++        a.join.setTextSize(14);
++        join.addView(a.join, Ui.gap(a, 4));
++        note(join, Ui.t("Код друга (friend:…), steam:… или адрес сервера. Пусто — игра откроется в главном меню. Нажмите ИГРАТЬ.",
++                "A friend's code (friend:…), steam:… or a server address. Empty: the game opens at the main menu. Press PLAY."));
++        Button paste = Ui.button(a, Ui.t("Вставить", "Paste"), false);
++        paste.setOnClickListener(new View.OnClickListener() {
++            public void onClick(View v) {
++                ClipboardManager cm = (ClipboardManager) a.getSystemService(Context.CLIPBOARD_SERVICE);
++                CharSequence s = cm == null || !cm.hasPrimaryClip() || cm.getPrimaryClip().getItemCount() == 0 ? null
++                        : cm.getPrimaryClip().getItemAt(0).coerceToText(a);
++                a.setJoin(s == null ? "" : s.toString());
++            }
++        });
++        Button clear = Ui.button(a, Ui.t("Очистить", "Clear"), false);
++        clear.setOnClickListener(new View.OnClickListener() {
++            public void onClick(View v) {
++                a.join.setText("");
++            }
++        });
++        buttons(join, paste, clear);
++
++        LinearLayout host = block(Ui.t("Позвать друзей", "Invite friends"));
++        hostCode = Ui.text(a, "", 22, Ui.TEXT, true);
++        hostCode.setTypeface(android.graphics.Typeface.MONOSPACE, android.graphics.Typeface.BOLD);
++        hostCode.setTextIsSelectable(true);
++        host.addView(hostCode);
++        hostNote = note(host, "");
++        copyCode = Ui.button(a, Ui.t("Скопировать код", "Copy code"), false);
++        copyCode.setOnClickListener(new View.OnClickListener() {
++            public void onClick(View v) {
++                if (code == null) return;
++                ClipboardManager cm = (ClipboardManager) a.getSystemService(Context.CLIPBOARD_SERVICE);
++                if (cm != null) cm.setPrimaryClip(ClipData.newPlainText("invite", "friend:" + code));
++                a.say(Ui.t("Код скопирован.", "Code copied."), Ui.GREEN);
++            }
++        });
++        shareCode = Ui.button(a, Ui.t("Отправить ссылку…", "Send a link…"), true);
++        shareCode.setOnClickListener(new View.OnClickListener() {
++            public void onClick(View v) {
++                if (code == null) return;
++                Intent i = new Intent(Intent.ACTION_SEND);
++                i.setType("text/plain");
++                i.putExtra(Intent.EXTRA_TEXT, Ui.t("Заходи ко мне в Oneshot: ", "Join me in Oneshot: ") + Net.linkFor(code)
++                        + Ui.t("\nИли вставь код в лаунчере: friend:", "\nOr paste the code in the launcher: friend:") + code);
++                try {
++                    a.startActivity(Intent.createChooser(i, Ui.t("Отправить приглашение", "Send the invite")));
++                } catch (Exception e) {
++                    a.say(Ui.t("Нечем поделиться: скопируйте код.", "Nothing to share with: copy the code."), Ui.WARN);
++                }
++            }
++        });
++        buttons(host, copyCode, shareCode);
++
++        LinearLayout mine = block(Ui.t("Ваш постоянный код", "Your lasting code"));
++        keptCode = Ui.text(a, "", 22, Ui.TEXT, true);
++        keptCode.setTypeface(android.graphics.Typeface.MONOSPACE, android.graphics.Typeface.BOLD);
++        keptCode.setTextIsSelectable(true);
++        mine.addView(keptCode);
++        keptNote = note(mine, "");
++        Button copyKept = Ui.button(a, Ui.t("Скопировать", "Copy"), false);
++        copyKept.setOnClickListener(new View.OnClickListener() {
++            public void onClick(View v) {
++                if (kept == null) return;
++                ClipboardManager cm = (ClipboardManager) a.getSystemService(Context.CLIPBOARD_SERVICE);
++                if (cm != null) cm.setPrimaryClip(ClipData.newPlainText("invite", "friend:" + kept));
++                a.say(Ui.t("Код скопирован.", "Code copied."), Ui.GREEN);
++            }
++        });
++        Button reissue = Ui.button(a, Ui.t("Перевыпустить", "Reissue"), false);
++        reissue.setOnClickListener(new View.OnClickListener() {
++            public void onClick(View v) {
++                confirmReissue();
++            }
++        });
++        buttons(mine, copyKept, reissue);
++
++        LinearLayout way = block(Ui.t("Как раздавать мир", "How to share the world"));
++        LinearLayout ways = Ui.row(a);
++        way.addView(ways, Ui.gap(a, 4));
++        pathNote = note(way, "");
++        for (int i = 0; i < PATH_IDS.length; i++) {
++            TextView c = Ui.chip(a, "", false);
++            final String id = PATH_IDS[i];
++            c.setOnClickListener(new View.OnClickListener() {
++                public void onClick(View v) {
++                    setPath(id);
++                }
++            });
++            LinearLayout.LayoutParams lp = new LinearLayout.LayoutParams(-2, -2);
++            if (i > 0) lp.leftMargin = Ui.dp(a, 8);
++            ways.addView(c, lp);
++            pathChips[i] = c;
++        }
++        paintPath();
++
++        LinearLayout relay = block(Ui.t("Сервер Oneshot", "Oneshot server"));
++        relay.addView(a.relayLabel());
++        note(relay, Ui.t("Через него друзья находят друг друга, когда напрямую не выходит (мобильный интернет, CGNAT). "
++                + "Свой адрес — в relay.txt в папке игры, пустой файл выключает сервер.",
++                "Friends meet through it when they cannot reach each other directly (mobile internet, CGNAT). "
++                + "Your own address goes in relay.txt in the game folder; an empty file turns it off."));
++
++        LinearLayout pack = block(Ui.t("Набор модов и ресурспаков", "Mods and resource packs"));
++        note(pack, Ui.t("Файл .oneshotpack: ваши моды Horizon, ресурспаки и шейдеры — чтобы у друга было то же самое. Открывается и лаунчером на ПК.",
++                "A .oneshotpack file: your Horizon mods, resource packs and shaders, so a friend gets the same set. The PC launcher opens it too."));
++        Button out = Ui.button(a, Ui.t("Сохранить набор…", "Save the set…"), false);
++        out.setOnClickListener(new View.OnClickListener() {
++            public void onClick(View v) {
++                Intent i = new Intent(Intent.ACTION_CREATE_DOCUMENT);
++                i.addCategory(Intent.CATEGORY_OPENABLE);
++                i.setType("application/octet-stream");
++                i.putExtra(Intent.EXTRA_TITLE, "oneshot-" + new java.text.SimpleDateFormat("yyyy-MM-dd", java.util.Locale.ROOT)
++                        .format(new java.util.Date()) + ".oneshotpack");
++                a.startActivityForResult(i, PACK_OUT);
++            }
++        });
++        Button in = Ui.button(a, Ui.t("Открыть набор…", "Open a set…"), false);
++        in.setOnClickListener(new View.OnClickListener() {
++            public void onClick(View v) {
++                Intent i = new Intent(Intent.ACTION_OPEN_DOCUMENT);
++                i.addCategory(Intent.CATEGORY_OPENABLE);
++                i.setType("*/*");
++                a.startActivityForResult(i, PACK_IN);
++            }
++        });
++        buttons(pack, out, in);
++        restore = Ui.button(a, Ui.t("Вернуть мои моды и паки", "Bring my mods and packs back"), false);
++        restore.setOnClickListener(new View.OnClickListener() {
++            public void onClick(View v) {
++                confirmRestore();
++            }
++        });
++        pack.addView(restore, Ui.gap(a, 8));
++    }
++
++    @Override
++    void shown() {
++        paintFriends();
++        code = Net.hostCode(a);
++        boolean has = code != null;
++        hostCode.setVisibility(has ? View.VISIBLE : View.GONE);
++        hostCode.setText(has ? "friend:" + code : "");
++        hostNote.setText(has
++                ? Ui.t("Отправьте ссылку или код другу: он вставит его в «Подключиться к другу» и нажмёт ИГРАТЬ.",
++                        "Send the link or the code: your friend pastes it into Join a friend and presses PLAY.")
++                : Ui.t("В игре: пауза → «Игра с друзьями» → «Открыть для друзей», затем «Отправить код». Код появится и здесь.",
++                        "In the game: pause → Play with Friends → Start Sharing, then Send Invite. The code shows up here too."));
++        copyCode.setEnabled(has);
++        shareCode.setEnabled(has);
++        copyCode.setAlpha(has ? 1f : 0.4f);
++        shareCode.setAlpha(has ? 1f : 0.4f);
++        restore.setVisibility(PackShare.lastBackup(a.dir) == null ? View.GONE : View.VISIBLE);
++        kept = FriendsIdentity.code(a);
++        keptCode.setText(kept == null ? "—" : "friend:" + kept);
++        boolean server = !Net.relay(a).isEmpty() && !path(a).equals("direct");
++        keptNote.setText(!server
++                ? Ui.t("Работает через сервер Oneshot, а он сейчас выключен (relay.txt или «Только напрямую»). Пока друзьям нужен полный код выше.",
++                        "Works through the Oneshot server, which is off now (relay.txt or Direct only). Until then friends need the full code above.")
++                : keptRefused()
++                ? Ui.t("В прошлый раз сервер Oneshot не принял этот код и выдал другой: пока друзьям нужен код из игры. "
++                        + "Обычно это значит, что на сервере старая версия relay.",
++                        "Last time the Oneshot server didn't take this code and gave another one: until then friends need the code from the game. "
++                        + "Usually the server runs an older relay.")
++                : Ui.t("Один и тот же при каждом открытии мира для друзей: отправьте его один раз. Друг подключится, пока вы раздаёте мир. "
++                        + "Если код попал не к тем людям — перевыпустите его.",
++                        "The same every time you share the world: send it once. A friend gets in while you are sharing. "
++                        + "If the code reached the wrong people, reissue it."));
++    }
++
++    /** The game's word on the last sharing (friends-kept.txt, horizon-friends host.rs): the relay served another code. */
++    private boolean keptRefused() {
++        try {
++            java.io.File f = new java.io.File(SetupActivity.home(a), "friends-kept.txt");
++            return f.isFile() && new String(java.nio.file.Files.readAllBytes(f.toPath()), java.nio.charset.StandardCharsets.UTF_8)
++                    .trim().equals("refused");
++        } catch (Exception e) {
++            return false;
++        }
++    }
++
++    private void confirmReissue() {
++        new android.app.AlertDialog.Builder(a)
++                .setTitle(Ui.t("Перевыпустить код?", "Reissue the code?"))
++                .setMessage(Ui.t("Старый код перестанет работать, друзьям нужно будет отправить новый. "
++                        + "Если мир сейчас открыт для друзей, новый код заработает со следующего открытия.",
++                        "The old code stops working and friends need the new one. "
++                        + "If the world is shared right now, the new code works from the next time you share it."))
++                .setPositiveButton(Ui.t("Перевыпустить", "Reissue"), new android.content.DialogInterface.OnClickListener() {
++                    public void onClick(android.content.DialogInterface d, int w) {
++                        try {
++                            String c = FriendsIdentity.reissue(a);
++                            a.say(Ui.t("Новый код: friend:", "New code: friend:") + c, Ui.GREEN);
++                        } catch (Exception e) {
++                            a.say(Ui.t("Не удалось: ", "Failed: ") + e.getMessage(), Ui.BAD);
++                        }
++                        shown();
++                    }
++                })
++                .setNegativeButton(Ui.t("Отмена", "Cancel"), null)
++                .show();
++    }
++
++    private void confirmRestore() {
++        new android.app.AlertDialog.Builder(a)
++                .setTitle(Ui.t("Вернуть прежний набор?", "Bring the old set back?"))
++                .setMessage(Ui.t("Моды и паки, что были до открытия последнего набора, вернутся на место; нынешние будут удалены.",
++                        "The mods and packs you had before the last opened set come back; the current ones are deleted."))
++                .setPositiveButton(Ui.t("Вернуть", "Bring back"), new android.content.DialogInterface.OnClickListener() {
++                    public void onClick(android.content.DialogInterface d, int w) {
++                        run(new Job() {
++                            public String run() throws Exception {
++                                PackShare.restore(a.dir);
++                                return Ui.t("Прежний набор возвращён. Перезапустите игру.", "The old set is back. Restart the game.");
++                            }
++                        });
++                    }
++                })
++                .setNegativeButton(Ui.t("Отмена", "Cancel"), null)
++                .show();
++    }
++
++    interface Job {
++        String run() throws Exception;
++    }
++
++    private void run(final Job job) {
++        a.say(Ui.t("Работаем…", "Working…"), Ui.WARN);
++        new Thread(new Runnable() {
++            public void run() {
++                String msg;
++                int color = Ui.GREEN;
++                try {
++                    msg = job.run();
++                } catch (Exception e) {
++                    msg = Ui.t("Не получилось: ", "Failed: ") + e.getMessage();
++                    color = Ui.BAD;
++                }
++                final String m = msg;
++                final int c = color;
++                a.runOnUiThread(new Runnable() {
++                    public void run() {
++                        a.say(m, c);
++                        shown();
++                    }
++                });
++            }
++        }).start();
++    }
++
++    @Override
++    boolean onResult(int request, int result, final Intent data) {
++        if (request != PACK_OUT && request != PACK_IN) return false;
++        if (result != android.app.Activity.RESULT_OK || data == null || data.getData() == null) return true;
++        if (request == PACK_OUT) {
++            run(new Job() {
++                public String run() throws Exception {
++                    int n;
++                    try (java.io.OutputStream o = a.getContentResolver().openOutputStream(data.getData())) {
++                        n = PackShare.export(a, a.dir, o);
++                    }
++                    return Ui.t("Набор сохранён: файлов ", "Set saved: files ") + n;
++                }
++            });
++        } else {
++            run(new Job() {
++                public String run() throws Exception {
++                    int n;
++                    try (java.io.InputStream in = a.getContentResolver().openInputStream(data.getData())) {
++                        n = PackShare.open(a.dir, in);
++                    }
++                    return Ui.t("Набор открыт: файлов ", "Set opened: files ") + n
++                            + Ui.t(". Прежний сохранён — его можно вернуть. Перезапустите игру.", ". The old one is kept and can come back. Restart the game.");
++                }
++            });
++        }
++        return true;
++    }
++}
+diff --git a/packaging/android/java/dev/horizonlab/horizon/HomePage.java b/packaging/android/java/dev/horizonlab/horizon/HomePage.java
+index dfd04a2..2cdfb99 100644
+--- a/packaging/android/java/dev/horizonlab/horizon/HomePage.java
++++ b/packaging/android/java/dev/horizonlab/horizon/HomePage.java
+@@ -1,187 +1,213 @@
+-package dev.horizonlab.horizon;
+-
+-import android.view.View;
+-import android.widget.LinearLayout;
+-import android.widget.TextView;
+-import java.io.File;
+-import java.util.Calendar;
+-import java.util.List;
+-import java.util.Map;
+-
+-/** Oneshot: the start page, as the PC launcher's Home (HomePage.cs): play time, last worlds, news, a tip. */
+-final class HomePage extends Page {
+-    private static final String[][] TIPS = {
+-        {"Скриншот — кнопка F2 на сенсорной панели. Снимки появятся в «Галерее».",
+-            "Screenshot: the F2 button on the touch panel. Shots show up in the Gallery."},
+-        {"Чтобы позвать друга: в игре пауза → «Игра с друзьями» → «Открыть для друзей» → «Отправить код».",
+-            "To invite a friend: in the game, pause → Play with Friends → Start Sharing → Send Invite."},
+-        {"Перед обновлением игры сделайте бэкап миров на странице «Миры».",
+-            "Back your worlds up on the Worlds page before updating the game."},
+-        {"Миры переносятся между телефоном и ПК обычным zip — экспорт и импорт на странице «Миры».",
+-            "Worlds move between the phone and the PC as a plain zip: export and import on the Worlds page."},
+-        {"Набор модов и ресурспаков можно передать другу одним файлом .oneshotpack («Друзья»).",
+-            "Hand your mods and resource packs to a friend as one .oneshotpack file (Friends)."},
+-        {"Игра тормозит на Snapdragon? Попробуйте драйвер Turnip в «Настройках».",
+-            "Slow on a Snapdragon? Try the Turnip driver in Settings."},
+-        {"Вылет? Лог можно посмотреть и отправить из «Настроек» — так проще найти причину.",
+-            "A crash? View and send the log from Settings: it makes the cause easier to find."},
+-    };
+-
+-    private final TextView hello;
+-    private final LinearLayout figures;
+-    private final Ui.Week week;
+-    private final TextView weekTotal;
+-    private final LinearLayout recent;
+-    private final LinearLayout news;
+-    private boolean newsLoaded;
+-
+-    HomePage(ProfileActivity a) {
+-        super(a);
+-        hello = Ui.text(a, "", 26, Ui.TEXT, true);
+-        root.addView(hello);
+-        LinearLayout status = Ui.row(a);
+-        status.addView(Ui.chip(a, "v" + UpdateActivity.versionName(a), false));
+-        TextView relay = a.relayLabel();
+-        LinearLayout.LayoutParams rl = new LinearLayout.LayoutParams(-2, -2);
+-        rl.leftMargin = dp(8);
+-        status.addView(relay, rl);
+-        root.addView(status, Ui.gap(a, 4));
+-
+-        figures = new LinearLayout(a);
+-        figures.setOrientation(LinearLayout.VERTICAL);
+-        root.addView(figures, Ui.gap(a, 14));
+-
+-        LinearLayout wk = block(Ui.t("Последние 7 дней", "Last 7 days"));
+-        week = new Ui.Week(a);
+-        wk.addView(week, Ui.gap(a, 6));
+-        weekTotal = note(wk, "");
+-
+-        LinearLayout rec = block(Ui.t("Недавние миры", "Recent worlds"));
+-        recent = new LinearLayout(a);
+-        recent.setOrientation(LinearLayout.VERTICAL);
+-        rec.addView(recent);
+-
+-        LinearLayout nw = block(Ui.t("Новости", "News"));
+-        news = new LinearLayout(a);
+-        news.setOrientation(LinearLayout.VERTICAL);
+-        nw.addView(news);
+-
+-        LinearLayout tip = block(Ui.t("Совет", "Tip"));
+-        String[] t = TIPS[Calendar.getInstance().get(Calendar.DAY_OF_YEAR) % TIPS.length];
+-        tip.addView(Ui.text(a, Ui.t(t[0], t[1]), 14, Ui.TEXT, false));
+-    }
+-
+-    @Override
+-    void shown() {
+-        String name = a.readName();
+-        int hour = Calendar.getInstance().get(Calendar.HOUR_OF_DAY);
+-        String greet = hour < 5 ? Ui.t("Доброй ночи", "Good night") : hour < 12 ? Ui.t("Доброе утро", "Good morning")
+-                : hour < 18 ? Ui.t("Добрый день", "Good afternoon") : Ui.t("Добрый вечер", "Good evening");
+-        hello.setText(greet + (name.isEmpty() ? "" : ", " + name));
+-
+-        Map<String, String> t = PlayStats.totals(a);
+-        figures.removeAllViews();
+-        View[] tiles = {
+-            Ui.tile(a, Ui.duration(PlayStats.num(t, "total")), Ui.t("всего в игре", "played")),
+-            Ui.tile(a, "" + PlayStats.num(t, "sessions"), Ui.t("запусков", "sessions")),
+-            Ui.tile(a, Ui.duration(PlayStats.num(t, "longest")), Ui.t("самая долгая", "longest")),
+-            Ui.tile(a, Ui.duration(PlayStats.num(t, "friends")), Ui.t("с друзьями", "with friends")),
+-        };
+-        // Four in a row when there is room, else two rows of two.
+-        int per = a.pageWidthDp() >= 560 ? 4 : 2;
+-        for (int i = 0; i < tiles.length; i += per) {
+-            LinearLayout r = Ui.row(a);
+-            for (int j = 0; j < per && i + j < tiles.length; j++) r.addView(tiles[i + j], Ui.part(a, j == 0));
+-            figures.addView(r, Ui.gap(a, i == 0 ? 0 : 10));
+-        }
+-        String[] names = new String[7];
+-        long[] days = PlayStats.week(t, names);
+-        week.set(days, names);
+-        long sum = 0;
+-        for (long d : days) sum += d;
+-        long last = PlayStats.num(t, "last");
+-        weekTotal.setText(Ui.t("За неделю: ", "This week: ") + Ui.duration(sum)
+-                + Ui.t(" · последняя игра: ", " · last played: ") + Ui.ago(last));
+-
+-        recent.removeAllViews();
+-        List<File> worlds = WorldsPage.worlds(a.dir);
+-        if (worlds.isEmpty()) {
+-            note(recent, Ui.t("Миров пока нет: создайте первый в игре.", "No worlds yet: create the first one in the game."));
+-        }
+-        for (int i = 0; i < Math.min(3, worlds.size()); i++) {
+-            File w = worlds.get(i);
+-            LinearLayout r = Ui.row(a);
+-            TextView n = Ui.text(a, w.getName(), 15, Ui.TEXT, true);
+-            n.setSingleLine(true);
+-            n.setEllipsize(android.text.TextUtils.TruncateAt.END);
+-            r.addView(n, new LinearLayout.LayoutParams(0, -2, 1));
+-            r.addView(Ui.text(a, Ui.ago(new File(w, "level.dat").lastModified()), 12, Ui.MUTED, false));
+-            r.setOnClickListener(new View.OnClickListener() {
+-                public void onClick(View v) {
+-                    a.show(ProfileActivity.WORLDS);
+-                }
+-            });
+-            recent.addView(r);
+-        }
+-
+-        if (!newsLoaded) loadNews();
+-    }
+-
+-    private void loadNews() {
+-        newsLoaded = true;
+-        news.removeAllViews();
+-        note(news, Ui.t("Загружаем…", "Loading…"));
+-        new Thread(new Runnable() {
+-            public void run() {
+-                List<UpdateActivity.Release> list = null;
+-                try {
+-                    list = UpdateActivity.releases(a, false);
+-                } catch (Exception ignored) {
+-                }
+-                final List<UpdateActivity.Release> got = list;
+-                a.runOnUiThread(new Runnable() {
+-                    public void run() {
+-                        if (a.isFinishing()) return;
+-                        news.removeAllViews();
+-                        if (got == null || got.isEmpty()) {
+-                            newsLoaded = false;
+-                            note(news, Ui.t("Нет связи с GitHub — новости появятся позже.", "No connection to GitHub: news later."));
+-                            return;
+-                        }
+-                        for (int i = 0; i < Math.min(3, got.size()); i++) {
+-                            UpdateActivity.Release r = got.get(i);
+-                            news.addView(Ui.text(a, r.name + (r.date.isEmpty() ? "" : "  ·  " + r.date), 14, i == 0 ? Ui.GREEN : Ui.TEXT, true),
+-                                    Ui.gap(a, i == 0 ? 0 : 8));
+-                            String notes = readable(r.notes);
+-                            if (notes.length() > 220) notes = notes.substring(0, 220) + "…";
+-                            if (!notes.isEmpty()) note(news, notes);
+-                        }
+-                        TextView more = Ui.text(a, Ui.t("Все версии →", "All versions →"), 13, Ui.GREEN, true);
+-                        more.setOnClickListener(new View.OnClickListener() {
+-                            public void onClick(View v) {
+-                                a.startActivity(new android.content.Intent(a, UpdateActivity.class));
+-                            }
+-                        });
+-                        news.addView(more, Ui.gap(a, 6));
+-                    }
+-                });
+-            }
+-        }).start();
+-    }
+-
+-    /**
+-     * The release text a player reads: without the service lines CI writes for UpdateActivity
+-     * (versionCode, versionName, sha256, port commit, patches) and the heading that repeats the title.
+-     */
+-    static String readable(String body) {
+-        StringBuilder b = new StringBuilder();
+-        for (String l : body.replace("\r", "").split("\n")) {
+-            String t = l.trim();
+-            if (t.isEmpty() || t.startsWith("OneShot for Android") || t.matches("(?i)(Что нового|What's new):?")) continue;
+-            if (t.startsWith("- ")) t = "•" + t.substring(1);
+-            if (t.matches("(?i)(versionCode|versionName|sha256|port commit|patches)\\s*:.*")) continue;
+-            b.append(t).append(' ');
+-        }
+-        return b.toString().replaceAll("[#*`>]", "").replaceAll("\\s+", " ").trim();
+-    }
+-}
++package dev.horizonlab.horizon;
++
++import android.view.View;
++import android.widget.LinearLayout;
++import android.widget.TextView;
++import java.io.File;
++import java.util.Calendar;
++import java.util.List;
++import java.util.Map;
++
++/** Oneshot: the start page, as the PC launcher's Home (HomePage.cs): play time, last worlds, news, a tip. */
++final class HomePage extends Page {
++    private static final String[][] TIPS = {
++        {"Скриншот — кнопка F2 на сенсорной панели. Снимки появятся в «Галерее».",
++            "Screenshot: the F2 button on the touch panel. Shots show up in the Gallery."},
++        {"Чтобы позвать друга: в игре пауза → «Игра с друзьями» → «Открыть для друзей» → «Отправить код».",
++            "To invite a friend: in the game, pause → Play with Friends → Start Sharing → Send Invite."},
++        {"Перед обновлением игры сделайте бэкап миров на странице «Миры».",
++            "Back your worlds up on the Worlds page before updating the game."},
++        {"Миры переносятся между телефоном и ПК обычным zip — экспорт и импорт на странице «Миры».",
++            "Worlds move between the phone and the PC as a plain zip: export and import on the Worlds page."},
++        {"Набор модов и ресурспаков можно передать другу одним файлом .oneshotpack («Друзья»).",
++            "Hand your mods and resource packs to a friend as one .oneshotpack file (Friends)."},
++        {"Игра тормозит на Snapdragon? Попробуйте драйвер Turnip в «Настройках».",
++            "Slow on a Snapdragon? Try the Turnip driver in Settings."},
++        {"Вылет? Лог можно посмотреть и отправить из «Настроек» — так проще найти причину.",
++            "A crash? View and send the log from Settings: it makes the cause easier to find."},
++    };
++
++    private final TextView hello;
++    private final LinearLayout figures;
++    private final Ui.Week week;
++    private final TextView weekTotal;
++    private final LinearLayout recent;
++    private final LinearLayout friends;
++    private final LinearLayout news;
++    private boolean newsLoaded;
++
++    HomePage(ProfileActivity a) {
++        super(a);
++        hello = Ui.text(a, "", 26, Ui.TEXT, true);
++        root.addView(hello);
++        LinearLayout status = Ui.row(a);
++        status.addView(Ui.chip(a, "v" + UpdateActivity.versionName(a), false));
++        TextView relay = a.relayLabel();
++        LinearLayout.LayoutParams rl = new LinearLayout.LayoutParams(-2, -2);
++        rl.leftMargin = dp(8);
++        status.addView(relay, rl);
++        root.addView(status, Ui.gap(a, 4));
++
++        figures = new LinearLayout(a);
++        figures.setOrientation(LinearLayout.VERTICAL);
++        root.addView(figures, Ui.gap(a, 14));
++
++        LinearLayout fr = block(Ui.t("Недавно играли вместе", "Played together lately"));
++        friends = new LinearLayout(a);
++        friends.setOrientation(LinearLayout.VERTICAL);
++        fr.addView(friends);
++
++        LinearLayout wk = block(Ui.t("Последние 7 дней", "Last 7 days"));
++        week = new Ui.Week(a);
++        wk.addView(week, Ui.gap(a, 6));
++        weekTotal = note(wk, "");
++
++        LinearLayout rec = block(Ui.t("Недавние миры", "Recent worlds"));
++        recent = new LinearLayout(a);
++        recent.setOrientation(LinearLayout.VERTICAL);
++        rec.addView(recent);
++
++        LinearLayout nw = block(Ui.t("Новости", "News"));
++        news = new LinearLayout(a);
++        news.setOrientation(LinearLayout.VERTICAL);
++        nw.addView(news);
++
++        LinearLayout tip = block(Ui.t("Совет", "Tip"));
++        String[] t = TIPS[Calendar.getInstance().get(Calendar.DAY_OF_YEAR) % TIPS.length];
++        tip.addView(Ui.text(a, Ui.t(t[0], t[1]), 14, Ui.TEXT, false));
++    }
++
++    @Override
++    void shown() {
++        String name = a.readName();
++        int hour = Calendar.getInstance().get(Calendar.HOUR_OF_DAY);
++        String greet = hour < 5 ? Ui.t("Доброй ночи", "Good night") : hour < 12 ? Ui.t("Доброе утро", "Good morning")
++                : hour < 18 ? Ui.t("Добрый день", "Good afternoon") : Ui.t("Добрый вечер", "Good evening");
++        hello.setText(greet + (name.isEmpty() ? "" : ", " + name));
++
++        Map<String, String> t = PlayStats.totals(a);
++        figures.removeAllViews();
++        View[] tiles = {
++            Ui.tile(a, Ui.duration(PlayStats.num(t, "total")), Ui.t("всего в игре", "played")),
++            Ui.tile(a, "" + PlayStats.num(t, "sessions"), Ui.t("запусков", "sessions")),
++            Ui.tile(a, Ui.duration(PlayStats.num(t, "longest")), Ui.t("самая долгая", "longest")),
++            Ui.tile(a, Ui.duration(PlayStats.num(t, "friends")), Ui.t("с друзьями", "with friends")),
++        };
++        // Four in a row when there is room, else two rows of two.
++        int per = a.pageWidthDp() >= 560 ? 4 : 2;
++        for (int i = 0; i < tiles.length; i += per) {
++            LinearLayout r = Ui.row(a);
++            for (int j = 0; j < per && i + j < tiles.length; j++) r.addView(tiles[i + j], Ui.part(a, j == 0));
++            figures.addView(r, Ui.gap(a, i == 0 ? 0 : 10));
++        }
++        String[] names = new String[7];
++        long[] days = PlayStats.week(t, names);
++        week.set(days, names);
++        long sum = 0;
++        for (long d : days) sum += d;
++        long last = PlayStats.num(t, "last");
++        weekTotal.setText(Ui.t("За неделю: ", "This week: ") + Ui.duration(sum)
++                + Ui.t(" · последняя игра: ", " · last played: ") + Ui.ago(last));
++
++        friends.removeAllViews();
++        List<FriendsBook.Friend> book = FriendsBook.read(a, 32);
++        if (book.isEmpty()) {
++            note(friends, Ui.t("Пока никого. Друзья появятся здесь после первой совместной игры по коду друга.",
++                    "No one yet. Friends show up here after the first game together by a friend's code."));
++        } else {
++            FriendsBook.fill(a, friends, book.subList(0, Math.min(3, book.size())));
++            note(friends, Ui.t("Подключение сработает, если друг сейчас открыл мир для друзей.",
++                    "Joining works when the friend has their world open to friends right now."));
++            if (book.size() > 3) {
++                TextView all = Ui.text(a, Ui.t("Все друзья (", "All friends (") + book.size() + ") →", 13, Ui.GREEN, true);
++                all.setOnClickListener(new View.OnClickListener() {
++                    public void onClick(View v) {
++                        a.show(ProfileActivity.FRIENDS);
++                    }
++                });
++                friends.addView(all, Ui.gap(a, 4));
++            }
++        }
++
++        recent.removeAllViews();
++        List<File> worlds = WorldsPage.worlds(a.dir);
++        if (worlds.isEmpty()) {
++            note(recent, Ui.t("Миров пока нет: создайте первый в игре.", "No worlds yet: create the first one in the game."));
++        }
++        for (int i = 0; i < Math.min(3, worlds.size()); i++) {
++            File w = worlds.get(i);
++            LinearLayout r = Ui.row(a);
++            TextView n = Ui.text(a, w.getName(), 15, Ui.TEXT, true);
++            n.setSingleLine(true);
++            n.setEllipsize(android.text.TextUtils.TruncateAt.END);
++            r.addView(n, new LinearLayout.LayoutParams(0, -2, 1));
++            r.addView(Ui.text(a, Ui.ago(new File(w, "level.dat").lastModified()), 12, Ui.MUTED, false));
++            r.setOnClickListener(new View.OnClickListener() {
++                public void onClick(View v) {
++                    a.show(ProfileActivity.WORLDS);
++                }
++            });
++            recent.addView(r);
++        }
++
++        if (!newsLoaded) loadNews();
++    }
++
++    private void loadNews() {
++        newsLoaded = true;
++        news.removeAllViews();
++        note(news, Ui.t("Загружаем…", "Loading…"));
++        new Thread(new Runnable() {
++            public void run() {
++                List<UpdateActivity.Release> list = null;
++                try {
++                    list = UpdateActivity.releases(a, false);
++                } catch (Exception ignored) {
++                }
++                final List<UpdateActivity.Release> got = list;
++                a.runOnUiThread(new Runnable() {
++                    public void run() {
++                        if (a.isFinishing()) return;
++                        news.removeAllViews();
++                        if (got == null || got.isEmpty()) {
++                            newsLoaded = false;
++                            note(news, Ui.t("Нет связи с GitHub — новости появятся позже.", "No connection to GitHub: news later."));
++                            return;
++                        }
++                        for (int i = 0; i < Math.min(3, got.size()); i++) {
++                            UpdateActivity.Release r = got.get(i);
++                            news.addView(Ui.text(a, r.name + (r.date.isEmpty() ? "" : "  ·  " + r.date), 14, i == 0 ? Ui.GREEN : Ui.TEXT, true),
++                                    Ui.gap(a, i == 0 ? 0 : 8));
++                            String notes = readable(r.notes);
++                            if (notes.length() > 220) notes = notes.substring(0, 220) + "…";
++                            if (!notes.isEmpty()) note(news, notes);
++                        }
++                        TextView more = Ui.text(a, Ui.t("Все версии →", "All versions →"), 13, Ui.GREEN, true);
++                        more.setOnClickListener(new View.OnClickListener() {
++                            public void onClick(View v) {
++                                a.startActivity(new android.content.Intent(a, UpdateActivity.class));
++                            }
++                        });
++                        news.addView(more, Ui.gap(a, 6));
++                    }
++                });
++            }
++        }).start();
++    }
++
++    /**
++     * The release text a player reads: without the service lines CI writes for UpdateActivity
++     * (versionCode, versionName, sha256, port commit, patches) and the heading that repeats the title.
++     */
++    static String readable(String body) {
++        StringBuilder b = new StringBuilder();
++        for (String l : body.replace("\r", "").split("\n")) {
++            String t = l.trim();
++            if (t.isEmpty() || t.startsWith("OneShot for Android") || t.matches("(?i)(Что нового|What's new):?")) continue;
++            if (t.startsWith("- ")) t = "•" + t.substring(1);
++            if (t.matches("(?i)(versionCode|versionName|sha256|port commit|patches)\\s*:.*")) continue;
++            b.append(t).append(' ');
++        }
++        return b.toString().replaceAll("[#*`>]", "").replaceAll("\\s+", " ").trim();
++    }
++}
+diff --git a/packaging/android/java/dev/horizonlab/horizon/ProfileActivity.java b/packaging/android/java/dev/horizonlab/horizon/ProfileActivity.java
+index baedbe0..748a539 100644
+--- a/packaging/android/java/dev/horizonlab/horizon/ProfileActivity.java
++++ b/packaging/android/java/dev/horizonlab/horizon/ProfileActivity.java
+@@ -798,6 +798,12 @@ public class ProfileActivity extends Activity implements View.OnClickListener {
+         launch(true);
+     }
+ 
++    /** Oneshot: Join on a friend from the book (FriendsBook): their lasting code, then PLAY. */
++    void playFriend(String code) {
++        setJoin("friend:" + code);
++        launch(true);
++    }
++
+     /**
+      * Oneshot: the Worlds page's "Create world" on a seed. world-pending.txt is read once by the
+      * game at start (android_main.rs), as the PC launcher's `--world FOLDER --seed SEED`; no join
+-- 
+2.49.0.windows.1
+
