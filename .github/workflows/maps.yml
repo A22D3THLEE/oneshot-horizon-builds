@@ -1,0 +1,28 @@
+name: maps
+
+# Once a day refreshes catalog/maps.json (pictures, versions, downloads) from the CurseForge API.
+# Needs the repository secret CURSEFORGE_API_KEY; without it the job stops at once.
+on:
+  schedule:
+    - cron: "17 4 * * *"
+  workflow_dispatch:
+
+permissions:
+  contents: write
+
+jobs:
+  refresh:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - name: Refresh maps.json
+        env:
+          CURSEFORGE_API_KEY: ${{ secrets.CURSEFORGE_API_KEY }}
+        run: |
+          if [ -z "$CURSEFORGE_API_KEY" ]; then echo "::warning::CURSEFORGE_API_KEY is not set"; exit 0; fi
+          python3 -I tools/update_maps.py catalog/maps.json
+      - name: Commit if changed
+        run: |
+          if git diff --quiet catalog/maps.json; then echo "no changes"; exit 0; fi
+          git -c user.name=oneshot -c user.email=oneshot@localhost commit -m "catalog: refresh maps from CurseForge" catalog/maps.json
+          git push
