@@ -128,6 +128,7 @@ jobs:
         if: inputs.mods != ''
         env:
           MODS: ${{ inputs.mods }}
+          GH_TOKEN: ${{ github.token }}
         run: |
           set -euo pipefail
           api=$(grep -oE 'NATIVE_HOOKS_API: u32 = [0-9]+' src/crates/horizon-client/src/game/native_hooks.rs | grep -oE '[0-9]+$')
@@ -138,8 +139,21 @@ jobs:
           python3 oneshot/tools/pick_mods.py index.json wanted.txt "$api" "$commit" mods try-pinned > picked.txt
           cat picked.txt
           [[ -s picked.txt ]] || { echo "::error::none of the mods can be built: $MODS"; exit 1; }
-          rev=$(head -1 picked.txt | cut -d' ' -f3)
+          # One horizon-mixins for all: the newest of the versions the mods were made with (it reads the older ones).
+          rev=""; newest=""
+          for r in $(cut -d' ' -f3 picked.txt | sort -u); do
+            [[ "$r" =~ ^[0-9a-f]{40}$ ]] || continue
+            d=$(gh api "repos/horizon-rust/horizon-mixins/commits/$r" --jq .commit.committer.date)
+            if [[ -z "$newest" || "$d" > "$newest" ]]; then newest=$d; rev=$r; fi
+          done
+          [[ -n "$rev" ]] || { echo "::error::no horizon-mixins version among the mods"; exit 1; }
+          echo "horizon-mixins: $rev ($newest)"
           cargo install --git https://github.com/horizon-rust/horizon-mixins --rev "$rev" --locked horizon-mixins-cli --root mixins-tool
+          # horizon-mixins takes no symlinks in the workspace (the port has CLAUDE.md -> AGENTS.md): files instead.
+          find src -type l -not -path 'src/.git/*' -not -path 'src/target/*' | while read -r l; do
+            t=$(readlink -f "$l") || true
+            if [[ -f "$t" ]]; then cp --remove-destination "$t" "$l"; else rm -f "$l"; fi
+          done
           tool=$PWD/mixins-tool/bin/horizon-mixins
           taken=(); : > taken.txt; left=""
           while read -r id version _; do
