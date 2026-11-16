@@ -1,0 +1,316 @@
+diff --git a/packaging/android/java/dev/horizonlab/horizon/CatalogActivity.java b/packaging/android/java/dev/horizonlab/horizon/CatalogActivity.java
+index 7287133..b365e37 100644
+--- a/packaging/android/java/dev/horizonlab/horizon/CatalogActivity.java
++++ b/packaging/android/java/dev/horizonlab/horizon/CatalogActivity.java
+@@ -49,7 +49,8 @@ public class CatalogActivity extends Activity {
+     private static final String GAME_VERSION = "26.3";
+     private static final String REGISTRY = "https://horizon-rust.github.io/horizon-mods/index.json";
+     private static final int PAGE = 24;
+-    private static final int SKINS = 0, HD = 1, CAPES = 2, PACKS = 3, MODS = 4, TABS = 5;
++    /** ALL: Horizon's mods and the resource packs in one list (the PC's «Все»). */
++    private static final int SKINS = 0, HD = 1, CAPES = 2, ALL = 3, PACKS = 4, MODS = 5, TABS = 6;
+     /** The team's HD skins: {"schema":1,"skins":[{"name","file","sha256","model","author"}]}, files beside it. */
+     private static final String HD_BASE = "https://raw.githubusercontent.com/A22D3THLEE/oneshot-horizon-data/main/hd-skins/";
+ 
+@@ -84,6 +85,8 @@ public class CatalogActivity extends Activity {
+     private static final class Item {
+         String id, title, sub, picture, file, fileName, hash, hashKind, signedUrl, kind;
+         boolean cape, slim, hasSlim, hd, hdSkins;
++        /** A native Horizon mod: built into the game, which only the PC launcher does. */
++        boolean nativeMod;
+         long downloads;
+     }
+ 
+@@ -140,7 +143,7 @@ public class CatalogActivity extends Activity {
+         HorizontalScrollView tabScroll = Ui.hscroll(this);
+         LinearLayout tabRow = new LinearLayout(this);
+         tabRow.setOrientation(LinearLayout.HORIZONTAL);
+-        String[] names = {Ui.t("Скины", "Skins"), Ui.t("HD-скины", "HD skins"), Ui.t("Плащи", "Capes"),
++        String[] names = {Ui.t("Скины", "Skins"), Ui.t("HD-скины", "HD skins"), Ui.t("Плащи", "Capes"), Ui.t("Все", "All"),
+             Ui.t("Ресурспаки", "Resource packs"), Ui.t("Моды Horizon", "Horizon mods")};
+         for (int i = 0; i < TABS; i++) {
+             final int which = i;
+@@ -250,7 +253,8 @@ public class CatalogActivity extends Activity {
+ 
+     private void selectTab(int which) {
+         tab = which;
+-        hdSite.setVisibility(which == HD ? View.VISIBLE : View.GONE);
++        // HD Skins' condition: their skins and capes are shown with a link to hdskins.de and their name.
++        hdSite.setVisibility(which == HD || which == CAPES ? View.VISIBLE : View.GONE);
+         for (int i = 0; i < TABS; i++) {
+             boolean on = i == which;
+             tabs[i].setBackground(on ? Ui.rounded(this, Ui.GREEN, 0, 10) : Ui.rounded(this, Ui.HIGH, Ui.EDGE, 10));
+@@ -259,7 +263,7 @@ public class CatalogActivity extends Activity {
+         query.setText("");
+         query.setHint(which == SKINS ? Ui.t("Название или ник игрока", "Name or a player's name")
+                 : which == HD ? Ui.t("Ник игрока на HD Skins", "A player's name on HD Skins")
+-                : which == CAPES ? Ui.t("Название плаща", "Cape name") : Ui.t("Поиск", "Search"));
++                : which == CAPES ? Ui.t("Название плаща или ник (HD-плащ)", "Cape name or a player's name (HD cape)") : Ui.t("Поиск", "Search"));
+         runSearch();
+     }
+ 
+@@ -288,6 +292,7 @@ public class CatalogActivity extends Activity {
+                     else if (which == HD) token = hd(q, after, items);
+                     else if (which == CAPES) capes(q, items);
+                     else if (which == PACKS) token = packs(q, after, items);
++                    else if (which == ALL) token = all(q, after, items);
+                     else mods(q, items);
+                 } catch (Exception e) {
+                     err = e.getMessage() == null ? e.toString() : e.getMessage();
+@@ -366,6 +371,46 @@ public class CatalogActivity extends Activity {
+         }
+     }
+ 
++    /** «Все»: Horizon's mods on the first page (native ones marked PC only), then the resource packs page by page. */
++    private String all(String q, String after, List<Item> out) throws Exception {
++        if (after == null) {
++            try {
++                mods(q, out);
++            } catch (Exception ignored) {
++                // the packs still show
++            }
++        }
++        try {
++            return packs(q, after, out);
++        } catch (Exception e) {
++            if (out.isEmpty()) throw e;
++            return null;
++        }
++    }
++
++    /** A player's record on HD Skins (their current skin and cape), or null when private or absent. */
++    private static JSONObject hdUser(String q) throws Exception {
++        String body = new String(hdGet(HD_API + "users/" + enc(q), 1 << 20), StandardCharsets.UTF_8).trim();
++        if (body.isEmpty()) return null;
++        JSONObject root = new JSONObject(body);
++        JSONObject tex = root.optJSONObject("textures");
++        return tex == null || tex.optBoolean("private") ? null : root;
++    }
++
++    /** The player's HD cape from their HD Skins record; worn reduced to 128×64. */
++    private static Item hdCape(JSONObject root, String name) {
++        JSONObject tex = root.optJSONObject("textures");
++        JSONObject cape = tex == null ? null : tex.optJSONObject("CAPE");
++        JSONObject cur = cape == null ? null : cape.optJSONObject("current");
++        String texture = str(cur, "checksum").toLowerCase(Locale.ROOT);
++        if (!texture.matches("[0-9a-f]{64}")) return null;
++        Item it = hdSkinsItem(texture, false, Ui.t("HD-плащ ", "HD cape of ") + name);
++        it.cape = true;
++        it.hasSlim = false;
++        it.sub = "hdskins.de";
++        return it;
++    }
++
+     /** One request to HD Skins, at most once a second. */
+     private static byte[] hdGet(String url, int limit) throws Exception {
+         synchronized (hdGate) {
+@@ -395,18 +440,19 @@ public class CatalogActivity extends Activity {
+     private String hdSkinsSite(String q, String after, List<Item> out) throws Exception {
+         if (!q.isEmpty()) {
+             if (after != null || !q.matches("[A-Za-z0-9_]{3,16}")) return null;
+-            String body = new String(hdGet(HD_API + "users/" + enc(q), 1 << 20), StandardCharsets.UTF_8).trim();
+-            if (body.isEmpty()) return null;
+-            JSONObject root = new JSONObject(body);
++            JSONObject root = hdUser(q);
++            if (root == null) return null;
+             JSONObject tex = root.optJSONObject("textures");
+-            if (tex == null || tex.optBoolean("private")) return null;
++            String name = str(root.optJSONObject("user"), "name", q);
+             JSONObject skin = tex.optJSONObject("SKIN");
+             JSONObject cur = skin == null ? null : skin.optJSONObject("current");
+             String texture = str(cur, "checksum").toLowerCase(Locale.ROOT);
+-            if (!texture.matches("[0-9a-f]{64}")) return null;
+-            JSONObject meta = cur.optJSONObject("textureMeta");
+-            JSONObject user = root.optJSONObject("user");
+-            out.add(hdSkinsItem(texture, meta != null && meta.optBoolean("slim"), str(user, "name", q)));
++            if (texture.matches("[0-9a-f]{64}")) {
++                JSONObject meta = cur.optJSONObject("textureMeta");
++                out.add(hdSkinsItem(texture, meta != null && meta.optBoolean("slim"), name));
++            }
++            Item cape = hdCape(root, name);
++            if (cape != null) out.add(cape);
+             return null;
+         }
+         int offset = 0;
+@@ -528,6 +574,16 @@ public class CatalogActivity extends Activity {
+     }
+ 
+     private void capes(String q, List<Item> out) throws Exception {
++        // A player's name: their HD cape on HD Skins first (the same one request as their skin there).
++        if (q.matches("[A-Za-z0-9_]{3,16}")) {
++            try {
++                JSONObject user = hdUser(q);
++                Item cape = user == null ? null : hdCape(user, str(user.optJSONObject("user"), "name", q));
++                if (cape != null) out.add(cape);
++            } catch (Exception ignored) {
++                // Minecraft's capes still show
++            }
++        }
+         JSONObject root = new JSONObject(getString("https://api.mineskin.org/v2/capes"));
+         JSONArray arr = root.optJSONArray("capes");
+         for (int i = 0; arr != null && i < arr.length(); i++) {
+@@ -580,7 +636,8 @@ public class CatalogActivity extends Activity {
+         for (int i = 0; projects != null && i < projects.length(); i++) {
+             JSONObject pr = projects.getJSONObject(i);
+             String kind = str(pr, "kind");
+-            if (!kind.equals("mod") && !kind.equals("resourcepack") && !kind.equals("shader")) continue;
++            boolean nativeMod = kind.equals("native-mod");
++            if (!kind.equals("mod") && !kind.equals("resourcepack") && !kind.equals("shader") && !nativeMod) continue;
+             JSONArray vs = pr.optJSONArray("versions");
+             JSONObject ver = null;
+             for (int j = 0; vs != null && j < vs.length(); j++) {
+@@ -601,8 +658,10 @@ public class CatalogActivity extends Activity {
+             JSONArray au = pr.optJSONArray("authors");
+             for (int k = 0; au != null && k < au.length(); k++) authors.append(k > 0 ? ", " : "").append(au.optString(k));
+             it.sub = authors + " · " + downloads(pr.optLong("downloads")) + "\n"
+-                    + (kind.equals("mod") ? "" : (kind.equals("shader") ? Ui.t("шейдеры", "shader") : Ui.t("ресурспак", "pack")) + " · ")
++                    + (kind.equals("mod") ? "" : (nativeMod ? Ui.t("native-мод, только на ПК", "native mod, PC only")
++                        : kind.equals("shader") ? Ui.t("шейдеры", "shader") : Ui.t("ресурспак", "pack")) + " · ")
+                     + str(pr, "summary");
++            it.nativeMod = nativeMod;
+             if (!q.isEmpty() && !(it.title + " " + it.sub).toLowerCase(Locale.ROOT).contains(q.toLowerCase(Locale.ROOT))) continue;
+             it.picture = str(pr, "icon", "");
+             it.file = str(f, "url");
+@@ -652,8 +711,8 @@ public class CatalogActivity extends Activity {
+             text.addView(s);
+         }
+         r.addView(text, tl);
+-        final Button act = Ui.button(this, it.kind != null ? Ui.t("Установить", "Install")
+-                : it.cape ? Ui.t("Надеть плащ", "Wear cape") : Ui.t("Надеть", "Wear"), true);
++        final Button act = Ui.button(this, it.nativeMod ? Ui.t("Только на ПК", "PC only") : it.kind != null ? Ui.t("Установить", "Install")
++                : it.cape ? Ui.t("Надеть плащ", "Wear cape") : Ui.t("Надеть", "Wear"), !it.nativeMod);
+         act.setTextSize(15);
+         act.setOnClickListener(new View.OnClickListener() {
+             public void onClick(View v) {
+@@ -828,6 +887,13 @@ public class CatalogActivity extends Activity {
+     // ------------------------------------------------------------------ actions
+ 
+     private void act(final Item it, final Button button) {
++        if (it.nativeMod) {
++            // Its code is compiled into the game, which only the PC launcher does (20 to 30 minutes of building).
++            status.setTextColor(Ui.TEXT);
++            status.setText(Ui.t("«" + it.title + "» — native-мод: его код собирается в игру, а это умеет только лаунчер на ПК (Моды → Каталог → «Моды Horizon»). На телефоне его поставить нельзя.",
++                    "«" + it.title + "» is a native mod: its code is built into the game, which only the PC launcher does (Mods → Catalog → «Horizon mods»). It can't be installed on the phone."));
++            return;
++        }
+         button.setEnabled(false);
+         button.setText("…");
+         status.setText("");
+@@ -928,8 +994,8 @@ public class CatalogActivity extends Activity {
+     }
+ 
+     private String wearCape(Item it) throws Exception {
+-        byte[] png = ProfileActivity.normalizeCape(getBytes(it.picture, 1 << 20));
+-        if (png == null) throw new Exception(Ui.t("Это не плащ 64×32.", "That is not a 64×32 cape."));
++        byte[] png = ProfileActivity.normalizeCape(it.hdSkins ? hdGet(it.picture, 16 << 20) : getBytes(it.picture, 1 << 20));
++        if (png == null) throw new Exception(Ui.t("Это не плащ 64×32 (или HD 2:1).", "That is not a 64×32 cape (or an HD one of 2:1)."));
+         File sd = new File(dir, "skin");
+         sd.mkdirs();
+         write(new File(sd, "cape.png"), png);
+diff --git a/packaging/android/java/dev/horizonlab/horizon/ProfileActivity.java b/packaging/android/java/dev/horizonlab/horizon/ProfileActivity.java
+index f3531eb..361a287 100644
+--- a/packaging/android/java/dev/horizonlab/horizon/ProfileActivity.java
++++ b/packaging/android/java/dev/horizonlab/horizon/ProfileActivity.java
+@@ -1031,7 +1031,7 @@ public class ProfileActivity extends Activity implements View.OnClickListener {
+         if (b == null) return null;
+         int w = b.getWidth(), h = b.getHeight();
+         boolean legacy = w == 22 && h == 17;
+-        if (!legacy && (w < 64 || w > 1024 || w % 64 != 0 || h * 2 != w)) return null;
++        if (!legacy && (w < 64 || w > 2048 || w % 64 != 0 || h * 2 != w)) return null;
+         if (b.getConfig() != Bitmap.Config.ARGB_8888) b = b.copy(Bitmap.Config.ARGB_8888, true);
+         if (!legacy && w > 64) {
+             byte[] hd = png(w == 128 ? b : scaleRaw(b, 128, 64));
+diff --git a/packaging/android/java/dev/horizonlab/horizon/WorldsPage.java b/packaging/android/java/dev/horizonlab/horizon/WorldsPage.java
+index 99d8272..dbcb709 100644
+--- a/packaging/android/java/dev/horizonlab/horizon/WorldsPage.java
++++ b/packaging/android/java/dev/horizonlab/horizon/WorldsPage.java
+@@ -409,8 +409,16 @@ final class WorldsPage extends Page {
+ 
+     /** A 16:9 picture for a catalog entry, loaded in the background; null when there is none. */
+     private View preview(String image) {
++        return preview(image, null, null);
++    }
++
++    /**
++     * A map's picture: the catalog's, or, when maps.json has none or it does not come, one drawn from
++     * the map's name (`title`), so every map has one. Without a title (seeds): null when there is none.
++     */
++    private View preview(String image, final String title, final String author) {
+         final String url = imageUrl(image);
+-        if (url == null) return null;
++        if (url == null && title == null) return null;
+         final ImageView pic = new ImageView(a) {
+             @Override
+             protected void onMeasure(int w, int h) {
+@@ -424,7 +432,9 @@ final class WorldsPage extends Page {
+         pic.setClipToOutline(true);
+         new Thread(new Runnable() {
+             public void run() {
+-                final Bitmap b = fetchPicture(url, Math.min(a.getResources().getDisplayMetrics().widthPixels, 1280));
++                Bitmap got = url == null ? null : fetchPicture(url, Math.min(a.getResources().getDisplayMetrics().widthPixels, 1280));
++                if (got == null && title != null) got = drawnPicture(title, author);
++                final Bitmap b = got;
+                 if (b == null) return;
+                 a.runOnUiThread(new Runnable() {
+                     public void run() {
+@@ -436,6 +446,51 @@ final class WorldsPage extends Page {
+         return pic;
+     }
+ 
++    /** A map's name and author on a colour of its own, for a map without a picture. */
++    private static Bitmap drawnPicture(String title, String author) {
++        int w = 960, h = 540;
++        Bitmap b = Bitmap.createBitmap(w, h, Bitmap.Config.ARGB_8888);
++        android.graphics.Canvas c = new android.graphics.Canvas(b);
++        float hue = (title.hashCode() & 0x7fffffff) % 360;
++        int tone = android.graphics.Color.HSVToColor(new float[] {hue, 0.45f, 0.42f});
++        int deep = android.graphics.Color.HSVToColor(new float[] {(hue + 40) % 360, 0.5f, 0.18f});
++        android.graphics.Paint p = new android.graphics.Paint(android.graphics.Paint.ANTI_ALIAS_FLAG);
++        p.setShader(new android.graphics.LinearGradient(0, 0, w, h, tone, deep, android.graphics.Shader.TileMode.CLAMP));
++        c.drawRect(0, 0, w, h, p);
++        p.setShader(null);
++        p.setColor(0x28FFFFFF);
++        for (int i = 0; i < 6; i++) c.drawRect(w - 90 - i * 66, h - 90 - (i % 3) * 66, w - 30 - i * 66, h - 30 - (i % 3) * 66, p);
++        p.setColor(0xFFFFFFFF);
++        p.setTypeface(android.graphics.Typeface.DEFAULT_BOLD);
++        p.setTextSize(64);
++        // The name in up to two lines that fit the width.
++        List<String> lines = new ArrayList<String>();
++        StringBuilder line = new StringBuilder();
++        for (String word : title.split(" ")) {
++            String tryLine = line.length() == 0 ? word : line + " " + word;
++            if (p.measureText(tryLine) > w - 100 && line.length() > 0) {
++                lines.add(line.toString());
++                line = new StringBuilder(word);
++            } else {
++                line = new StringBuilder(tryLine);
++            }
++        }
++        if (line.length() > 0) lines.add(line.toString());
++        if (lines.size() > 2) lines = new ArrayList<String>(lines.subList(0, 2));
++        float y = 300 - (lines.size() - 1) * 74;
++        for (String l : lines) {
++            c.drawText(l, 50, y, p);
++            y += 74;
++        }
++        if (author != null && !author.isEmpty()) {
++            p.setTypeface(android.graphics.Typeface.DEFAULT);
++            p.setTextSize(34);
++            p.setColor(0xD0FFFFFF);
++            c.drawText(author, 50, y + 10, p);
++        }
++        return b;
++    }
++
+     /** An https link as is; a path such as img/x.jpg is relative to the catalog folder. */
+     static String imageUrl(String image) {
+         if (image == null) return null;
+@@ -555,7 +610,7 @@ final class WorldsPage extends Page {
+             final boolean direct = url.startsWith("https://") && sha.matches("[0-9a-f]{64}");
+             if (name.isEmpty() || (!direct && !page.startsWith("https://"))) continue;
+             long size = direct ? o.optLong("size", 0) : 0;
+-            View pic = preview(o.optString("image", ""));
++            View pic = preview(o.optString("image", ""), name, o.optString("author", ""));
+             if (pic != null) {
+                 LinearLayout.LayoutParams pl = new LinearLayout.LayoutParams(-1, -2);
+                 pl.topMargin = dp(6);

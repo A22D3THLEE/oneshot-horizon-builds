@@ -5,12 +5,13 @@ For each map with a curseforge.com/minecraft/worlds/<slug> page it updates the p
 download count and whether the author lets other apps hand the file out. The name and
 the Russian note written by hand are kept.
 
-Our API key may not use /mods/search, so a map is found by its project id (cf_id).
-A new map without cf_id gets it once from the public api.cfwidget.com lookup.
+A map is found by its project id (cf_id). A map without cf_id gets it once: from the official
+/mods/search by its slug (when the key may use it), else from the public api.cfwidget.com lookup.
+A map still without id keeps no picture; the launchers then draw one from its name.
 
 Needs env CURSEFORGE_API_KEY. Usage: py -I tools/update_maps.py catalog/maps.json
 """
-import json, os, re, sys, time, urllib.request
+import json, os, re, sys, time, urllib.parse, urllib.request
 
 API = "https://api.curseforge.com/v1"
 UA = "oneshot-catalog"
@@ -23,6 +24,19 @@ def call(path, key, body=None):
         "User-Agent": UA})
     with urllib.request.urlopen(req, timeout=30) as r:
         return json.load(r)
+
+
+def search_id(slug, key):
+    """The project id by its slug from the official search (gameId 432 Minecraft, classId 17 Worlds)."""
+    try:
+        found = call("/mods/search?gameId=432&classId=17&slug=" + urllib.parse.quote(slug), key).get("data", [])
+    except Exception as e:
+        print("search refused for", slug, "-", e)
+        return None
+    for mod in found:
+        if mod.get("slug") == slug and mod.get("id"):
+            return int(mod["id"])
+    return None
 
 
 def lookup_id(slug):
@@ -66,7 +80,7 @@ def main():
     for m in doc["maps"]:
         hit = re.search(r"curseforge\.com/minecraft/worlds/([^/?#]+)", m.get("page", ""))
         if hit and not m.get("cf_id"):
-            cid = lookup_id(hit.group(1))
+            cid = search_id(hit.group(1), key) or lookup_id(hit.group(1))
             if cid:
                 m["cf_id"] = cid
             time.sleep(1)
