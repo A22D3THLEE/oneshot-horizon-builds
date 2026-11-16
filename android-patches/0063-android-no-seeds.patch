@@ -1,0 +1,32 @@
+diff --git a/packaging/android/java/dev/horizonlab/horizon/WorldsPage.java b/packaging/android/java/dev/horizonlab/horizon/WorldsPage.java
+index 1309f37..96c89f1 100644
+--- a/packaging/android/java/dev/horizonlab/horizon/WorldsPage.java
++++ b/packaging/android/java/dev/horizonlab/horizon/WorldsPage.java
+@@ -44,8 +44,8 @@ final class WorldsPage extends Page {
+ 
+     WorldsPage(final ProfileActivity a) {
+         super(a);
+-        Ui.title(root, Ui.t("Мои карты", "My maps"), Ui.t("Ваши сохранения, перенос между телефоном и ПК, бэкап, сиды и карты.",
+-                "Your saves, moving them between the phone and the PC, a backup, seeds and maps."));
++        Ui.title(root, Ui.t("Мои карты", "My maps"), Ui.t("Ваши сохранения, перенос между телефоном и ПК, бэкап и готовые карты.",
++                "Your saves, moving them between the phone and the PC, a backup and ready maps."));
+ 
+         LinearLayout w = block(Ui.t("Сохранения", "Saves"));
+         list = new LinearLayout(a);
+@@ -95,6 +95,8 @@ final class WorldsPage extends Page {
+             }
+         });
+         s.addView(add, Ui.gap(a, 8));
++        // Seeds are no longer offered (as on the PC): the player's my-seeds.txt is left as it is.
++        s.setVisibility(View.GONE);
+ 
+         LinearLayout m = block(Ui.t("Готовые карты", "Ready maps"));
+         maps = new LinearLayout(a);
+@@ -149,7 +151,6 @@ final class WorldsPage extends Page {
+                 : Ui.t("Бэкапа ещё нет. Он копирует все миры в папку backups рядом с игрой.", "No backup yet. It copies every world into the backups folder beside the game."));
+         restore.setEnabled(bk.isDirectory());
+         restore.setAlpha(bk.isDirectory() ? 1f : 0.4f);
+-        showMySeeds();
+         if (!teamLoaded) loadCatalog();
+     }
+ 

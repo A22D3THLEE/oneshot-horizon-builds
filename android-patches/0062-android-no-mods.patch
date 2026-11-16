@@ -1,0 +1,128 @@
+diff --git a/crates/horizon-client/src/game/mods.rs b/crates/horizon-client/src/game/mods.rs
+index 23fa58b..13af12f 100644
+--- a/crates/horizon-client/src/game/mods.rs
++++ b/crates/horizon-client/src/game/mods.rs
+@@ -99,7 +99,8 @@ pub(super) fn content_root(
+     use horizon_client::mod_content::{self, ContentMod};
+     use horizon_mods::{Capability, Content, Package};
+     let here = std::env::current_dir().unwrap_or_default();
+-    let mut paths = horizon_mods::find(&here.join(mod_list::DIR));
++    // OneShot for Android: no content mods load (mods are for the PC).
++    let mut paths = if ONESHOT_NO_MODS { Vec::new() } else { horizon_mods::find(&here.join(mod_list::DIR)) };
+     paths.retain(|p| !dev.contains(p));
+     paths.extend(dev.iter().cloned());
+     // Where the game opens prebuilt mods (Android), a `.hnmod` that carries content (its items, models, textures,
+@@ -418,6 +419,9 @@ const STOPPED: &str = "Doesn't run any more: needs a native port";
+ /// The player was told once about the WebAssembly mods that stopped (`horizon-mods/<this>`).
+ const NOTICE_SEEN: &str = ".native-notice";
+ 
++/// OneShot for Android plays Minecraft without mods: none loads and the Mods page lists none.
++const ONESHOT_NO_MODS: bool = true;
++
+ impl Game<'_> {
+     /// Lists the installed mods on the Mods page. Content mods load with the resources
+     /// (`content_root`); native ones are built into the game (`native_hooks.rs`). WebAssembly code
+@@ -425,7 +429,7 @@ impl Game<'_> {
+     /// (`tell_native_now`).
+     pub(super) fn start_mods(&mut self) {
+         let dir = Self::game_dir().join(mod_list::DIR);
+-        let mut paths = horizon_mods::find(&dir);
++        let mut paths = if ONESHOT_NO_MODS { Vec::new() } else { horizon_mods::find(&dir) };
+         paths.retain(|p| !self.mods.dev.contains(p));
+         paths.extend(self.mods.dev.iter().cloned());
+         let (mut content_ids, mut live_ids) = Default::default();
+diff --git a/crates/horizon-client/src/game/prebuilt_mods.rs b/crates/horizon-client/src/game/prebuilt_mods.rs
+index 3f7cca0..3b5a995 100644
+--- a/crates/horizon-client/src/game/prebuilt_mods.rs
++++ b/crates/horizon-client/src/game/prebuilt_mods.rs
+@@ -25,8 +25,9 @@ use std::path::{Path, PathBuf};
+ /// The folder players drop `.hnmod` files into, beside `options.txt`.
+ pub(super) const DIR: &str = "mods";
+ 
+-/// Whether this game opens prebuilt mods: only where it can't build them.
+-pub(super) const ON: bool = cfg!(target_os = "android");
++/// Whether this game opens prebuilt mods: only where it can't build them. OneShot for Android plays without mods
++/// (they made the game far too slow on phones): mods are for the PC.
++pub(super) const ON: bool = false;
+ 
+ /// One prebuilt mod found at start.
+ pub(super) struct Prebuilt {
+diff --git a/packaging/android/java/dev/horizonlab/horizon/CatalogActivity.java b/packaging/android/java/dev/horizonlab/horizon/CatalogActivity.java
+index fdbf340..90e0164 100644
+--- a/packaging/android/java/dev/horizonlab/horizon/CatalogActivity.java
++++ b/packaging/android/java/dev/horizonlab/horizon/CatalogActivity.java
+@@ -50,7 +50,8 @@ public class CatalogActivity extends Activity {
+     private static final String REGISTRY = "https://horizon-rust.github.io/horizon-mods/index.json";
+     private static final int PAGE = 24;
+     /** ALL: Horizon's mods and the resource packs in one list (the PC's «Все»). */
+-    private static final int SKINS = 0, HD = 1, CAPES = 2, ALL = 3, PACKS = 4, MODS = 5, TABS = 6;
++    // OneShot for Android has no mods: only the skin and cape tabs are shown (the others stay for the PC's parity).
++    private static final int SKINS = 0, HD = 1, CAPES = 2, ALL = 3, PACKS = 4, MODS = 5, TABS = 3;
+     /** The team's HD skins: {"schema":1,"skins":[{"name","file","sha256","model","author"}]}, files beside it. */
+     private static final String HD_BASE = "https://raw.githubusercontent.com/A22D3THLEE/oneshot-horizon-data/main/hd-skins/";
+ 
+diff --git a/packaging/android/java/dev/horizonlab/horizon/FriendsPage.java b/packaging/android/java/dev/horizonlab/horizon/FriendsPage.java
+index 8cec666..becf2e2 100644
+--- a/packaging/android/java/dev/horizonlab/horizon/FriendsPage.java
++++ b/packaging/android/java/dev/horizonlab/horizon/FriendsPage.java
+@@ -285,6 +285,8 @@ final class FriendsPage extends Page {
+             }
+         });
+         pack.addView(restore, Ui.gap(a, 8));
++        // OneShot for Android plays without mods or packs from friends: the set stays on the PC.
++        pack.setVisibility(View.GONE);
+         less();
+     }
+ 
+diff --git a/packaging/android/java/dev/horizonlab/horizon/HomePage.java b/packaging/android/java/dev/horizonlab/horizon/HomePage.java
+index 16a44f2..e319af3 100644
+--- a/packaging/android/java/dev/horizonlab/horizon/HomePage.java
++++ b/packaging/android/java/dev/horizonlab/horizon/HomePage.java
+@@ -19,8 +19,6 @@ final class HomePage extends Page {
+             "Back your worlds up on the My maps tab before updating the game."},
+         {"Миры переносятся между телефоном и ПК обычным zip — экспорт и импорт на вкладке «Мои карты».",
+             "Worlds move between the phone and the PC as a plain zip: export and import on the My maps tab."},
+-        {"Набор модов и ресурспаков можно передать другу одним файлом .oneshotpack («Друзья»).",
+-            "Hand your mods and resource packs to a friend as one .oneshotpack file (Friends)."},
+         {"Игра тормозит на Snapdragon? Попробуйте драйвер Turnip: «Настройки» → «Дополнительно».",
+             "Slow on a Snapdragon? Try the Turnip driver: Settings > More."},
+         {"Вылет? Лог можно посмотреть и отправить: «Настройки» → «Дополнительно» — так проще найти причину.",
+diff --git a/packaging/android/java/dev/horizonlab/horizon/ModImportActivity.java b/packaging/android/java/dev/horizonlab/horizon/ModImportActivity.java
+index d48de41..47e1692 100644
+--- a/packaging/android/java/dev/horizonlab/horizon/ModImportActivity.java
++++ b/packaging/android/java/dev/horizonlab/horizon/ModImportActivity.java
+@@ -20,12 +20,21 @@ import java.io.OutputStream;
+  * files/horizon-mods/; the game reads both when it starts (game/prebuilt_mods.rs).
+  */
+ public class ModImportActivity extends Activity {
++    /** OneShot for Android: no mod is installed, whatever the file (the code below stays for the PC parity). */
++    private static final boolean NO_MODS = true;
+     private static final int PICK = 1;
+     private AlertDialog dialog;
+ 
+     @Override
+     protected void onCreate(Bundle state) {
+         super.onCreate(state);
++        // OneShot for Android plays Minecraft without mods: they made the game far too slow on phones.
++        toast(Ui.t("На телефоне OneShot без модов: моды работают только в лаунчере на ПК.",
++                "OneShot on phones has no mods: mods work in the PC launcher only."));
++        if (NO_MODS) {
++            finish();
++            return;
++        }
+         Intent intent = getIntent();
+         Uri uri = null;
+         if (Intent.ACTION_SEND.equals(intent.getAction())) {
+diff --git a/packaging/android/java/dev/horizonlab/horizon/ProfileActivity.java b/packaging/android/java/dev/horizonlab/horizon/ProfileActivity.java
+index 361a287..4ea1b90 100644
+--- a/packaging/android/java/dev/horizonlab/horizon/ProfileActivity.java
++++ b/packaging/android/java/dev/horizonlab/horizon/ProfileActivity.java
+@@ -136,6 +136,8 @@ public class ProfileActivity extends Activity implements View.OnClickListener {
+             tabs[i] = t;
+             nav.addView(t, Ui.gap(this, i == 0 ? 0 : 2));
+         }
++        // OneShot for Android plays without mods: no Mods page.
++        tabs[CONTENT].setVisibility(View.GONE);
+         // The tabs shrink to the height there is (down to 32 dp each); what still does not
+         // fit scrolls, PLAY stays, and the faded edge shows that there is more.
+         final ScrollView navScroll = new ScrollView(this);
