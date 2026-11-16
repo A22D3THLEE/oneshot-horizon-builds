@@ -83,7 +83,6 @@ def main():
             if rel.startswith("/") or ".." in rel.split("/"):
                 continue
             target = f"{out}/{mod_id}/{rel}"
-            import os
             os.makedirs(os.path.dirname(target), exist_ok=True)
             content = bundle.read(name)
             if rel == "horizon-mixin.toml":
