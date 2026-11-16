@@ -1,3 +1,20 @@
+diff --git a/crates/horizon-client-render/src/options_ui.rs b/crates/horizon-client-render/src/options_ui.rs
+index f3722b3..1b3f392 100644
+--- a/crates/horizon-client-render/src/options_ui.rs
++++ b/crates/horizon-client-render/src/options_ui.rs
+@@ -3106,10 +3106,9 @@ impl OptionsUi {
+                     ),
+                     ("options.accessibility", Some(Page::Accessibility)),
+                     // Vanilla's Telemetry Data and Credits slots: Horizon's
+-                    // settings and its mods, as a mod adds its button here.
+-                    // Credits & Attribution (WinScreen's credits) follows them.
++                    // settings, then Credits & Attribution (WinScreen's credits).
++                    // OneShot for Android plays without mods: no Mods button.
+                     ("horizon.pages.open.horizon_settings", Some(Page::Horizon)),
+-                    ("horizon.pages.open.mods", Some(Page::Mods)),
+                     ("options.credits_and_attribution", Some(Page::Credits)),
+                 ];
+                 let rows = entries.len().div_ceil(2) as f32;
 diff --git a/crates/horizon-client/src/game/mods.rs b/crates/horizon-client/src/game/mods.rs
 index 23fa58b..13af12f 100644
 --- a/crates/horizon-client/src/game/mods.rs
@@ -62,9 +79,18 @@ index fdbf340..90e0164 100644
      private static final String HD_BASE = "https://raw.githubusercontent.com/A22D3THLEE/oneshot-horizon-data/main/hd-skins/";
  
 diff --git a/packaging/android/java/dev/horizonlab/horizon/FriendsPage.java b/packaging/android/java/dev/horizonlab/horizon/FriendsPage.java
-index 8cec666..becf2e2 100644
+index 8cec666..32b305a 100644
 --- a/packaging/android/java/dev/horizonlab/horizon/FriendsPage.java
 +++ b/packaging/android/java/dev/horizonlab/horizon/FriendsPage.java
+@@ -132,7 +132,7 @@ final class FriendsPage extends Page {
+         });
+         buttons(join, paste, clear);
+ 
+-        more(Ui.t("Дополнительно: сервер Oneshot, наборы модов", "More: the Oneshot server, mod sets"));
++        more(Ui.t("Дополнительно: сервер Oneshot", "More: the Oneshot server"));
+         buildServerAndPacks();
+     }
+ 
 @@ -285,6 +285,8 @@ final class FriendsPage extends Page {
              }
          });
