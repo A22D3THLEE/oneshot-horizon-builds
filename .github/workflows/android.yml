@@ -1,4 +1,6 @@
 name: Build Oneshot Horizon for Android
+# A build with native mods is named after them, so the builds workflow (mods-builds.yml) sees one already running.
+run-name: ${{ inputs.mods != '' && format('Android + mods {0}', inputs.mods) || 'Android' }}
 # Builds an Android APK (arm64) of Horizon by hand. The source is the unofficial Android port of Rayan-XOO
 # (MIT; a fork of horizon-rust/horizon with the Android layer: NativeActivity, touch controls, setup screen),
 # pinned to a commit, with Oneshot's patches on top when `patches` is on. The APK is a workflow artifact; with
@@ -35,9 +37,10 @@ on:
         default: ''
 permissions:
   contents: write
+# Plain builds replace each other; a build with native mods (one player's set) never cancels another set's.
 concurrency:
-  group: oneshot-android
-  cancel-in-progress: true
+  group: oneshot-android-${{ inputs.mods }}
+  cancel-in-progress: ${{ inputs.mods == '' }}
 env:
   PORT: Rayan-XOO/horizon
   # Data packs (horizon-derived.zip) per port commit: a repository of their own, apart from the builds.
@@ -136,7 +139,7 @@ jobs:
           echo "Native hooks API: $api, port commit: $commit"
           printf '%s\n' "$MODS" > wanted.txt
           curl -fsSL https://horizon-rust.github.io/horizon-mods/index.json -o index.json
-          python3 oneshot/tools/pick_mods.py index.json wanted.txt "$api" "$commit" mods try-pinned > picked.txt
+          CONTENT_DIR=content python3 oneshot/tools/pick_mods.py index.json wanted.txt "$api" "$commit" mods try-pinned > picked.txt
           cat picked.txt
           [[ -s picked.txt ]] || { echo "::error::none of the mods can be built: $MODS"; exit 1; }
           # One horizon-mixins for all: the newest of the versions the mods were made with (it reads the older ones).
@@ -178,6 +181,10 @@ jobs:
           rsync -a --exclude .git --exclude target modded/ src/
           mods=$(paste -sd';' taken.txt)
           echo "NATIVE_MODS=$mods" >> "$GITHUB_ENV"
+          # The content (items, models, sounds) of the mods built in: the game loads it as content mods.
+          mkdir -p content-built
+          for k in "${taken[@]}"; do [[ -f "content/$k.hmod" ]] && cp "content/$k.hmod" content-built/; done
+          echo "NATIVE_LEFT=${left# }" >> "$GITHUB_ENV"
           { echo "### Native mods"; echo "built in: $mods"; echo "left out:${left:- none}"; } >> "$GITHUB_STEP_SUMMARY"
       - uses: actions/setup-java@v4
         with:
@@ -254,17 +261,39 @@ jobs:
         env:
           GH_TOKEN: ${{ github.token }}
           PATCHES: ${{ inputs.patches }}
+          MODS_ASKED: ${{ inputs.mods }}
         run: |
           set -euo pipefail
           if [[ -z "${SIGNED:-}" ]]; then
             echo "::error::publish needs the signing secrets: an APK with a throwaway key updates nobody"; exit 1
           fi
-          # An APK with native mods is one player's: it is never the update everyone is offered.
+          sha=$(cut -d' ' -f1 src/target/android/horizon.apk.sha256)
+          # An APK with native mods is one player's: never the update everyone is offered, but a release of its
+          # own, android-mods-<key> (key: SHA-256 of the asked ids, sorted, comma-joined, first 12 hex), replaced
+          # by each new build of the same set. The app reads its build.txt to know it is ready.
           if [[ -n "${NATIVE_MODS:-}" ]]; then
-            echo "::error::an APK with native mods is not published as the app's update"; exit 1
+            asked=$(printf '%s\n' "$MODS_ASKED" | tr ',' '\n' | sed 's/[[:space:]]//g' | { grep -E '^[a-z0-9_]+$' || true; } | sort -u | paste -sd',')
+            key=$(printf '%s' "$asked" | sha256sum | cut -c1-12)
+            tag="android-mods-$key"
+            content=$(cd content-built && ls *.hmod 2>/dev/null | paste -sd',' || true)
+            printf 'versionCode=%s\nversionName=%s\nsha256=%s\nasked=%s\nmods=%s\nleft=%s\ncontent=%s\n' \
+              "$VERSION_CODE" "$VERSION_NAME" "$sha" "$asked" "$NATIVE_MODS" "${NATIVE_LEFT:-}" "$content" > build.txt
+            cat build.txt
+            files=(src/target/android/horizon.apk src/target/android/horizon.apk.sha256 build.txt)
+            for f in content-built/*.hmod; do [[ -e "$f" ]] && files+=("$f"); done
+            gh release delete "$tag" -R "$GITHUB_REPOSITORY" -y --cleanup-tag 2>/dev/null || true
+            gh release create "$tag" -R "$GITHUB_REPOSITORY" --target "$GITHUB_SHA" --prerelease \
+              --title "OneShot Android $VERSION_NAME + $asked" \
+              --notes "OneShot for Android with native mods built in, for the players who asked for: $asked" \
+              "${files[@]}"
+            echo "release: $tag" >> "$GITHUB_STEP_SUMMARY"
+            # Keep the 20 newest sets: the PC launcher reads the first page of the release list.
+            gh release list -R "$GITHUB_REPOSITORY" --limit 200 --json tagName,createdAt -q '.[] | select(.tagName | startswith("android-mods-")) | .createdAt + " " + .tagName' \
+              | sort -r | tail -n +21 | cut -d' ' -f2 \
+              | while read -r old; do gh release delete "$old" -R "$GITHUB_REPOSITORY" -y --cleanup-tag; done
+            exit 0
           fi
           tag="android-$VERSION_CODE"
-          sha=$(cut -d' ' -f1 src/target/android/horizon.apk.sha256)
           # What is new: the "- " lines of docs/android-changes.md added since the commit of the newest
           # android-* release (the first 12 when that commit is unknown); the app shows them on start.
           prev=$(gh release list -R "$GITHUB_REPOSITORY" --limit 100 --json tagName -q '.[].tagName' \

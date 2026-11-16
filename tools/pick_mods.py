@@ -12,6 +12,7 @@ official launcher does in its copy. Prints one line per mod taken: "<id> <versio
 import hashlib
 import io
 import json
+import os
 import re
 import sys
 import urllib.request
@@ -53,6 +54,16 @@ def main():
             continue
         bundle = zipfile.ZipFile(io.BytesIO(data))
         meta = json.loads(bundle.read("horizon-native.json"))
+        # Its content (horizon-mod.toml at the root: items, models, sounds), as a content mod of its own for the
+        # game to load beside the code built in: the bundle without its sources.
+        content_dir = os.environ.get("CONTENT_DIR")
+        if content_dir and "horizon-mod.toml" in bundle.namelist():
+            os.makedirs(content_dir, exist_ok=True)
+            with zipfile.ZipFile(os.path.join(content_dir, mod_id + ".hmod"), "w", zipfile.ZIP_DEFLATED) as out:
+                for info in bundle.infolist():
+                    if info.filename.startswith("mixins/") or info.filename == "horizon-native.json":
+                        continue
+                    out.writestr(info, bundle.read(info))
         hooks = meta.get("hooks")
         if hooks is None:
             # Pinned to one Horizon commit: only that one is sure to build.
