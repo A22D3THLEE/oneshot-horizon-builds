@@ -59,11 +59,11 @@ def main():
         content_dir = os.environ.get("CONTENT_DIR")
         if content_dir and "horizon-mod.toml" in bundle.namelist():
             os.makedirs(content_dir, exist_ok=True)
-            with zipfile.ZipFile(os.path.join(content_dir, mod_id + ".hmod"), "w", zipfile.ZIP_DEFLATED) as out:
+            with zipfile.ZipFile(os.path.join(content_dir, mod_id + ".hmod"), "w", zipfile.ZIP_DEFLATED) as hmod:
                 for info in bundle.infolist():
                     if info.filename.startswith("mixins/") or info.filename == "horizon-native.json":
                         continue
-                    out.writestr(info, bundle.read(info))
+                    hmod.writestr(info, bundle.read(info))
         hooks = meta.get("hooks")
         if hooks is None:
             # Pinned to one Horizon commit: only that one is sure to build.
