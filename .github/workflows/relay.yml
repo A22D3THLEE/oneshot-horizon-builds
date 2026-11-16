@@ -43,11 +43,12 @@ jobs:
           targets: x86_64-unknown-linux-musl
       - run: sudo apt-get install -y musl-tools
       - name: Test
-        # The wire protocol and the `online` query (relay/patches/0002).
+        # The wire protocol, the `online` query (relay/patches/0002) and `build` requests (0003).
         run: |
           cd src
           cargo test --locked -p horizon-friends --lib wire:: --message-format short
           cargo test --locked -p horizon-relay --test online --message-format short
+          cargo test --locked -p horizon-relay --test builds --message-format short
       - name: Build
         run: |
           cd src
