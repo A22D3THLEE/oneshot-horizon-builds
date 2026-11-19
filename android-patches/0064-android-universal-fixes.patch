@@ -1,0 +1,289 @@
+From fcfe61ad8cb2c113bfc0d72f47ab1f6e204c9091 Mon Sep 17 00:00:00 2001
+From: oneshot <oneshot@localhost>
+Date: Thu, 19 Nov 2026 12:40:15 +0300
+Subject: [PATCH] 0064 android: universal fixes: Turnip only on Adreno, no zip
+ handler, safe backup and restore
+
+- ModImportActivity has no intent filters: OneShot (no mods on Android) is not in
+  Open with / Share for every zip.
+- The Turnip block, the first-run driver button and the Turnip tip only on
+  Adreno GPUs; the first-run button opens Settings with More unfolded.
+- Backup: none made without worlds; the old backup goes only once the new one
+  is in place.
+- Restore: the backup is copied before the worlds are moved aside; a failed
+  copy leaves them where they were, and saves-replaced is kept until then.
+- World import clears left-over .importing folders and checks canonical paths;
+  the world being exported survives the process ending under the picker.
+
+Co-Authored-By: Claude Opus 5.5 <noreply@anthropic.com>
+---
+ packaging/android/AndroidManifest.xml         | 34 ++----------
+ .../java/dev/horizonlab/horizon/HomePage.java |  5 +-
+ .../horizonlab/horizon/ProfileActivity.java   | 28 +++++++---
+ .../dev/horizonlab/horizon/SetupActivity.java |  5 +-
+ .../java/dev/horizonlab/horizon/Turnip.java   | 12 +++++
+ .../dev/horizonlab/horizon/WorldsPage.java    | 52 ++++++++++++++++---
+ 6 files changed, 90 insertions(+), 46 deletions(-)
+
+diff --git a/packaging/android/AndroidManifest.xml b/packaging/android/AndroidManifest.xml
+index 0d4d9d4..d0522ac 100644
+--- a/packaging/android/AndroidManifest.xml
++++ b/packaging/android/AndroidManifest.xml
+@@ -79,40 +79,12 @@
+             android:theme="@style/HorizonProfile"
+             android:configChanges="orientation|screenSize|screenLayout|keyboardHidden|keyboard|navigation|uiMode|smallestScreenSize"
+             android:windowSoftInputMode="adjustResize" />
++        <!-- OneShot for Android has no mods: no "Open with" / "Share" entry for zip files any more. -->
+         <activity
+             android:name=".ModImportActivity"
+-            android:exported="true"
++            android:exported="false"
+             android:label="@string/app_name"
+-            android:theme="@android:style/Theme.Translucent.NoTitleBar">
+-            <intent-filter android:label="Install mod">
+-                <action android:name="android.intent.action.SEND" />
+-                <category android:name="android.intent.category.DEFAULT" />
+-                <data android:mimeType="application/octet-stream" />
+-                <data android:mimeType="application/zip" />
+-                <data android:mimeType="application/x-zip-compressed" />
+-            </intent-filter>
+-            <intent-filter android:label="Install mod">
+-                <action android:name="android.intent.action.VIEW" />
+-                <category android:name="android.intent.category.DEFAULT" />
+-                <category android:name="android.intent.category.BROWSABLE" />
+-                <data android:scheme="content" />
+-                <data android:host="*" />
+-                <data android:mimeType="application/octet-stream" />
+-                <data android:mimeType="application/zip" />
+-            </intent-filter>
+-            <!-- File managers that send any type: matched by the .hnmod / .hmod name. -->
+-            <intent-filter android:label="Install mod">
+-                <action android:name="android.intent.action.VIEW" />
+-                <category android:name="android.intent.category.DEFAULT" />
+-                <data android:scheme="content" />
+-                <data android:host="*" />
+-                <data android:mimeType="*/*" />
+-                <data android:pathPattern=".*\\.hnmod" />
+-                <data android:pathPattern=".*\\..*\\.hnmod" />
+-                <data android:pathPattern=".*\\.hmod" />
+-                <data android:pathPattern=".*\\..*\\.hmod" />
+-            </intent-filter>
+-        </activity>
++            android:theme="@android:style/Theme.Translucent.NoTitleBar" />
+         <service
+             android:name=".SetupService"
+             android:exported="false"
+diff --git a/packaging/android/java/dev/horizonlab/horizon/HomePage.java b/packaging/android/java/dev/horizonlab/horizon/HomePage.java
+index e319af3..0ef31c4 100644
+--- a/packaging/android/java/dev/horizonlab/horizon/HomePage.java
++++ b/packaging/android/java/dev/horizonlab/horizon/HomePage.java
+@@ -74,7 +74,10 @@ final class HomePage extends Page {
+         weekTotal = note(wk, "");
+ 
+         LinearLayout tip = block(Ui.t("Совет", "Tip"));
+-        String[] t = TIPS[Calendar.getInstance().get(Calendar.DAY_OF_YEAR) % TIPS.length];
++        // The Turnip tip only where Turnip can run (an Adreno GPU).
++        java.util.List<String[]> tips = new java.util.ArrayList<String[]>();
++        for (String[] x : TIPS) if (Turnip.supported() || !x[1].contains("Turnip")) tips.add(x);
++        String[] t = tips.get(Calendar.getInstance().get(Calendar.DAY_OF_YEAR) % tips.size());
+         tip.addView(Ui.text(a, Ui.t(t[0], t[1]), 14, Ui.TEXT, false));
+         less();
+     }
+diff --git a/packaging/android/java/dev/horizonlab/horizon/ProfileActivity.java b/packaging/android/java/dev/horizonlab/horizon/ProfileActivity.java
+index 4ea1b90..2c0a3c2 100644
+--- a/packaging/android/java/dev/horizonlab/horizon/ProfileActivity.java
++++ b/packaging/android/java/dev/horizonlab/horizon/ProfileActivity.java
+@@ -219,7 +219,10 @@ public class ProfileActivity extends Activity implements View.OnClickListener {
+         updateModel();
+         showPreview();
+         checkUpdate(state == null);
+-        show(state == null ? HOME : state.getInt("page", HOME));
++        // The first-run screen's driver button opens Settings with its folded part open.
++        show(state == null ? getIntent().getIntExtra("page", HOME) : state.getInt("page", HOME));
++        if (state == null && getIntent().getBooleanExtra("unfold", false)) settings.unfold();
++        if (state != null && exportWorld == null) exportWorld = state.getString("exportWorld");
+ 
+         if (state == null) {
+             if (PlayStats.fold(this)) {
+@@ -234,6 +237,9 @@ public class ProfileActivity extends Activity implements View.OnClickListener {
+     protected void onSaveInstanceState(Bundle out) {
+         super.onSaveInstanceState(out);
+         out.putInt("page", current);
++        // A low-memory phone may end the process while the file picker is open: the world being
++        // exported must still be known when the picker answers.
++        if (exportWorld != null) out.putString("exportWorld", exportWorld);
+     }
+ 
+     // ---- Pages and what they share --------------------------------------------------------------
+@@ -457,14 +463,20 @@ public class ProfileActivity extends Activity implements View.OnClickListener {
+                     "The custom driver did not start last time, so the game went back to the system one. Try another Turnip build."),
+                     12, Ui.WARN, false));
+         }
+-        pg.note(g, Ui.t(
+-                "Zip с Turnip (libvulkan_freedreno.so). На части Snapdragon быстрее системного. Если игра с ним не стартует, следующий запуск будет на системном.",
+-                "A Turnip zip (libvulkan_freedreno.so). Faster than the system driver on some Snapdragons. If the game fails to start with it, the next launch uses the system one."));
+         driver = Ui.button(this, Ui.t("Установить Turnip", "Install Turnip"), false);
+         driver.setOnClickListener(this);
+         systemDriver = Ui.button(this, Ui.t("Системный", "System"), false);
+         systemDriver.setOnClickListener(this);
+-        pg.buttons(g, driver, systemDriver);
++        if (Turnip.supported() || !Turnip.selected(this).isEmpty()) {
++            pg.note(g, Ui.t(
++                    "Zip с Turnip (libvulkan_freedreno.so). На части Snapdragon быстрее системного. Если игра с ним не стартует, следующий запуск будет на системном.",
++                    "A Turnip zip (libvulkan_freedreno.so). Faster than the system driver on some Snapdragons. If the game fails to start with it, the next launch uses the system one."));
++            pg.buttons(g, driver, systemDriver);
++        } else {
++            // Turnip is a driver for Adreno GPUs only: this phone's GPU is another make.
++            pg.note(g, Ui.t("Свой драйвер (Turnip) бывает только для Snapdragon, на этом устройстве игра работает на системном.",
++                    "A custom driver (Turnip) exists for Snapdragon only: on this device the game uses the system one."));
++        }
+         final File safeMode = new File(getFilesDir(), "safe-mode.txt");
+         // The driver needs the player's eye: show the folded part of Settings open.
+         if (safeMode.isFile() || new File(getFilesDir(), "vulkan-driver.failed").isFile()) pg.unfold();
+@@ -956,6 +968,9 @@ public class ProfileActivity extends Activity implements View.OnClickListener {
+     String importWorld(InputStream raw) throws Exception {
+         File saves = new File(dir, "saves");
+         saves.mkdirs();
++        // Left-overs of an import the system cut short (the app closed mid-way) take space only.
++        File[] old = saves.listFiles();
++        if (old != null) for (File f : old) if (f.getName().endsWith(".importing")) deleteTree(f);
+         File staging = new File(saves, "import-" + System.currentTimeMillis() + ".importing");
+         staging.mkdirs();
+         String prefix = null;
+@@ -968,8 +983,9 @@ public class ProfileActivity extends Activity implements View.OnClickListener {
+             byte[] buf = new byte[65536];
+             while ((e = zin.getNextEntry()) != null) {
+                 String n = e.getName().replace('\\', '/');
+-                if (n.startsWith("/") || n.contains("../") || n.equals("..")) continue;
++                if (n.startsWith("/") || n.contains("../") || n.equals("..") || n.endsWith("/..")) continue;
+                 File out = new File(all, n);
++                if (!out.getCanonicalPath().startsWith(all.getCanonicalPath() + File.separator)) continue;
+                 if (e.isDirectory()) {
+                     out.mkdirs();
+                     continue;
+diff --git a/packaging/android/java/dev/horizonlab/horizon/SetupActivity.java b/packaging/android/java/dev/horizonlab/horizon/SetupActivity.java
+index c50d31a..db947d0 100644
+--- a/packaging/android/java/dev/horizonlab/horizon/SetupActivity.java
++++ b/packaging/android/java/dev/horizonlab/horizon/SetupActivity.java
+@@ -129,9 +129,12 @@ public class SetupActivity extends Activity
+         Button turnip = Ui.button(this, Ui.t("Драйвер Vulkan (экспериментально)", "Vulkan driver (experimental)"), false);
+         turnip.setOnClickListener(new View.OnClickListener() {
+             public void onClick(View v) {
+-                startActivity(new Intent(SetupActivity.this, ProfileActivity.class));
++                startActivity(new Intent(SetupActivity.this, ProfileActivity.class)
++                        .putExtra("page", ProfileActivity.SETTINGS).putExtra("unfold", true));
+             }
+         });
++        // Turnip is for Adreno GPUs only: elsewhere the button would lead nowhere useful.
++        if (!Turnip.supported()) turnip.setVisibility(View.GONE);
+         card.addView(turnip, Ui.gap(this, 8));
+         profile = Ui.button(this, Ui.t("Ник и скин", "Name and skin"), false);
+         profile.setOnClickListener(this);
+diff --git a/packaging/android/java/dev/horizonlab/horizon/Turnip.java b/packaging/android/java/dev/horizonlab/horizon/Turnip.java
+index 47d716f..986316d 100644
+--- a/packaging/android/java/dev/horizonlab/horizon/Turnip.java
++++ b/packaging/android/java/dev/horizonlab/horizon/Turnip.java
+@@ -37,8 +37,20 @@ final class Turnip {
+         }
+     }
+ 
++    /**
++     * Whether the GPU is an Adreno (a Qualcomm Snapdragon): Turnip drives only those. Mali, PowerVR
++     * and Xclipse phones (MediaTek, Exynos, Unisoc) keep their system driver and are not offered it.
++     */
++    static boolean supported() {
++        if (new File("/sys/class/kgsl").exists() || new File("/dev/kgsl-3d0").exists()) return true;
++        String soc = android.os.Build.VERSION.SDK_INT >= 31 ? android.os.Build.SOC_MANUFACTURER : "";
++        String hw = (android.os.Build.HARDWARE + " " + android.os.Build.BOARD + " " + soc).toLowerCase(java.util.Locale.ROOT);
++        return hw.contains("qcom") || hw.contains("qti") || hw.contains("qualcomm");
++    }
++
+     static String status(Context c) {
+         String p = selected(c);
++        if (p.isEmpty() && !supported()) return Ui.t("Сейчас: системный драйвер", "Now: the system driver");
+         if (p.isEmpty()) return Ui.t("Сейчас: системный драйвер Qualcomm", "Now: the system Qualcomm driver");
+         return Ui.t("Сейчас: ", "Now: ") + new File(p).getName();
+     }
+diff --git a/packaging/android/java/dev/horizonlab/horizon/WorldsPage.java b/packaging/android/java/dev/horizonlab/horizon/WorldsPage.java
+index 96c89f1..ce49d4f 100644
+--- a/packaging/android/java/dev/horizonlab/horizon/WorldsPage.java
++++ b/packaging/android/java/dev/horizonlab/horizon/WorldsPage.java
+@@ -220,16 +220,35 @@ final class WorldsPage extends Page {
+                     "Leave the world in the game first: an open world is still being written."), Ui.WARN);
+             return;
+         }
++        // No worlds: an empty backup would replace a good one.
++        if (worlds(a.dir).isEmpty()) {
++            a.say(Ui.t("Миров нет — бэкап не нужен (прошлый бэкап не тронут).", "No worlds: nothing to back up (the last backup is kept)."), Ui.WARN);
++            return;
++        }
+         run(new Job() {
+             public String run() throws Exception {
+                 File backups = new File(a.dir, "backups");
+                 File tmp = new File(backups, "saves.tmp");
+                 ProfileActivity.deleteTree(tmp);
+                 tmp.mkdirs();
+-                long bytes = copyTree(new File(a.dir, "saves"), tmp);
++                long bytes;
++                try {
++                    bytes = copyTree(new File(a.dir, "saves"), tmp);
++                } catch (Exception e) {
++                    // Out of space, say: the last backup stays as it was.
++                    ProfileActivity.deleteTree(tmp);
++                    throw e;
++                }
+                 File dst = new File(backups, "saves");
+-                ProfileActivity.deleteTree(dst);
+-                if (!tmp.renameTo(dst)) throw new Exception("rename");
++                File prev = new File(backups, "saves.prev");
++                ProfileActivity.deleteTree(prev);
++                // The old backup goes only once the new one is in its place.
++                if (dst.exists() && !dst.renameTo(prev)) throw new Exception("rename");
++                if (!tmp.renameTo(dst)) {
++                    prev.renameTo(dst);
++                    throw new Exception("rename");
++                }
++                ProfileActivity.deleteTree(prev);
+                 dst.setLastModified(System.currentTimeMillis());
+                 return Ui.t("Бэкап готов: ", "Backup done: ") + Ui.size(bytes);
+             }
+@@ -252,13 +271,32 @@ final class WorldsPage extends Page {
+                                 File backups = new File(a.dir, "backups");
+                                 File saves = new File(a.dir, "saves");
+                                 File aside = new File(backups, "saves-replaced");
+-                                ProfileActivity.deleteTree(aside);
+-                                if (saves.exists() && !saves.renameTo(aside)) throw new Exception("move");
++                                // The copy first: if it fails (no space, the app closed), the worlds stay where they are.
+                                 File tmp = new File(a.dir, "saves.restoring");
+                                 ProfileActivity.deleteTree(tmp);
+                                 tmp.mkdirs();
+-                                copyTree(new File(backups, "saves"), tmp);
+-                                if (!tmp.renameTo(saves)) throw new Exception("rename");
++                                try {
++                                    copyTree(new File(backups, "saves"), tmp);
++                                } catch (Exception e) {
++                                    ProfileActivity.deleteTree(tmp);
++                                    throw e;
++                                }
++                                // The worlds put aside before go only once the current ones are safely aside.
++                                File next = new File(backups, "saves-replaced.new");
++                                ProfileActivity.deleteTree(next);
++                                if (saves.exists() && !saves.renameTo(next)) {
++                                    ProfileActivity.deleteTree(tmp);
++                                    throw new Exception("move");
++                                }
++                                if (!tmp.renameTo(saves)) {
++                                    next.renameTo(saves);
++                                    ProfileActivity.deleteTree(tmp);
++                                    throw new Exception("rename");
++                                }
++                                if (next.exists()) {
++                                    ProfileActivity.deleteTree(aside);
++                                    next.renameTo(aside);
++                                }
+                                 return Ui.t("Миры восстановлены из бэкапа.", "Worlds restored from the backup.");
+                             }
+                         });
+-- 
+2.49.0.windows.1
+
