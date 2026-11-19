@@ -1,5 +1,5 @@
 name: Build Oneshot Horizon for Android
-# Builds an Android APK (arm64) of Horizon by hand. The source is the unofficial Android port of Rayan-XOO
+# Builds an Android APK (arm64-v8a + armeabi-v7a) of Horizon by hand. The source is the unofficial Android port of Rayan-XOO
 # (MIT; a fork of horizon-rust/horizon with the Android layer: NativeActivity, touch controls, setup screen),
 # pinned to a commit, with Oneshot's patches on top when `patches` is on. The APK is a workflow artifact; with
 # `publish` on (and the signing secrets set) it is also a release tagged android-<versionCode>, which the app's
@@ -121,12 +121,17 @@ jobs:
         with:
           distribution: temurin
           java-version: '21'
+      - name: Room on the disk (two Android targets)
+        run: |
+          sudo rm -rf /usr/share/dotnet /opt/ghc /usr/local/share/boost /opt/hostedtoolcache/CodeQL || true
+          df -h /
       - name: Rust and cargo-ndk
         run: |
           set -euo pipefail
           rustup toolchain install stable --profile minimal
           rustup default stable
-          rustup target add aarch64-linux-android
+          # armv7 too: a 32-bit Android phone (many cheap and Android Go ones) installs the APK only with it.
+          rustup target add aarch64-linux-android armv7-linux-androideabi
           cargo install cargo-ndk --locked
           rustc --version
       - name: Android SDK and NDK
@@ -143,7 +148,8 @@ jobs:
             ~/.cargo/registry
             ~/.cargo/git
             src/target
-          key: android-${{ inputs.profile }}-${{ hashFiles('src/Cargo.lock') }}
+          # abi2: the armv7 build is in it too (a new key, so the cache is saved again with it).
+          key: android-${{ inputs.profile }}-abi2-${{ hashFiles('src/Cargo.lock') }}
           restore-keys: android-${{ inputs.profile }}-
       - name: The signing key
         env:

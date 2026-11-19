@@ -1,0 +1,191 @@
+From b841779b2e4e313f6569cb56793000d5f3e4d767 Mon Sep 17 00:00:00 2001
+From: oneshot <oneshot@localhost>
+Date: Thu, 19 Nov 2026 13:10:11 +0300
+Subject: [PATCH] 0065 android: 32-bit phones, the invite code's secret in
+ internal storage
+
+- build_apk.sh builds armeabi-v7a beside arm64-v8a (): phones on a 32-bit
+  Android install the APK; a 64-bit one loads the arm64 library.
+- friends-identity.txt (the lasting code's secret) and friends-book.txt move from
+  the external files folder (readable by apps with the storage permission on
+  Android 8-10) to internal storage: android_main.rs points
+  HORIZON_FRIENDS_IDENTITY there and moves old files in (copy, rename, delete);
+  the launcher's FriendsIdentity.moveIn does the same before anything reads them.
+- Turnip is offered in a 64-bit game only (its builds are 64-bit).
+
+Co-Authored-By: Claude Opus 5.5 <noreply@anthropic.com>
+---
+ crates/horizon-client/src/android_main.rs     | 28 ++++++++++++++-
+ packaging/android/build_apk.sh                | 18 ++++++----
+ .../horizonlab/horizon/FriendsIdentity.java   | 34 ++++++++++++++++++-
+ .../dev/horizonlab/horizon/SetupActivity.java |  2 ++
+ .../java/dev/horizonlab/horizon/Turnip.java   |  2 ++
+ 5 files changed, 76 insertions(+), 8 deletions(-)
+
+diff --git a/crates/horizon-client/src/android_main.rs b/crates/horizon-client/src/android_main.rs
+index 3fc5e11..b9c6783 100644
+--- a/crates/horizon-client/src/android_main.rs
++++ b/crates/horizon-client/src/android_main.rs
+@@ -12,6 +12,25 @@ use winit::platform::android::activity::AndroidApp;
+ 
+ static MOD_API_LEVEL: [u8; 27] = horizon_mods::api_level::MARK;
+ 
++/// Oneshot: moves `from` to `to` when `to` is not there yet (a copy, then a rename, so `to` is never
++/// half written), and drops `from` once `to` exists. Nothing when they are the same file.
++fn move_in(from: &std::path::Path, to: &std::path::Path) {
++    if from == to || !from.is_file() {
++        return;
++    }
++    if !to.exists() {
++        if let Some(dir) = to.parent() {
++            let _ = std::fs::create_dir_all(dir);
++        }
++        let tmp = to.with_extension("txt.moving");
++        if std::fs::copy(from, &tmp).is_err() || std::fs::rename(&tmp, to).is_err() {
++            let _ = std::fs::remove_file(&tmp);
++            return;
++        }
++    }
++    let _ = std::fs::remove_file(from);
++}
++
+ /// Called by android-activity on its own thread once the activity starts.
+ #[unsafe(no_mangle)]
+ fn android_main(app: AndroidApp) {
+@@ -36,8 +55,15 @@ fn android_main(app: AndroidApp) {
+             std::env::set_var("HORIZON_ONESHOT_INVITE", home.join("invite-code.txt"));
+         }
+         // Oneshot: the kept short code (horizon-friends identity.rs), which the launcher shows and reissues.
++        // It holds the code's secret, and the friends' book sits beside it: both in internal storage, as
++        // on Android 8-10 any app with the storage permission reads the external files folder. Files
++        // from before are moved in once (the launcher's FriendsIdentity.moveIn does the same).
+         if std::env::var_os("HORIZON_FRIENDS_IDENTITY").is_none() {
+-            std::env::set_var("HORIZON_FRIENDS_IDENTITY", home.join("friends-identity.txt"));
++            let private = app.internal_data_path().unwrap_or_else(|| home.clone());
++            for name in ["friends-identity.txt", "friends-book.txt"] {
++                move_in(&home.join(name), &private.join(name));
++            }
++            std::env::set_var("HORIZON_FRIENDS_IDENTITY", private.join("friends-identity.txt"));
+         }
+         if let Some(internal) = app.internal_data_path() {
+             std::env::set_var("HORIZON_CACHE", internal.join("horizon-cache"));
+diff --git a/packaging/android/build_apk.sh b/packaging/android/build_apk.sh
+index 3bf56b4..07f4e4d 100755
+--- a/packaging/android/build_apk.sh
++++ b/packaging/android/build_apk.sh
+@@ -1,5 +1,7 @@
+ #!/usr/bin/env bash
+-# Builds target/android/horizon.apk (arm64-v8a). Signed with $HORIZON_KEYSTORE if set, else the debug key. See ANDROID.md.
++# Builds target/android/horizon.apk (arm64-v8a and armeabi-v7a, or $ABIS). Signed with $HORIZON_KEYSTORE if set, else the debug key. See ANDROID.md.
++# Oneshot: the 32-bit armeabi-v7a library too, so phones on a 32-bit Android (many cheap and Android Go
++# ones) can install the game; a 64-bit phone loads the arm64 one.
+ set -euo pipefail
+ cd "$(dirname "$0")/../.."
+ : "${ANDROID_HOME:?set ANDROID_HOME to the Android SDK}"
+@@ -10,9 +12,12 @@ PLATFORM="$ANDROID_HOME/platforms/android-35/android.jar"
+ PROFILE="${PROFILE:-fast}"
+ OUT=target/android
+ rm -rf "$OUT/stage" && mkdir -p "$OUT/stage/lib"
+-cargo ndk -t arm64-v8a -P 26 -o "$OUT/jni" build -p horizon-android --profile "$PROFILE" ${CARGO_FLAGS:-}
+-mkdir -p "$OUT/stage/lib/arm64-v8a"
+-"$NDK"/toolchains/llvm/prebuilt/*/bin/llvm-strip -o "$OUT/stage/lib/arm64-v8a/libhorizon.so" "$OUT/jni/arm64-v8a/libhorizon.so"
++ABIS="${ABIS:-arm64-v8a armeabi-v7a}"
++for abi in $ABIS; do
++  cargo ndk -t "$abi" -P 26 -o "$OUT/jni" build -p horizon-android --profile "$PROFILE" ${CARGO_FLAGS:-}
++  mkdir -p "$OUT/stage/lib/$abi"
++  "$NDK"/toolchains/llvm/prebuilt/*/bin/llvm-strip -o "$OUT/stage/lib/$abi/libhorizon.so" "$OUT/jni/$abi/libhorizon.so"
++done
+ # HorizonActivity (the soft keyboard bridge) -> classes.dex.
+ rm -rf "$OUT/java" && mkdir -p "$OUT/java/classes"
+ "${JAVAC:-javac}" --release 8 -nowarn -classpath "$PLATFORM" -d "$OUT/java/classes" \
+@@ -22,12 +27,13 @@ rm -rf "$OUT/res" && mkdir -p "$OUT/res"
+ "$BT/aapt2" compile --dir packaging/android/res -o "$OUT/res/res.zip"
+ "$BT/aapt2" link -o "$OUT/unaligned.apk" --manifest packaging/android/AndroidManifest.xml -I "$PLATFORM" \
+   --min-sdk-version 26 --target-sdk-version 35 "$OUT/res/res.zip"
+-python3 - "$OUT" <<'PY'
++python3 - "$OUT" $ABIS <<'PY'
+ import sys, zipfile
+ out = sys.argv[1]
+ with zipfile.ZipFile(f"{out}/unaligned.apk", "a", zipfile.ZIP_DEFLATED) as z:
+     z.write(f"{out}/java/classes.dex", "classes.dex")
+-    z.write(f"{out}/stage/lib/arm64-v8a/libhorizon.so", "lib/arm64-v8a/libhorizon.so")
++    for abi in sys.argv[2:]:
++        z.write(f"{out}/stage/lib/{abi}/libhorizon.so", f"lib/{abi}/libhorizon.so")
+ PY
+ "$BT/zipalign" -f -p 4 "$OUT/unaligned.apk" "$OUT/aligned.apk"
+ if [ -n "${HORIZON_KEYSTORE:-}" ] && [ -f "$HORIZON_KEYSTORE" ]; then
+diff --git a/packaging/android/java/dev/horizonlab/horizon/FriendsIdentity.java b/packaging/android/java/dev/horizonlab/horizon/FriendsIdentity.java
+index 492b7d1..b1150f8 100644
+--- a/packaging/android/java/dev/horizonlab/horizon/FriendsIdentity.java
++++ b/packaging/android/java/dev/horizonlab/horizon/FriendsIdentity.java
+@@ -20,8 +20,40 @@ final class FriendsIdentity {
+ 
+     private FriendsIdentity() {}
+ 
++    /** In internal storage (android_main.rs HORIZON_FRIENDS_IDENTITY): the file holds the code's secret. */
+     static File file(Activity a) {
+-        return new File(SetupActivity.home(a), "friends-identity.txt");
++        moveIn(a);
++        return new File(a.getFilesDir(), "friends-identity.txt");
++    }
++
++    private static boolean moved;
++
++    /**
++     * The code's secret and the friends' book used to be in the game folder, on shared storage that
++     * any app with the storage permission reads on Android 8-10: moved into internal storage once
++     * (a copy, then a rename), and the old copies deleted. The game does the same when it starts.
++     */
++    static synchronized void moveIn(android.content.Context c) {
++        if (moved) return;
++        moved = true;
++        File from = new File(SetupActivity.home(c)), to = c.getFilesDir();
++        if (from.getAbsoluteFile().equals(to.getAbsoluteFile())) return;
++        for (String n : new String[] {"friends-identity.txt", "friends-book.txt"}) {
++            File old = new File(from, n), now = new File(to, n);
++            if (!old.isFile()) continue;
++            try {
++                if (!now.exists()) {
++                    File tmp = new File(to, n + ".moving");
++                    java.nio.file.Files.copy(old.toPath(), tmp.toPath(), java.nio.file.StandardCopyOption.REPLACE_EXISTING);
++                    if (!tmp.renameTo(now)) {
++                        tmp.delete();
++                        continue;
++                    }
++                }
++                old.delete();
++            } catch (Exception ignored) {
++            }
++        }
+     }
+ 
+     /** The code as NAME-SECR, made when the file is missing or broken; null when it can't be written. */
+diff --git a/packaging/android/java/dev/horizonlab/horizon/SetupActivity.java b/packaging/android/java/dev/horizonlab/horizon/SetupActivity.java
+index db947d0..b04a7e6 100644
+--- a/packaging/android/java/dev/horizonlab/horizon/SetupActivity.java
++++ b/packaging/android/java/dev/horizonlab/horizon/SetupActivity.java
+@@ -62,6 +62,8 @@ public class SetupActivity extends Activity
+     protected void onCreate(Bundle state) {
+         super.onCreate(state);
+         home = home(this);
++        // The invite code's secret goes to internal storage before the game or a page reads it.
++        FriendsIdentity.moveIn(this);
+         // Oneshot: an oneshot://join/CODE (or #CODE) link from the join page puts the code in the launcher.
+         android.net.Uri link = getIntent() == null ? null : getIntent().getData();
+         if (link != null && "oneshot".equals(link.getScheme())) {
+diff --git a/packaging/android/java/dev/horizonlab/horizon/Turnip.java b/packaging/android/java/dev/horizonlab/horizon/Turnip.java
+index 986316d..cd2f10f 100644
+--- a/packaging/android/java/dev/horizonlab/horizon/Turnip.java
++++ b/packaging/android/java/dev/horizonlab/horizon/Turnip.java
+@@ -42,6 +42,8 @@ final class Turnip {
+      * and Xclipse phones (MediaTek, Exynos, Unisoc) keep their system driver and are not offered it.
+      */
+     static boolean supported() {
++        // Turnip builds are 64-bit: the 32-bit game (armeabi-v7a) can't load one.
++        if (!android.os.Process.is64Bit()) return false;
+         if (new File("/sys/class/kgsl").exists() || new File("/dev/kgsl-3d0").exists()) return true;
+         String soc = android.os.Build.VERSION.SDK_INT >= 31 ? android.os.Build.SOC_MANUFACTURER : "";
+         String hw = (android.os.Build.HARDWARE + " " + android.os.Build.BOARD + " " + soc).toLowerCase(java.util.Locale.ROOT);
+-- 
+2.49.0.windows.1
+
